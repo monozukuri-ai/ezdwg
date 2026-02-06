@@ -1,14 +1,16 @@
 use crate::bit::BitReader;
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
+use std::borrow::Cow;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ObjectRecord<'a> {
     pub offset: u32,
     pub size: u32,
     pub body_start: usize,
     pub body_bit_pos: u8,
-    pub body: &'a [u8],
+    pub body: Cow<'a, [u8]>,
+    pub raw: Cow<'a, [u8]>,
 }
 
 impl<'a> ObjectRecord<'a> {
@@ -20,12 +22,12 @@ impl<'a> ObjectRecord<'a> {
 
     pub fn record_range(&self) -> (usize, usize) {
         let start = self.offset as usize;
-        let end = self.body_start + self.size as usize + 2;
+        let end = start + self.raw.len();
         (start, end)
     }
 
-    pub fn bit_reader(&self) -> BitReader<'a> {
-        let mut reader = BitReader::new(self.body);
+    pub fn bit_reader(&self) -> BitReader<'_> {
+        let mut reader = BitReader::new(self.body.as_ref());
         reader.set_pos(0, self.body_bit_pos);
         reader
     }
@@ -63,13 +65,28 @@ pub fn parse_object_record<'a>(bytes: &'a [u8], offset: u32) -> Result<ObjectRec
         .with_offset(offset as u64));
     }
 
+    let raw_end = end + 2;
     let body = &bytes[body_start..end];
+    let raw = &bytes[offset_usize..raw_end];
 
     Ok(ObjectRecord {
         offset,
         size,
         body_start,
         body_bit_pos,
-        body,
+        body: Cow::Borrowed(body),
+        raw: Cow::Borrowed(raw),
+    })
+}
+
+pub fn parse_object_record_owned(bytes: &[u8], offset: u32) -> Result<ObjectRecord<'static>> {
+    let record = parse_object_record(bytes, offset)?;
+    Ok(ObjectRecord {
+        offset: record.offset,
+        size: record.size,
+        body_start: record.body_start,
+        body_bit_pos: record.body_bit_pos,
+        body: Cow::Owned(record.body.as_ref().to_vec()),
+        raw: Cow::Owned(record.raw.as_ref().to_vec()),
     })
 }

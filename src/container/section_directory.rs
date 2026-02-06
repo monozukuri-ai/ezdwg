@@ -42,11 +42,12 @@ impl SectionKind {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SectionLocatorRecord {
     pub record_no: u8,
     pub offset: u32,
     pub size: u32,
+    pub name: Option<String>,
 }
 
 impl SectionLocatorRecord {
@@ -96,6 +97,7 @@ pub fn parse_with_config(bytes: &[u8], config: &ParseConfig) -> Result<SectionDi
             record_no,
             offset,
             size,
+            name: None,
         });
     }
 

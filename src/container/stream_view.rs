@@ -3,7 +3,7 @@ use crate::container::section_directory::SectionLocatorRecord;
 use crate::container::section_loader::SectionSlice;
 use crate::io::ByteReader;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct StreamView<'a> {
     section: SectionSlice<'a>,
 }
@@ -14,7 +14,7 @@ impl<'a> StreamView<'a> {
     }
 
     pub fn record(&self) -> SectionLocatorRecord {
-        self.section.record
+        self.section.record.clone()
     }
 
     pub fn offset(&self) -> u32 {
@@ -25,15 +25,15 @@ impl<'a> StreamView<'a> {
         self.section.record.size
     }
 
-    pub fn as_bytes(&self) -> &'a [u8] {
-        self.section.data
+    pub fn as_bytes(&self) -> &[u8] {
+        self.section.data.as_ref()
     }
 
-    pub fn byte_reader(&self) -> ByteReader<'a> {
-        ByteReader::new(self.section.data)
+    pub fn byte_reader(&self) -> ByteReader<'_> {
+        ByteReader::new(self.section.data.as_ref())
     }
 
-    pub fn bit_reader(&self) -> BitReader<'a> {
-        BitReader::new(self.section.data)
+    pub fn bit_reader(&self) -> BitReader<'_> {
+        BitReader::new(self.section.data.as_ref())
     }
 }

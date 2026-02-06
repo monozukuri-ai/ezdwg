@@ -26,6 +26,14 @@ impl ObjectIndex {
     pub fn is_empty(&self) -> bool {
         self.objects.is_empty()
     }
+
+    pub fn from_objects(objects: Vec<ObjectRef>) -> Self {
+        let mut by_handle = HashMap::with_capacity(objects.len());
+        for (idx, obj) in objects.iter().enumerate() {
+            by_handle.insert(obj.handle, idx);
+        }
+        Self { objects, by_handle }
+    }
 }
 
 pub fn build_object_index(bytes: &[u8], config: &ParseConfig) -> Result<ObjectIndex> {
@@ -45,14 +53,14 @@ pub fn build_object_index_from_directory(
         )
     })?;
     let section = section_loader::load_section(bytes, record, config)?;
-    parse_object_map(section.data, config)
+    parse_object_map(section.data.as_ref(), config)
 }
 
 fn find_object_map_record(directory: &SectionDirectory) -> Option<SectionLocatorRecord> {
     directory
         .records
         .iter()
-        .copied()
+        .cloned()
         .find(|record| record.kind() == SectionKind::ObjectMap)
 }
 
@@ -111,12 +119,7 @@ fn parse_object_map(bytes: &[u8], _config: &ParseConfig) -> Result<ObjectIndex> 
         let _crc = read_u16_be(&mut reader)?;
     }
 
-    let mut by_handle = HashMap::with_capacity(objects.len());
-    for (idx, obj) in objects.iter().enumerate() {
-        by_handle.insert(obj.handle, idx);
-    }
-
-    Ok(ObjectIndex { objects, by_handle })
+    Ok(ObjectIndex::from_objects(objects))
 }
 
 fn read_u16_be(reader: &mut ByteReader<'_>) -> Result<u16> {

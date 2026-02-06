@@ -1,9 +1,9 @@
 use pyo3::exceptions::{PyIOError, PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
+use std::collections::{HashMap, HashSet};
 
-use crate::container::section_directory;
-use crate::container::section_loader;
 use crate::core::error::{DwgError, ErrorKind};
+use crate::dwg::decoder;
 use crate::dwg::file_open;
 use crate::dwg::version;
 use crate::entities;
@@ -24,18 +24,15 @@ pub fn detect_version(path: &str) -> PyResult<String> {
 #[pyfunction]
 pub fn list_section_locators(path: &str) -> PyResult<Vec<(String, u32, u32)>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let version = version::detect_version(&bytes[..6.min(bytes.len())]).map_err(to_py_err)?;
-    if !version.is_supported() {
-        return Err(PyValueError::new_err(format!(
-            "unsupported DWG version: {}",
-            version.as_str()
-        )));
-    }
-    let directory = section_directory::parse(&bytes).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let directory = decoder.section_directory().map_err(to_py_err)?;
     let result = directory
         .records
         .into_iter()
-        .map(|record| (record.kind().label(), record.offset, record.size))
+        .map(|record| {
+            let label = record.name.clone().unwrap_or_else(|| record.kind().label());
+            (label, record.offset, record.size)
+        })
         .collect();
     Ok(result)
 }
@@ -43,31 +40,19 @@ pub fn list_section_locators(path: &str) -> PyResult<Vec<(String, u32, u32)>> {
 #[pyfunction]
 pub fn read_section_bytes(path: &str, index: usize) -> PyResult<Vec<u8>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let version = version::detect_version(&bytes[..6.min(bytes.len())]).map_err(to_py_err)?;
-    if !version.is_supported() {
-        return Err(PyValueError::new_err(format!(
-            "unsupported DWG version: {}",
-            version.as_str()
-        )));
-    }
-    let directory = section_directory::parse(&bytes).map_err(to_py_err)?;
-    let section =
-        section_loader::load_section_by_index(&bytes, &directory, index, &Default::default())
-            .map_err(to_py_err)?;
-    Ok(section.data.to_vec())
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let directory = decoder.section_directory().map_err(to_py_err)?;
+    let section = decoder
+        .load_section_by_index(&directory, index)
+        .map_err(to_py_err)?;
+    Ok(section.data.as_ref().to_vec())
 }
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn list_object_map_entries(path: &str, limit: Option<usize>) -> PyResult<Vec<(u64, u32)>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let version = version::detect_version(&bytes[..6.min(bytes.len())]).map_err(to_py_err)?;
-    if !version.is_supported() {
-        return Err(PyValueError::new_err(format!(
-            "unsupported DWG version: {}",
-            version.as_str()
-        )));
-    }
-    let index = objects::build_object_index(&bytes, &Default::default()).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut entries: Vec<(u64, u32)> = index
         .objects
         .iter()
@@ -87,17 +72,12 @@ pub fn list_object_headers(
     limit: Option<usize>,
 ) -> PyResult<Vec<(u64, u32, u32, u16)>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let version = version::detect_version(&bytes[..6.min(bytes.len())]).map_err(to_py_err)?;
-    if !version.is_supported() {
-        return Err(PyValueError::new_err(format!(
-            "unsupported DWG version: {}",
-            version.as_str()
-        )));
-    }
-    let index = objects::build_object_index(&bytes, &Default::default()).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
-        let header = objects::parse_object_header_r2000(&bytes, obj.offset).map_err(to_py_err)?;
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header = objects::object_header_r2000::parse_from_record(&record).map_err(to_py_err)?;
         result.push((obj.handle.0, obj.offset, header.data_size, header.type_code));
         if let Some(limit) = limit {
             if result.len() >= limit {
@@ -114,21 +94,15 @@ pub fn list_object_headers_with_type(
     limit: Option<usize>,
 ) -> PyResult<Vec<(u64, u32, u32, u16, String, String)>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let version = version::detect_version(&bytes[..6.min(bytes.len())]).map_err(to_py_err)?;
-    if !version.is_supported() {
-        return Err(PyValueError::new_err(format!(
-            "unsupported DWG version: {}",
-            version.as_str()
-        )));
-    }
-    let index = objects::build_object_index(&bytes, &Default::default()).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
-        let header = objects::parse_object_header_r2000(&bytes, obj.offset).map_err(to_py_err)?;
-        let type_name = objects::object_type_name(header.type_code);
-        let type_class = objects::object_type_class(header.type_code)
-            .as_str()
-            .to_string();
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header = objects::object_header_r2000::parse_from_record(&record).map_err(to_py_err)?;
+        let type_name = resolved_type_name(header.type_code, &dynamic_types);
+        let type_class = resolved_type_class(header.type_code, &type_name);
         result.push((
             obj.handle.0,
             obj.offset,
@@ -156,25 +130,19 @@ pub fn list_object_headers_by_type(
         return Ok(Vec::new());
     }
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let version = version::detect_version(&bytes[..6.min(bytes.len())]).map_err(to_py_err)?;
-    if !version.is_supported() {
-        return Err(PyValueError::new_err(format!(
-            "unsupported DWG version: {}",
-            version.as_str()
-        )));
-    }
-    let filter: std::collections::HashSet<u16> = type_codes.into_iter().collect();
-    let index = objects::build_object_index(&bytes, &Default::default()).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
+    let filter: HashSet<u16> = type_codes.into_iter().collect();
+    let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
-        let header = objects::parse_object_header_r2000(&bytes, obj.offset).map_err(to_py_err)?;
-        if !filter.contains(&header.type_code) {
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header = objects::object_header_r2000::parse_from_record(&record).map_err(to_py_err)?;
+        let type_name = resolved_type_name(header.type_code, &dynamic_types);
+        if !matches_type_filter(&filter, header.type_code, &type_name) {
             continue;
         }
-        let type_name = objects::object_type_name(header.type_code);
-        let type_class = objects::object_type_class(header.type_code)
-            .as_str()
-            .to_string();
+        let type_class = resolved_type_class(header.type_code, &type_name);
         result.push((
             obj.handle.0,
             obj.offset,
@@ -202,23 +170,19 @@ pub fn read_object_records_by_type(
         return Ok(Vec::new());
     }
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let version = version::detect_version(&bytes[..6.min(bytes.len())]).map_err(to_py_err)?;
-    if !version.is_supported() {
-        return Err(PyValueError::new_err(format!(
-            "unsupported DWG version: {}",
-            version.as_str()
-        )));
-    }
-    let filter: std::collections::HashSet<u16> = type_codes.into_iter().collect();
-    let index = objects::build_object_index(&bytes, &Default::default()).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
+    let filter: HashSet<u16> = type_codes.into_iter().collect();
+    let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
-        let header = objects::parse_object_header_r2000(&bytes, obj.offset).map_err(to_py_err)?;
-        if !filter.contains(&header.type_code) {
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header = objects::object_header_r2000::parse_from_record(&record).map_err(to_py_err)?;
+        let type_name = resolved_type_name(header.type_code, &dynamic_types);
+        if !matches_type_filter(&filter, header.type_code, &type_name) {
             continue;
         }
-        let (start, end) = header.record_range();
-        let record = bytes[start..end].to_vec();
+        let record = record.raw.as_ref().to_vec();
         result.push((
             obj.handle.0,
             obj.offset,
@@ -241,22 +205,18 @@ pub fn decode_line_entities(
     limit: Option<usize>,
 ) -> PyResult<Vec<(u64, f64, f64, f64, f64, f64, f64)>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let version = version::detect_version(&bytes[..6.min(bytes.len())]).map_err(to_py_err)?;
-    if !version.is_supported() {
-        return Err(PyValueError::new_err(format!(
-            "unsupported DWG version: {}",
-            version.as_str()
-        )));
-    }
-    let index = objects::build_object_index(&bytes, &Default::default()).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
-        let record = objects::parse_object_record(&bytes, obj.offset).map_err(to_py_err)?;
-        let mut reader = record.bit_reader();
-        let type_code = reader.read_bs().map_err(to_py_err)?;
-        if type_code != 0x13 {
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header = objects::object_header_r2000::parse_from_record(&record).map_err(to_py_err)?;
+        if !matches_type_name(header.type_code, 0x13, "LINE", &dynamic_types) {
             continue;
         }
+        let mut reader = record.bit_reader();
+        let _type_code = reader.read_bs().map_err(to_py_err)?;
         let entity = entities::decode_line(&mut reader).map_err(to_py_err)?;
         result.push((
             entity.handle,
@@ -282,22 +242,18 @@ pub fn decode_arc_entities(
     limit: Option<usize>,
 ) -> PyResult<Vec<(u64, f64, f64, f64, f64, f64, f64)>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let version = version::detect_version(&bytes[..6.min(bytes.len())]).map_err(to_py_err)?;
-    if !version.is_supported() {
-        return Err(PyValueError::new_err(format!(
-            "unsupported DWG version: {}",
-            version.as_str()
-        )));
-    }
-    let index = objects::build_object_index(&bytes, &Default::default()).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
-        let record = objects::parse_object_record(&bytes, obj.offset).map_err(to_py_err)?;
-        let mut reader = record.bit_reader();
-        let type_code = reader.read_bs().map_err(to_py_err)?;
-        if type_code != 0x11 {
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header = objects::object_header_r2000::parse_from_record(&record).map_err(to_py_err)?;
+        if !matches_type_name(header.type_code, 0x11, "ARC", &dynamic_types) {
             continue;
         }
+        let mut reader = record.bit_reader();
+        let _type_code = reader.read_bs().map_err(to_py_err)?;
         let entity = entities::decode_arc(&mut reader).map_err(to_py_err)?;
         result.push((
             entity.handle,
@@ -323,22 +279,18 @@ pub fn decode_insert_entities(
     limit: Option<usize>,
 ) -> PyResult<Vec<(u64, f64, f64, f64, f64, f64, f64, f64)>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let version = version::detect_version(&bytes[..6.min(bytes.len())]).map_err(to_py_err)?;
-    if !version.is_supported() {
-        return Err(PyValueError::new_err(format!(
-            "unsupported DWG version: {}",
-            version.as_str()
-        )));
-    }
-    let index = objects::build_object_index(&bytes, &Default::default()).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
-        let record = objects::parse_object_record(&bytes, obj.offset).map_err(to_py_err)?;
-        let mut reader = record.bit_reader();
-        let type_code = reader.read_bs().map_err(to_py_err)?;
-        if type_code != 0x07 {
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header = objects::object_header_r2000::parse_from_record(&record).map_err(to_py_err)?;
+        if !matches_type_name(header.type_code, 0x07, "INSERT", &dynamic_types) {
             continue;
         }
+        let mut reader = record.bit_reader();
+        let _type_code = reader.read_bs().map_err(to_py_err)?;
         let entity = entities::decode_insert(&mut reader).map_err(to_py_err)?;
         result.push((
             entity.handle,
@@ -365,22 +317,18 @@ pub fn decode_polyline_2d_entities(
     limit: Option<usize>,
 ) -> PyResult<Vec<(u64, u16, u16, f64, f64, f64, f64)>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let version = version::detect_version(&bytes[..6.min(bytes.len())]).map_err(to_py_err)?;
-    if !version.is_supported() {
-        return Err(PyValueError::new_err(format!(
-            "unsupported DWG version: {}",
-            version.as_str()
-        )));
-    }
-    let index = objects::build_object_index(&bytes, &Default::default()).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
-        let record = objects::parse_object_record(&bytes, obj.offset).map_err(to_py_err)?;
-        let mut reader = record.bit_reader();
-        let type_code = reader.read_bs().map_err(to_py_err)?;
-        if type_code != 0x0F {
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header = objects::object_header_r2000::parse_from_record(&record).map_err(to_py_err)?;
+        if !matches_type_name(header.type_code, 0x0F, "POLYLINE_2D", &dynamic_types) {
             continue;
         }
+        let mut reader = record.bit_reader();
+        let _type_code = reader.read_bs().map_err(to_py_err)?;
         let entity = entities::decode_polyline_2d(&mut reader).map_err(to_py_err)?;
         result.push((
             entity.handle,
@@ -421,22 +369,18 @@ pub fn decode_polyline_2d_entities_interpreted(
     )>,
 > {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let version = version::detect_version(&bytes[..6.min(bytes.len())]).map_err(to_py_err)?;
-    if !version.is_supported() {
-        return Err(PyValueError::new_err(format!(
-            "unsupported DWG version: {}",
-            version.as_str()
-        )));
-    }
-    let index = objects::build_object_index(&bytes, &Default::default()).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
-        let record = objects::parse_object_record(&bytes, obj.offset).map_err(to_py_err)?;
-        let mut reader = record.bit_reader();
-        let type_code = reader.read_bs().map_err(to_py_err)?;
-        if type_code != 0x0F {
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header = objects::object_header_r2000::parse_from_record(&record).map_err(to_py_err)?;
+        if !matches_type_name(header.type_code, 0x0F, "POLYLINE_2D", &dynamic_types) {
             continue;
         }
+        let mut reader = record.bit_reader();
+        let _type_code = reader.read_bs().map_err(to_py_err)?;
         let entity = entities::decode_polyline_2d(&mut reader).map_err(to_py_err)?;
         let info = entity.flags_info;
         let curve_label = entity.curve_type_info.label().to_string();
@@ -469,22 +413,18 @@ pub fn decode_lwpolyline_entities(
     limit: Option<usize>,
 ) -> PyResult<Vec<(u64, u16, Vec<(f64, f64)>)>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let version = version::detect_version(&bytes[..6.min(bytes.len())]).map_err(to_py_err)?;
-    if !version.is_supported() {
-        return Err(PyValueError::new_err(format!(
-            "unsupported DWG version: {}",
-            version.as_str()
-        )));
-    }
-    let index = objects::build_object_index(&bytes, &Default::default()).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
-        let record = objects::parse_object_record(&bytes, obj.offset).map_err(to_py_err)?;
-        let mut reader = record.bit_reader();
-        let type_code = reader.read_bs().map_err(to_py_err)?;
-        if type_code != 0x4D {
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header = objects::object_header_r2000::parse_from_record(&record).map_err(to_py_err)?;
+        if !matches_type_name(header.type_code, 0x4D, "LWPOLYLINE", &dynamic_types) {
             continue;
         }
+        let mut reader = record.bit_reader();
+        let _type_code = reader.read_bs().map_err(to_py_err)?;
         let entity = entities::decode_lwpolyline(&mut reader).map_err(to_py_err)?;
         result.push((entity.handle, entity.flags, entity.vertices));
         if let Some(limit) = limit {
@@ -502,39 +442,37 @@ pub fn decode_polyline_2d_with_vertices(
     limit: Option<usize>,
 ) -> PyResult<Vec<(u64, u16, Vec<(f64, f64, f64)>)>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let version = version::detect_version(&bytes[..6.min(bytes.len())]).map_err(to_py_err)?;
-    if !version.is_supported() {
-        return Err(PyValueError::new_err(format!(
-            "unsupported DWG version: {}",
-            version.as_str()
-        )));
-    }
-    let index = objects::build_object_index(&bytes, &Default::default()).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut sorted = index.objects.clone();
     sorted.sort_by_key(|obj| obj.offset);
 
     let mut vertex_map = std::collections::HashMap::new();
     for obj in sorted.iter() {
-        let record = objects::parse_object_record(&bytes, obj.offset).map_err(to_py_err)?;
-        let mut reader = record.bit_reader();
-        let type_code = reader.read_bs().map_err(to_py_err)?;
-        if type_code == 0x0A {
-            let vertex = entities::decode_vertex_2d(&mut reader).map_err(to_py_err)?;
-            vertex_map.insert(vertex.handle, vertex);
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header = objects::object_header_r2000::parse_from_record(&record).map_err(to_py_err)?;
+        if !matches_type_name(header.type_code, 0x0A, "VERTEX_2D", &dynamic_types) {
+            continue;
         }
+        let mut reader = record.bit_reader();
+        let _type_code = reader.read_bs().map_err(to_py_err)?;
+        let vertex = entities::decode_vertex_2d(&mut reader).map_err(to_py_err)?;
+        vertex_map.insert(vertex.handle, vertex);
     }
 
     let mut result = Vec::new();
     let mut i = 0usize;
     while i < sorted.len() {
         let obj = sorted[i];
-        let record = objects::parse_object_record(&bytes, obj.offset).map_err(to_py_err)?;
-        let mut reader = record.bit_reader();
-        let type_code = reader.read_bs().map_err(to_py_err)?;
-        if type_code != 0x0F {
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header = objects::object_header_r2000::parse_from_record(&record).map_err(to_py_err)?;
+        if !matches_type_name(header.type_code, 0x0F, "POLYLINE_2D", &dynamic_types) {
             i += 1;
             continue;
         }
+        let mut reader = record.bit_reader();
+        let _type_code = reader.read_bs().map_err(to_py_err)?;
         let poly = entities::decode_polyline_2d(&mut reader).map_err(to_py_err)?;
         let mut vertices: Vec<(f64, f64, f64)> = Vec::new();
         let use_vertex_z = poly.flags_info.is_3d_polyline
@@ -557,11 +495,14 @@ pub fn decode_polyline_2d_with_vertices(
             let mut j = i + 1;
             while j < sorted.len() {
                 let next = sorted[j];
-                let next_record =
-                    objects::parse_object_record(&bytes, next.offset).map_err(to_py_err)?;
+                let next_record = decoder
+                    .parse_object_record(next.offset)
+                    .map_err(to_py_err)?;
+                let next_header = objects::object_header_r2000::parse_from_record(&next_record)
+                    .map_err(to_py_err)?;
                 let mut next_reader = next_record.bit_reader();
-                let next_type = next_reader.read_bs().map_err(to_py_err)?;
-                if next_type == 0x0A {
+                if matches_type_name(next_header.type_code, 0x0A, "VERTEX_2D", &dynamic_types) {
+                    let _next_type = next_reader.read_bs().map_err(to_py_err)?;
                     let vertex = entities::decode_vertex_2d(&mut next_reader).map_err(to_py_err)?;
                     let z = if use_vertex_z {
                         vertex.position.2
@@ -572,7 +513,8 @@ pub fn decode_polyline_2d_with_vertices(
                     j += 1;
                     continue;
                 }
-                if next_type == 0x06 {
+                if matches_type_name(next_header.type_code, 0x06, "SEQEND", &dynamic_types) {
+                    let _next_type = next_reader.read_bs().map_err(to_py_err)?;
                     let _seqend = entities::decode_seqend(&mut next_reader).map_err(to_py_err)?;
                     j += 1;
                 }
@@ -607,39 +549,37 @@ pub fn decode_polyline_2d_with_vertices_interpolated(
     limit: Option<usize>,
 ) -> PyResult<Vec<(u64, u16, bool, Vec<(f64, f64, f64)>)>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let version = version::detect_version(&bytes[..6.min(bytes.len())]).map_err(to_py_err)?;
-    if !version.is_supported() {
-        return Err(PyValueError::new_err(format!(
-            "unsupported DWG version: {}",
-            version.as_str()
-        )));
-    }
-    let index = objects::build_object_index(&bytes, &Default::default()).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut sorted = index.objects.clone();
     sorted.sort_by_key(|obj| obj.offset);
 
     let mut vertex_map = std::collections::HashMap::new();
     for obj in sorted.iter() {
-        let record = objects::parse_object_record(&bytes, obj.offset).map_err(to_py_err)?;
-        let mut reader = record.bit_reader();
-        let type_code = reader.read_bs().map_err(to_py_err)?;
-        if type_code == 0x0A {
-            let vertex = entities::decode_vertex_2d(&mut reader).map_err(to_py_err)?;
-            vertex_map.insert(vertex.handle, vertex);
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header = objects::object_header_r2000::parse_from_record(&record).map_err(to_py_err)?;
+        if !matches_type_name(header.type_code, 0x0A, "VERTEX_2D", &dynamic_types) {
+            continue;
         }
+        let mut reader = record.bit_reader();
+        let _type_code = reader.read_bs().map_err(to_py_err)?;
+        let vertex = entities::decode_vertex_2d(&mut reader).map_err(to_py_err)?;
+        vertex_map.insert(vertex.handle, vertex);
     }
 
     let mut result = Vec::new();
     let mut i = 0usize;
     while i < sorted.len() {
         let obj = sorted[i];
-        let record = objects::parse_object_record(&bytes, obj.offset).map_err(to_py_err)?;
-        let mut reader = record.bit_reader();
-        let type_code = reader.read_bs().map_err(to_py_err)?;
-        if type_code != 0x0F {
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header = objects::object_header_r2000::parse_from_record(&record).map_err(to_py_err)?;
+        if !matches_type_name(header.type_code, 0x0F, "POLYLINE_2D", &dynamic_types) {
             i += 1;
             continue;
         }
+        let mut reader = record.bit_reader();
+        let _type_code = reader.read_bs().map_err(to_py_err)?;
         let poly = entities::decode_polyline_2d(&mut reader).map_err(to_py_err)?;
         let mut vertices: Vec<(f64, f64, f64)> = Vec::new();
         let use_vertex_z = poly.flags_info.is_3d_polyline
@@ -662,11 +602,14 @@ pub fn decode_polyline_2d_with_vertices_interpolated(
             let mut j = i + 1;
             while j < sorted.len() {
                 let next = sorted[j];
-                let next_record =
-                    objects::parse_object_record(&bytes, next.offset).map_err(to_py_err)?;
+                let next_record = decoder
+                    .parse_object_record(next.offset)
+                    .map_err(to_py_err)?;
+                let next_header = objects::object_header_r2000::parse_from_record(&next_record)
+                    .map_err(to_py_err)?;
                 let mut next_reader = next_record.bit_reader();
-                let next_type = next_reader.read_bs().map_err(to_py_err)?;
-                if next_type == 0x0A {
+                if matches_type_name(next_header.type_code, 0x0A, "VERTEX_2D", &dynamic_types) {
+                    let _next_type = next_reader.read_bs().map_err(to_py_err)?;
                     let vertex = entities::decode_vertex_2d(&mut next_reader).map_err(to_py_err)?;
                     let z = if use_vertex_z {
                         vertex.position.2
@@ -677,7 +620,8 @@ pub fn decode_polyline_2d_with_vertices_interpolated(
                     j += 1;
                     continue;
                 }
-                if next_type == 0x06 {
+                if matches_type_name(next_header.type_code, 0x06, "SEQEND", &dynamic_types) {
+                    let _next_type = next_reader.read_bs().map_err(to_py_err)?;
                     let _seqend = entities::decode_seqend(&mut next_reader).map_err(to_py_err)?;
                     j += 1;
                 }
@@ -728,22 +672,18 @@ pub fn decode_vertex_2d_entities(
     limit: Option<usize>,
 ) -> PyResult<Vec<(u64, u16, f64, f64, f64, f64, f64, f64, f64)>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let version = version::detect_version(&bytes[..6.min(bytes.len())]).map_err(to_py_err)?;
-    if !version.is_supported() {
-        return Err(PyValueError::new_err(format!(
-            "unsupported DWG version: {}",
-            version.as_str()
-        )));
-    }
-    let index = objects::build_object_index(&bytes, &Default::default()).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
-        let record = objects::parse_object_record(&bytes, obj.offset).map_err(to_py_err)?;
-        let mut reader = record.bit_reader();
-        let type_code = reader.read_bs().map_err(to_py_err)?;
-        if type_code != 0x0A {
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header = objects::object_header_r2000::parse_from_record(&record).map_err(to_py_err)?;
+        if !matches_type_name(header.type_code, 0x0A, "VERTEX_2D", &dynamic_types) {
             continue;
         }
+        let mut reader = record.bit_reader();
+        let _type_code = reader.read_bs().map_err(to_py_err)?;
         let vertex = entities::decode_vertex_2d(&mut reader).map_err(to_py_err)?;
         result.push((
             vertex.handle,
@@ -771,39 +711,37 @@ pub fn decode_polyline_2d_with_vertex_data(
     limit: Option<usize>,
 ) -> PyResult<Vec<(u64, u16, Vec<(f64, f64, f64, f64, f64, f64, f64, u16)>)>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let version = version::detect_version(&bytes[..6.min(bytes.len())]).map_err(to_py_err)?;
-    if !version.is_supported() {
-        return Err(PyValueError::new_err(format!(
-            "unsupported DWG version: {}",
-            version.as_str()
-        )));
-    }
-    let index = objects::build_object_index(&bytes, &Default::default()).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut sorted = index.objects.clone();
     sorted.sort_by_key(|obj| obj.offset);
 
     let mut vertex_map = std::collections::HashMap::new();
     for obj in sorted.iter() {
-        let record = objects::parse_object_record(&bytes, obj.offset).map_err(to_py_err)?;
-        let mut reader = record.bit_reader();
-        let type_code = reader.read_bs().map_err(to_py_err)?;
-        if type_code == 0x0A {
-            let vertex = entities::decode_vertex_2d(&mut reader).map_err(to_py_err)?;
-            vertex_map.insert(vertex.handle, vertex);
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header = objects::object_header_r2000::parse_from_record(&record).map_err(to_py_err)?;
+        if !matches_type_name(header.type_code, 0x0A, "VERTEX_2D", &dynamic_types) {
+            continue;
         }
+        let mut reader = record.bit_reader();
+        let _type_code = reader.read_bs().map_err(to_py_err)?;
+        let vertex = entities::decode_vertex_2d(&mut reader).map_err(to_py_err)?;
+        vertex_map.insert(vertex.handle, vertex);
     }
 
     let mut result = Vec::new();
     let mut i = 0usize;
     while i < sorted.len() {
         let obj = sorted[i];
-        let record = objects::parse_object_record(&bytes, obj.offset).map_err(to_py_err)?;
-        let mut reader = record.bit_reader();
-        let type_code = reader.read_bs().map_err(to_py_err)?;
-        if type_code != 0x0F {
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header = objects::object_header_r2000::parse_from_record(&record).map_err(to_py_err)?;
+        if !matches_type_name(header.type_code, 0x0F, "POLYLINE_2D", &dynamic_types) {
             i += 1;
             continue;
         }
+        let mut reader = record.bit_reader();
+        let _type_code = reader.read_bs().map_err(to_py_err)?;
         let poly = entities::decode_polyline_2d(&mut reader).map_err(to_py_err)?;
         let mut vertices: Vec<(f64, f64, f64, f64, f64, f64, f64, u16)> = Vec::new();
         let use_vertex_z = poly.flags_info.is_3d_polyline
@@ -835,11 +773,14 @@ pub fn decode_polyline_2d_with_vertex_data(
             let mut j = i + 1;
             while j < sorted.len() {
                 let next = sorted[j];
-                let next_record =
-                    objects::parse_object_record(&bytes, next.offset).map_err(to_py_err)?;
+                let next_record = decoder
+                    .parse_object_record(next.offset)
+                    .map_err(to_py_err)?;
+                let next_header = objects::object_header_r2000::parse_from_record(&next_record)
+                    .map_err(to_py_err)?;
                 let mut next_reader = next_record.bit_reader();
-                let next_type = next_reader.read_bs().map_err(to_py_err)?;
-                if next_type == 0x0A {
+                if matches_type_name(next_header.type_code, 0x0A, "VERTEX_2D", &dynamic_types) {
+                    let _next_type = next_reader.read_bs().map_err(to_py_err)?;
                     let vertex = entities::decode_vertex_2d(&mut next_reader).map_err(to_py_err)?;
                     let z = if use_vertex_z {
                         vertex.position.2
@@ -859,7 +800,8 @@ pub fn decode_polyline_2d_with_vertex_data(
                     j += 1;
                     continue;
                 }
-                if next_type == 0x06 {
+                if matches_type_name(next_header.type_code, 0x06, "SEQEND", &dynamic_types) {
+                    let _next_type = next_reader.read_bs().map_err(to_py_err)?;
                     let _seqend = entities::decode_seqend(&mut next_reader).map_err(to_py_err)?;
                     j += 1;
                 }
@@ -919,6 +861,10 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+fn build_decoder(bytes: &[u8]) -> crate::core::result::Result<decoder::Decoder<'_>> {
+    decoder::Decoder::new(bytes, Default::default())
+}
+
 fn to_py_err(err: DwgError) -> PyErr {
     let message = err.to_string();
     match err.kind {
@@ -951,4 +897,64 @@ fn points_equal_3d_with_data(
     b: (f64, f64, f64, f64, f64, f64, f64, u16),
 ) -> bool {
     points_equal_3d((a.0, a.1, a.2), (b.0, b.1, b.2))
+}
+
+fn resolved_type_name(type_code: u16, dynamic_types: &HashMap<u16, String>) -> String {
+    dynamic_types
+        .get(&type_code)
+        .cloned()
+        .unwrap_or_else(|| objects::object_type_name(type_code))
+}
+
+fn resolved_type_class(type_code: u16, resolved_name: &str) -> String {
+    let class = objects::object_type_class(type_code).as_str();
+    if !class.is_empty() {
+        return class.to_string();
+    }
+    if is_known_entity_type_name(resolved_name) {
+        return "E".to_string();
+    }
+    String::new()
+}
+
+fn matches_type_name(
+    type_code: u16,
+    builtin_code: u16,
+    builtin_name: &str,
+    dynamic_types: &HashMap<u16, String>,
+) -> bool {
+    if type_code == builtin_code {
+        return true;
+    }
+    dynamic_types
+        .get(&type_code)
+        .map(|name| name == builtin_name)
+        .unwrap_or(false)
+}
+
+fn matches_type_filter(filter: &HashSet<u16>, type_code: u16, resolved_name: &str) -> bool {
+    if filter.contains(&type_code) {
+        return true;
+    }
+    if let Some(builtin_code) = builtin_code_from_name(resolved_name) {
+        return filter.contains(&builtin_code);
+    }
+    false
+}
+
+fn builtin_code_from_name(name: &str) -> Option<u16> {
+    match name {
+        "SEQEND" => Some(0x06),
+        "INSERT" => Some(0x07),
+        "VERTEX_2D" => Some(0x0A),
+        "POLYLINE_2D" => Some(0x0F),
+        "ARC" => Some(0x11),
+        "LINE" => Some(0x13),
+        "LWPOLYLINE" => Some(0x4D),
+        _ => None,
+    }
+}
+
+fn is_known_entity_type_name(name: &str) -> bool {
+    builtin_code_from_name(name).is_some()
 }

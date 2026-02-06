@@ -2,11 +2,12 @@ use crate::container::section_directory::{SectionDirectory, SectionLocatorRecord
 use crate::core::config::ParseConfig;
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
+use std::borrow::Cow;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SectionSlice<'a> {
     pub record: SectionLocatorRecord,
-    pub data: &'a [u8],
+    pub data: Cow<'a, [u8]>,
 }
 
 pub fn load_section<'a>(
@@ -41,7 +42,7 @@ pub fn load_section<'a>(
         ));
     }
 
-    let data = &bytes[offset..end];
+    let data = Cow::Borrowed(&bytes[offset..end]);
     Ok(SectionSlice { record, data })
 }
 
@@ -54,7 +55,7 @@ pub fn load_section_by_index<'a>(
     let record = directory
         .records
         .get(index)
-        .copied()
+        .cloned()
         .ok_or_else(|| DwgError::new(ErrorKind::Format, "section index out of range"))?;
     load_section(bytes, record, config)
 }
@@ -66,7 +67,7 @@ pub fn load_all_sections<'a>(
 ) -> Result<Vec<SectionSlice<'a>>> {
     let mut sections = Vec::with_capacity(directory.records.len());
     for record in &directory.records {
-        sections.push(load_section(bytes, *record, config)?);
+        sections.push(load_section(bytes, record.clone(), config)?);
     }
     Ok(sections)
 }

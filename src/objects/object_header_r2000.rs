@@ -46,7 +46,7 @@ pub fn parse_for_object(bytes: &[u8], object: ObjectRef) -> Result<ObjectHeaderR
 }
 
 pub fn parse_from_record(record: &ObjectRecord<'_>) -> Result<ObjectHeaderR2000> {
-    let mut reader = BitReader::new(record.body);
+    let mut reader = BitReader::new(record.body.as_ref());
     reader.set_pos(0, record.body_bit_pos);
     let type_code = reader.read_bs()?;
 
