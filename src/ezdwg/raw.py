@@ -1,4 +1,6 @@
 from ezdwg._core import (
+    decode_entity_styles,
+    decode_layer_colors,
     decode_arc_entities,
     decode_circle_entities,
     decode_ellipse_entities,
@@ -34,6 +36,8 @@ __all__ = [
     "list_object_headers_by_type",
     "list_object_headers_with_type",
     "read_object_records_by_type",
+    "decode_entity_styles",
+    "decode_layer_colors",
     "decode_line_entities",
     "decode_point_entities",
     "decode_arc_entities",

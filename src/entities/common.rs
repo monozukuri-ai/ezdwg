@@ -2,10 +2,17 @@ use crate::bit::HandleRef;
 use crate::bit::{BitReader, Endian};
 use crate::core::result::Result;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CommonEntityColor {
+    pub index: Option<u16>,
+    pub true_color: Option<u32>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CommonEntityHeader {
     pub obj_size: u32,
     pub handle: u64,
+    pub color: CommonEntityColor,
     pub entity_mode: u8,
     pub num_of_reactors: u32,
     pub xdic_missing_flag: u8,
@@ -50,15 +57,17 @@ pub fn parse_common_entity_header(reader: &mut BitReader<'_>) -> Result<CommonEn
     let num_of_reactors = reader.read_bl()?;
     let xdic_missing_flag = reader.read_b()?;
 
+    let mut color = CommonEntityColor::default();
     let no_links = reader.read_b()?;
     if no_links == 0 {
         let color_mode = reader.read_b()?;
         if color_mode == 1 {
-            let _index = reader.read_rc()?;
+            color.index = Some(reader.read_rc()? as u16);
         } else {
             let flags = reader.read_rs(Endian::Little)?;
+            color.index = Some(flags & 0x01FF);
             if flags & 0x8000 != 0 {
-                let _rgb = reader.read_bl()?;
+                color.true_color = Some(reader.read_bl()?);
                 let _name = reader.read_tv()?;
             }
             if flags & 0x2000 != 0 {
@@ -79,6 +88,7 @@ pub fn parse_common_entity_header(reader: &mut BitReader<'_>) -> Result<CommonEn
     Ok(CommonEntityHeader {
         obj_size,
         handle,
+        color,
         entity_mode,
         num_of_reactors,
         xdic_missing_flag,

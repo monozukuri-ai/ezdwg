@@ -2,6 +2,7 @@ use pyo3::exceptions::{PyIOError, PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
 
+use crate::bit::{BitReader, Endian};
 use crate::core::error::{DwgError, ErrorKind};
 use crate::dwg::decoder;
 use crate::dwg::file_open;
@@ -196,6 +197,197 @@ pub fn read_object_records_by_type(
             }
         }
     }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_entity_styles(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<(u64, Option<u16>, Option<u32>, u64)>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+
+        let mut reader = record.bit_reader();
+        if let Err(err) = reader.read_bs() {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        if matches_type_name(header.type_code, 0x13, "LINE", &dynamic_types) {
+            let entity = match entities::decode_line(&mut reader) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                entity.layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x1B, "POINT", &dynamic_types) {
+            let entity = match entities::decode_point(&mut reader) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                entity.layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x11, "ARC", &dynamic_types) {
+            let entity = match entities::decode_arc(&mut reader) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                entity.layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x12, "CIRCLE", &dynamic_types) {
+            let entity = match entities::decode_circle(&mut reader) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                entity.layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x23, "ELLIPSE", &dynamic_types) {
+            let entity = match entities::decode_ellipse(&mut reader) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                entity.layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x01, "TEXT", &dynamic_types) {
+            let entity = match entities::decode_text(&mut reader) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                entity.layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x2C, "MTEXT", &dynamic_types) {
+            let entity = match entities::decode_mtext(&mut reader) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                entity.layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x4D, "LWPOLYLINE", &dynamic_types) {
+            let entity = match entities::decode_lwpolyline(&mut reader) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                entity.layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x15, "DIM_LINEAR", &dynamic_types) {
+            let entity = match entities::decode_dim_linear(&mut reader) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                entity.layer_handle,
+            ));
+        } else {
+            continue;
+        }
+
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_layer_colors(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<(u64, u16, Option<u32>)>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x33, "LAYER", &dynamic_types) {
+            continue;
+        }
+
+        let mut reader = record.bit_reader();
+        if let Err(err) = reader.read_bs() {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let (handle, color_index, true_color) = match decode_layer_color_record(&mut reader) {
+            Ok(decoded) => decoded,
+            Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        result.push((handle, color_index, true_color));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+
     Ok(result)
 }
 
@@ -1241,6 +1433,8 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(list_object_headers_with_type, module)?)?;
     module.add_function(wrap_pyfunction!(list_object_headers_by_type, module)?)?;
     module.add_function(wrap_pyfunction!(read_object_records_by_type, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_entity_styles, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_layer_colors, module)?)?;
     module.add_function(wrap_pyfunction!(decode_line_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_point_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_arc_entities, module)?)?;
@@ -1300,6 +1494,192 @@ fn load_dynamic_types(
         Err(_) if best_effort => Ok(HashMap::new()),
         Err(err) => Err(to_py_err(err)),
     }
+}
+
+fn decode_layer_color_record(
+    reader: &mut BitReader<'_>,
+) -> crate::core::result::Result<(u64, u16, Option<u32>)> {
+    let _obj_size = reader.read_rl(Endian::Little)?;
+    let handle = reader.read_h()?.value;
+    skip_eed(reader)?;
+
+    let _num_reactors = reader.read_bl()?;
+    let _xdic_missing_flag = reader.read_b()?;
+    let _entry_name = reader.read_tv()?;
+
+    let style_start = reader.get_pos();
+    let variants = [
+        LayerColorParseVariant {
+            pre_flag_bits: 0,
+            post_flag_bits: 0,
+            pre_values_bits: 0,
+        },
+        LayerColorParseVariant {
+            pre_flag_bits: 2,
+            post_flag_bits: 0,
+            pre_values_bits: 0,
+        },
+        LayerColorParseVariant {
+            pre_flag_bits: 0,
+            post_flag_bits: 2,
+            pre_values_bits: 0,
+        },
+        LayerColorParseVariant {
+            pre_flag_bits: 0,
+            post_flag_bits: 0,
+            pre_values_bits: 2,
+        },
+        LayerColorParseVariant {
+            pre_flag_bits: 2,
+            post_flag_bits: 2,
+            pre_values_bits: 0,
+        },
+        LayerColorParseVariant {
+            pre_flag_bits: 2,
+            post_flag_bits: 0,
+            pre_values_bits: 2,
+        },
+        LayerColorParseVariant {
+            pre_flag_bits: 0,
+            post_flag_bits: 2,
+            pre_values_bits: 2,
+        },
+        LayerColorParseVariant {
+            pre_flag_bits: 2,
+            post_flag_bits: 2,
+            pre_values_bits: 2,
+        },
+    ];
+
+    let mut best: Option<(u64, (u16, Option<u32>))> = None;
+    for variant in variants {
+        reader.set_pos(style_start.0, style_start.1);
+        let Ok((color_index, true_color, color_byte)) = decode_layer_color_cmc(reader, variant)
+        else {
+            continue;
+        };
+        let score = layer_color_candidate_score(color_index, true_color, color_byte);
+        match &best {
+            Some((best_score, _)) if score >= *best_score => {}
+            _ => best = Some((score, (color_index, true_color))),
+        }
+    }
+
+    if let Some((_, (color_index, true_color))) = best {
+        return Ok((handle, color_index, true_color));
+    }
+
+    // Last resort: parse in the simplest form to keep progress.
+    reader.set_pos(style_start.0, style_start.1);
+    let (color_index, true_color, _) = decode_layer_color_cmc(reader, variants[0])?;
+    Ok((handle, color_index, true_color))
+}
+
+#[derive(Clone, Copy)]
+struct LayerColorParseVariant {
+    pre_flag_bits: u8,
+    post_flag_bits: u8,
+    pre_values_bits: u8,
+}
+
+fn decode_layer_color_cmc(
+    reader: &mut BitReader<'_>,
+    variant: LayerColorParseVariant,
+) -> crate::core::result::Result<(u16, Option<u32>, u8)> {
+    if variant.pre_flag_bits > 0 {
+        let _unknown = reader.read_bits_msb(variant.pre_flag_bits)?;
+    }
+    let _flag_64 = reader.read_b()?;
+    if variant.post_flag_bits > 0 {
+        let _unknown = reader.read_bits_msb(variant.post_flag_bits)?;
+    }
+    let _xref_index_plus_one = reader.read_bs()?;
+    let _xdep = reader.read_b()?;
+    let _frozen = reader.read_b()?;
+    let _on = reader.read_b()?;
+    let _frozen_new = reader.read_b()?;
+    let _locked = reader.read_b()?;
+    if variant.pre_values_bits > 0 {
+        let _unknown = reader.read_bits_msb(variant.pre_values_bits)?;
+    }
+    let _values = reader.read_bs()?;
+
+    let color_index = reader.read_bs()?;
+    let color_rgb = reader.read_bl()?;
+    let color_byte = reader.read_rc()?;
+    if (color_byte & 0x01) != 0 {
+        let _color_name = reader.read_tv()?;
+    }
+    if (color_byte & 0x02) != 0 {
+        let _book_name = reader.read_tv()?;
+    }
+
+    let true_color = if color_rgb == 0 || (color_rgb >> 24) == 0 {
+        // Keep only true 24-bit payload with marker byte present.
+        // If high byte is zero, treat as unset to prefer indexed color.
+        None
+    } else {
+        let rgb = color_rgb & 0x00FF_FFFF;
+        if rgb == 0 {
+            None
+        } else {
+            Some(rgb)
+        }
+    };
+    Ok((color_index, true_color, color_byte))
+}
+
+fn layer_color_candidate_score(color_index: u16, true_color: Option<u32>, color_byte: u8) -> u64 {
+    let mut score = 0u64;
+
+    if color_index <= 257 {
+        score += 0;
+    } else if color_index <= 4096 {
+        score += 1_000;
+    } else {
+        score += 100_000;
+    }
+
+    if color_byte <= 3 {
+        score += 0;
+    } else {
+        score += 10_000;
+    }
+
+    if let Some(rgb) = true_color {
+        if rgb == 0 || rgb > 0x00FF_FFFF {
+            score += 10_000;
+        }
+    }
+
+    score
+}
+
+fn _unused_true_color_example(color_rgb: u32) -> Option<u32> {
+    if color_rgb == 0 {
+        None
+    } else {
+        Some(color_rgb)
+    }
+}
+
+fn skip_eed(reader: &mut BitReader<'_>) -> crate::core::result::Result<()> {
+    let mut ext_size = reader.read_bs()?;
+    while ext_size > 0 {
+        let _app_handle = reader.read_h()?;
+        for _ in 0..ext_size {
+            let _ = reader.read_rc()?;
+        }
+        ext_size = reader.read_bs()?;
+    }
+    Ok(())
+}
+
+fn is_recoverable_decode_error(err: &DwgError) -> bool {
+    matches!(
+        err.kind,
+        ErrorKind::NotImplemented | ErrorKind::Decode | ErrorKind::Format
+    )
 }
 
 fn build_decoder(bytes: &[u8]) -> crate::core::result::Result<decoder::Decoder<'_>> {

@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -92,15 +93,22 @@ class Layout:
 
     def _iter_type(self, dxftype: str) -> Iterator[Entity]:
         decode_path = self.doc.decode_path
+        entity_style_map = _entity_style_map(decode_path)
+        layer_color_map = _layer_color_map(decode_path)
         if dxftype == "LINE":
             for handle, sx, sy, sz, ex, ey, ez in raw.decode_line_entities(decode_path):
                 yield Entity(
                     dxftype="LINE",
                     handle=handle,
-                    dxf={
-                        "start": (sx, sy, sz),
-                        "end": (ex, ey, ez),
-                    },
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "start": (sx, sy, sz),
+                            "end": (ex, ey, ez),
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                    ),
                 )
             return
 
@@ -113,12 +121,17 @@ class Layout:
                 yield Entity(
                     dxftype="ARC",
                     handle=handle,
-                    dxf={
-                        "center": (cx, cy, cz),
-                        "radius": radius,
-                        "start_angle": start_deg,
-                        "end_angle": end_deg,
-                    },
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "center": (cx, cy, cz),
+                            "radius": radius,
+                            "start_angle": start_deg,
+                            "end_angle": end_deg,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                    ),
                 )
             return
 
@@ -128,11 +141,16 @@ class Layout:
                 yield Entity(
                     dxftype="LWPOLYLINE",
                     handle=handle,
-                    dxf={
-                        "points": points3d,
-                        "flags": flags,
-                        "closed": bool(flags & 1),
-                    },
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "points": points3d,
+                            "flags": flags,
+                            "closed": bool(flags & 1),
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                    ),
                 )
             return
 
@@ -141,10 +159,15 @@ class Layout:
                 yield Entity(
                     dxftype="POINT",
                     handle=handle,
-                    dxf={
-                        "location": (x, y, z),
-                        "x_axis_angle": angle,
-                    },
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "location": (x, y, z),
+                            "x_axis_angle": angle,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                    ),
                 )
             return
 
@@ -153,10 +176,15 @@ class Layout:
                 yield Entity(
                     dxftype="CIRCLE",
                     handle=handle,
-                    dxf={
-                        "center": (cx, cy, cz),
-                        "radius": radius,
-                    },
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "center": (cx, cy, cz),
+                            "radius": radius,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                    ),
                 )
             return
 
@@ -173,14 +201,19 @@ class Layout:
                 yield Entity(
                     dxftype="ELLIPSE",
                     handle=handle,
-                    dxf={
-                        "center": center,
-                        "major_axis": major_axis,
-                        "extrusion": extrusion,
-                        "axis_ratio": axis_ratio,
-                        "start_angle": start_angle,
-                        "end_angle": end_angle,
-                    },
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "center": center,
+                            "major_axis": major_axis,
+                            "extrusion": extrusion,
+                            "axis_ratio": axis_ratio,
+                            "start_angle": start_angle,
+                            "end_angle": end_angle,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                    ),
                 )
             return
 
@@ -200,21 +233,26 @@ class Layout:
                 yield Entity(
                     dxftype="TEXT",
                     handle=handle,
-                    dxf={
-                        "text": text,
-                        "insert": insertion,
-                        "align_point": alignment,
-                        "extrusion": extrusion,
-                        "thickness": thickness,
-                        "oblique": math.degrees(oblique_angle),
-                        "height": height,
-                        "rotation": math.degrees(rotation),
-                        "width": width_factor,
-                        "text_generation_flag": generation,
-                        "halign": horizontal_alignment,
-                        "valign": vertical_alignment,
-                        "style_handle": style_handle,
-                    },
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "text": text,
+                            "insert": insertion,
+                            "align_point": alignment,
+                            "extrusion": extrusion,
+                            "thickness": thickness,
+                            "oblique": math.degrees(oblique_angle),
+                            "height": height,
+                            "rotation": math.degrees(rotation),
+                            "width": width_factor,
+                            "text_generation_flag": generation,
+                            "halign": horizontal_alignment,
+                            "valign": vertical_alignment,
+                            "style_handle": style_handle,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                    ),
                 )
             return
 
@@ -235,18 +273,23 @@ class Layout:
                 yield Entity(
                     dxftype="MTEXT",
                     handle=handle,
-                    dxf={
-                        "text": plain_text,
-                        "raw_text": text,
-                        "insert": insertion,
-                        "extrusion": extrusion,
-                        "text_direction": x_axis_dir,
-                        "rotation": rotation,
-                        "rect_width": rect_width,
-                        "char_height": text_height,
-                        "attachment_point": attachment,
-                        "drawing_direction": drawing_dir,
-                    },
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "text": plain_text,
+                            "raw_text": text,
+                            "insert": insertion,
+                            "extrusion": extrusion,
+                            "text_direction": x_axis_dir,
+                            "rotation": rotation,
+                            "rect_width": rect_width,
+                            "char_height": text_height,
+                            "attachment_point": attachment,
+                            "drawing_direction": drawing_dir,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                    ),
                 )
             return
 
@@ -278,29 +321,34 @@ class Layout:
                 yield Entity(
                     dxftype="DIMENSION",
                     handle=handle,
-                    dxf={
-                        "dimtype": "LINEAR",
-                        "defpoint": point10,
-                        "defpoint2": point13,
-                        "defpoint3": point14,
-                        "text_midpoint": text_midpoint,
-                        "insert": insert_point,
-                        "extrusion": extrusion,
-                        "insert_scale": insert_scale,
-                        "text": user_text,
-                        "text_rotation": math.degrees(text_rotation),
-                        "horizontal_direction": math.degrees(horizontal_direction),
-                        "oblique_angle": math.degrees(ext_line_rotation),
-                        "angle": math.degrees(dim_rotation),
-                        "dim_flags": dim_flags,
-                        "actual_measurement": actual_measurement,
-                        "attachment_point": attachment_point,
-                        "line_spacing_style": line_spacing_style,
-                        "line_spacing_factor": line_spacing_factor,
-                        "insert_rotation": math.degrees(insert_rotation),
-                        "dimstyle_handle": dimstyle_handle,
-                        "anonymous_block_handle": anonymous_block_handle,
-                    },
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "dimtype": "LINEAR",
+                            "defpoint": point10,
+                            "defpoint2": point13,
+                            "defpoint3": point14,
+                            "text_midpoint": text_midpoint,
+                            "insert": insert_point,
+                            "extrusion": extrusion,
+                            "insert_scale": insert_scale,
+                            "text": user_text,
+                            "text_rotation": math.degrees(text_rotation),
+                            "horizontal_direction": math.degrees(horizontal_direction),
+                            "oblique_angle": math.degrees(ext_line_rotation),
+                            "angle": math.degrees(dim_rotation),
+                            "dim_flags": dim_flags,
+                            "actual_measurement": actual_measurement,
+                            "attachment_point": attachment_point,
+                            "line_spacing_style": line_spacing_style,
+                            "line_spacing_factor": line_spacing_factor,
+                            "insert_rotation": math.degrees(insert_rotation),
+                            "dimstyle_handle": dimstyle_handle,
+                            "anonymous_block_handle": anonymous_block_handle,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                    ),
                 )
             return
 
@@ -472,3 +520,59 @@ def _normalize_types(types: str | Iterable[str] | None) -> list[str]:
                 selected.append(token)
 
     return selected
+
+
+@lru_cache(maxsize=16)
+def _entity_style_map(path: str) -> dict[int, tuple[int | None, int | None, int]]:
+    return {
+        handle: (index, true_color, layer_handle)
+        for handle, index, true_color, layer_handle in raw.decode_entity_styles(path)
+    }
+
+
+@lru_cache(maxsize=16)
+def _layer_color_map(path: str) -> dict[int, tuple[int, int | None]]:
+    return {handle: (index, true_color) for handle, index, true_color in raw.decode_layer_colors(path)}
+
+
+def _attach_entity_color(
+    handle: int,
+    dxf: dict,
+    entity_style_map: dict[int, tuple[int | None, int | None, int]],
+    layer_color_map: dict[int, tuple[int, int | None]],
+) -> dict:
+    index = None
+    true_color = None
+    layer_handle = None
+    resolved_index = None
+    resolved_true_color = None
+
+    style = entity_style_map.get(handle)
+    if style is not None:
+        index, true_color, layer_handle = style
+        resolved_index = index
+        resolved_true_color = true_color
+        if index in (None, 0, 256, 257) and true_color is None:
+            layer_style = layer_color_map.get(layer_handle)
+            if layer_style is not None:
+                resolved_index, resolved_true_color = layer_style
+
+    resolved_index, resolved_true_color = _normalize_resolved_color(
+        resolved_index, resolved_true_color
+    )
+
+    dxf["color_index"] = index
+    dxf["true_color"] = true_color
+    dxf["layer_handle"] = layer_handle
+    dxf["resolved_color_index"] = resolved_index
+    dxf["resolved_true_color"] = resolved_true_color
+    return dxf
+
+
+def _normalize_resolved_color(
+    index: int | None, true_color: int | None
+) -> tuple[int | None, int | None]:
+    if true_color is not None and 1 <= true_color <= 257:
+        if index in (None, 0, 256, 257):
+            return true_color, None
+    return index, true_color

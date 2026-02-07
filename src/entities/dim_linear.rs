@@ -9,6 +9,9 @@ use crate::entities::common::{
 #[derive(Debug, Clone)]
 pub struct DimLinearEntity {
     pub handle: u64,
+    pub color_index: Option<u16>,
+    pub true_color: Option<u32>,
+    pub layer_handle: u64,
     pub extrusion: (f64, f64, f64),
     pub text_midpoint: (f64, f64, f64),
     pub elevation: f64,
@@ -61,13 +64,24 @@ pub fn decode_dim_linear(reader: &mut BitReader<'_>) -> Result<DimLinearEntity> 
         variant(false, false, false, false, false, false),
     ];
 
+    let mut best: Option<(u64, DimLinearEntity)> = None;
     let mut last_error: Option<DwgError> = None;
     for parse_variant in variants {
         reader.set_pos(data_pos.0, data_pos.1);
         match decode_variant(reader, &header, parse_variant) {
-            Ok(entity) => return Ok(entity),
+            Ok(entity) => {
+                let score = plausibility_score(&entity);
+                match &best {
+                    Some((best_score, _)) if score >= *best_score => {}
+                    _ => best = Some((score, entity)),
+                }
+            }
             Err(err) => last_error = Some(err),
         }
+    }
+
+    if let Some((_, entity)) = best {
+        return Ok(entity);
     }
 
     Err(last_error
@@ -128,21 +142,26 @@ fn decode_variant(
     let ext_line_rotation = reader.read_bd()?;
     let dim_rotation = reader.read_bd()?;
 
-    let (dimstyle_handle, anonymous_block_handle) = if parse_variant.style_before_common {
-        let dimstyle = Some(read_handle_reference(reader, header.handle)?);
-        let block = Some(read_handle_reference(reader, header.handle)?);
-        let _common_handles = parse_common_entity_handles(reader, header)?;
-        (dimstyle, block)
-    } else {
-        let _common_handles = parse_common_entity_handles(reader, header)?;
-        (
-            read_handle_reference(reader, header.handle).ok(),
-            read_handle_reference(reader, header.handle).ok(),
-        )
-    };
+    let (dimstyle_handle, anonymous_block_handle, layer_handle) =
+        if parse_variant.style_before_common {
+            let dimstyle = Some(read_handle_reference(reader, header.handle)?);
+            let block = Some(read_handle_reference(reader, header.handle)?);
+            let common_handles = parse_common_entity_handles(reader, header)?;
+            (dimstyle, block, common_handles.layer)
+        } else {
+            let common_handles = parse_common_entity_handles(reader, header)?;
+            (
+                read_handle_reference(reader, header.handle).ok(),
+                read_handle_reference(reader, header.handle).ok(),
+                common_handles.layer,
+            )
+        };
 
     Ok(DimLinearEntity {
         handle: header.handle,
+        color_index: header.color.index,
+        true_color: header.color.true_color,
+        layer_handle,
         extrusion,
         text_midpoint: (text_mid_x, text_mid_y, elevation),
         elevation,
@@ -182,5 +201,84 @@ const fn variant(
         has_flip_arrow2,
         has_point12,
         style_before_common,
+    }
+}
+
+fn plausibility_score(entity: &DimLinearEntity) -> u64 {
+    let mut score = 0u64;
+
+    for pt in [
+        entity.point10,
+        entity.point13,
+        entity.point14,
+        entity.text_midpoint,
+    ] {
+        score = score.saturating_add(point_score(pt));
+    }
+    if let Some(insert_point) = entity.insert_point {
+        score = score.saturating_add(point_score(insert_point));
+    }
+    score = score.saturating_add(point_score(entity.extrusion));
+    score = score.saturating_add(point_score(entity.insert_scale));
+
+    for angle in [
+        entity.text_rotation,
+        entity.horizontal_direction,
+        entity.ext_line_rotation,
+        entity.dim_rotation,
+        entity.insert_rotation,
+    ] {
+        score = score.saturating_add(angle_score(angle));
+    }
+
+    if let Some(measurement) = entity.actual_measurement {
+        score = score.saturating_add(value_score(measurement));
+    }
+    if let Some(line_spacing) = entity.line_spacing_factor {
+        score = score.saturating_add(value_score(line_spacing));
+    }
+
+    score
+}
+
+fn point_score(point: (f64, f64, f64)) -> u64 {
+    value_score(point.0)
+        .saturating_add(value_score(point.1))
+        .saturating_add(value_score(point.2))
+}
+
+fn angle_score(value: f64) -> u64 {
+    if !value.is_finite() {
+        return 1_000_000;
+    }
+    let abs = value.abs();
+    if abs <= 1_000.0 {
+        0
+    } else if abs <= 1_000_000.0 {
+        25
+    } else if abs <= 1_000_000_000_000.0 {
+        250
+    } else {
+        1_000_000
+    }
+}
+
+fn value_score(value: f64) -> u64 {
+    if !value.is_finite() {
+        return 1_000_000;
+    }
+    let abs = value.abs();
+    if abs <= 1_000_000.0 {
+        0
+    } else if abs <= 1_000_000_000.0 {
+        10
+    } else if abs <= 1_000_000_000_000.0 {
+        100
+    } else if abs <= 1.0e18 {
+        1_000
+    } else if abs <= 1.0e24 {
+        10_000
+    } else {
+        1_000_000
     }
 }

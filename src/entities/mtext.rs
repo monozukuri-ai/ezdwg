@@ -1,11 +1,14 @@
 use crate::bit::BitReader;
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
-use crate::entities::common::parse_common_entity_header;
+use crate::entities::common::{parse_common_entity_handles, parse_common_entity_header};
 
 #[derive(Debug, Clone)]
 pub struct MTextEntity {
     pub handle: u64,
+    pub color_index: Option<u16>,
+    pub true_color: Option<u32>,
+    pub layer_handle: u64,
     pub text: String,
     pub insertion: (f64, f64, f64),
     pub extrusion: (f64, f64, f64),
@@ -40,9 +43,13 @@ pub fn decode_mtext(reader: &mut BitReader<'_>) -> Result<MTextEntity> {
             "mtext background fill is not supported",
         ));
     }
+    let common_handles = parse_common_entity_handles(reader, &header)?;
 
     Ok(MTextEntity {
         handle: header.handle,
+        color_index: header.color.index,
+        true_color: header.color.true_color,
+        layer_handle: common_handles.layer,
         text,
         insertion,
         extrusion,

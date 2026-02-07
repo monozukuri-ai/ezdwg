@@ -7,6 +7,9 @@ use crate::entities::common::{
 #[derive(Debug, Clone)]
 pub struct TextEntity {
     pub handle: u64,
+    pub color_index: Option<u16>,
+    pub true_color: Option<u32>,
+    pub layer_handle: u64,
     pub text: String,
     pub insertion: (f64, f64, f64),
     pub alignment: Option<(f64, f64, f64)>,
@@ -87,11 +90,14 @@ pub fn decode_text(reader: &mut BitReader<'_>) -> Result<TextEntity> {
         0
     };
 
-    let _common_handles = parse_common_entity_handles(reader, &header)?;
+    let common_handles = parse_common_entity_handles(reader, &header)?;
     let style_handle = read_handle_reference(reader, header.handle).ok();
 
     Ok(TextEntity {
         handle: header.handle,
+        color_index: header.color.index,
+        true_color: header.color.true_color,
+        layer_handle: common_handles.layer,
         text,
         insertion: (insertion_x, insertion_y, elevation),
         alignment,
