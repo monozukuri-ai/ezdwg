@@ -87,6 +87,8 @@ def plot_layout(
                 entity.dxf.get("char_height", 1.0),
                 entity.dxf.get("rotation", 0.0),
             )
+        elif dxftype == "DIMENSION":
+            _draw_dimension(ax, entity.dxf, line_width)
 
     if title:
         ax.set_title(title)
@@ -214,6 +216,26 @@ def _draw_text(ax, insert, text: str, height: float, rotation_deg: float):
     text = text.replace("\\P", "\n")
     size = max(6.0, abs(height) * 3.0)
     ax.text(insert[0], insert[1], text, fontsize=size, rotation=rotation_deg)
+
+
+def _draw_dimension(ax, dxf, line_width: float):
+    p13 = dxf.get("defpoint2")
+    p14 = dxf.get("defpoint3")
+    p10 = dxf.get("defpoint")
+    text_mid = dxf.get("text_midpoint")
+    text = dxf.get("text", "")
+
+    if p13 is not None and p14 is not None:
+        _draw_line(ax, p13, p14, line_width)
+    if p10 is not None and p13 is not None:
+        _draw_line(ax, p10, p13, max(0.5, line_width * 0.8))
+    if p10 is not None and p14 is not None:
+        _draw_line(ax, p10, p14, max(0.5, line_width * 0.8))
+
+    if (not text or text == "<>") and dxf.get("actual_measurement") is not None:
+        text = f'{dxf["actual_measurement"]:g}'
+    if text and text_mid is not None:
+        _draw_text(ax, text_mid, text, 1.0, dxf.get("text_rotation", 0.0))
 
 
 def _apply_equal_limits(ax):

@@ -21,4 +21,13 @@ class Entity:
             return [self.dxf["location"]]
         if self.dxftype in {"TEXT", "MTEXT"}:
             return [self.dxf["insert"]]
+        if self.dxftype == "DIMENSION":
+            points = []
+            if "defpoint2" in self.dxf:
+                points.append(self.dxf["defpoint2"])
+            if "defpoint3" in self.dxf:
+                points.append(self.dxf["defpoint3"])
+            if points:
+                return points
+            return [self.dxf["text_midpoint"]]
         raise NotImplementedError(f"to_points is not supported for {self.dxftype}")

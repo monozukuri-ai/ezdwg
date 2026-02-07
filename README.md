@@ -6,7 +6,7 @@ This project is **read-only** today and focuses on a simple, friendly API.
 ## Status
 - High-level API (`ezdwg.read`): **R2000 / AC1015**, **R2004 / AC1018**, **R2010 / AC1024** (compat mode)
 - Raw API (`ezdwg.raw`): **R2000 / AC1015**, **R2004 / AC1018**
-- High-level entities: **LINE**, **ARC**, **LWPOLYLINE**, **POINT**, **CIRCLE**, **ELLIPSE**, **TEXT**, **MTEXT**
+- High-level entities: **LINE**, **ARC**, **LWPOLYLINE**, **POINT**, **CIRCLE**, **ELLIPSE**, **TEXT**, **MTEXT**, **DIMENSION** (linear)
 - Additional raw decode: **INSERT** (+ low-level POLYLINE/VERTEX helpers)
 - Output units/angles: high-level API returns ARC angles in **degrees**
 
@@ -37,7 +37,7 @@ import ezdwg
 doc = ezdwg.read("path/to/file.dwg")
 msp = doc.modelspace()
 
-for e in msp.query("LINE LWPOLYLINE ARC CIRCLE ELLIPSE POINT TEXT MTEXT"):
+for e in msp.query("LINE LWPOLYLINE ARC CIRCLE ELLIPSE POINT TEXT MTEXT DIMENSION"):
     print(e.dxftype, e.handle, e.dxf)
 ```
 
@@ -58,6 +58,7 @@ python examples/basic_read.py
 python examples/query_types.py
 python examples/plot.py
 python examples/text_mtext.py
+python examples/dimensions.py
 python examples/raw_insert_2004.py
 ```
 

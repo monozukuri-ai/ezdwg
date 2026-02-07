@@ -25,7 +25,12 @@ SUPPORTED_ENTITY_TYPES = (
     "POINT",
     "TEXT",
     "MTEXT",
+    "DIMENSION",
 )
+
+TYPE_ALIASES = {
+    "DIM_LINEAR": "DIMENSION",
+}
 
 
 def read(path: str) -> "Document":
@@ -245,9 +250,63 @@ class Layout:
                 )
             return
 
+        if dxftype == "DIMENSION":
+            for (
+                handle,
+                user_text,
+                point10,
+                point13,
+                point14,
+                text_midpoint,
+                insert_point,
+                transforms,
+                angles,
+                common_data,
+                handle_data,
+            ) in raw.decode_dim_linear_entities(decode_path):
+                extrusion, insert_scale = transforms
+                text_rotation, horizontal_direction, ext_line_rotation, dim_rotation = angles
+                (
+                    dim_flags,
+                    actual_measurement,
+                    attachment_point,
+                    line_spacing_style,
+                    line_spacing_factor,
+                    insert_rotation,
+                ) = common_data
+                dimstyle_handle, anonymous_block_handle = handle_data
+                yield Entity(
+                    dxftype="DIMENSION",
+                    handle=handle,
+                    dxf={
+                        "dimtype": "LINEAR",
+                        "defpoint": point10,
+                        "defpoint2": point13,
+                        "defpoint3": point14,
+                        "text_midpoint": text_midpoint,
+                        "insert": insert_point,
+                        "extrusion": extrusion,
+                        "insert_scale": insert_scale,
+                        "text": user_text,
+                        "text_rotation": math.degrees(text_rotation),
+                        "horizontal_direction": math.degrees(horizontal_direction),
+                        "oblique_angle": math.degrees(ext_line_rotation),
+                        "angle": math.degrees(dim_rotation),
+                        "dim_flags": dim_flags,
+                        "actual_measurement": actual_measurement,
+                        "attachment_point": attachment_point,
+                        "line_spacing_style": line_spacing_style,
+                        "line_spacing_factor": line_spacing_factor,
+                        "insert_rotation": math.degrees(insert_rotation),
+                        "dimstyle_handle": dimstyle_handle,
+                        "anonymous_block_handle": anonymous_block_handle,
+                    },
+                )
+            return
+
         raise ValueError(
             f"unsupported entity type: {dxftype}. "
-            "Supported types: LINE, LWPOLYLINE, ARC, CIRCLE, ELLIPSE, POINT, TEXT, MTEXT"
+            "Supported types: LINE, LWPOLYLINE, ARC, CIRCLE, ELLIPSE, POINT, TEXT, MTEXT, DIMENSION"
         )
 
 
@@ -384,6 +443,7 @@ def _normalize_types(types: str | Iterable[str] | None) -> list[str]:
         tokens = list(types)
 
     normalized = [token.strip().upper() for token in tokens if token and token.strip()]
+    normalized = [TYPE_ALIASES.get(token, token) for token in normalized]
     if not normalized:
         return list(SUPPORTED_ENTITY_TYPES)
 
