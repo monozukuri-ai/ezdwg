@@ -33,7 +33,7 @@ def test_read_native_versions(relative_path: str, expected_version: str) -> None
 
 
 @pytest.mark.parametrize("source_version", ["AC1021", "AC1024", "AC1027"])
-def test_read_native_versions_do_not_use_conversion(
+def test_read_native_versions_do_not_require_conversion(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     source_version: str,
@@ -46,11 +46,7 @@ def test_read_native_versions_do_not_use_conversion(
             return source_version
         raise AssertionError(f"unexpected detect_version path: {path}")
 
-    def fail_convert(_path: str, _version: str) -> str:
-        raise AssertionError(f"{source_version} should not use compatibility conversion")
-
     monkeypatch.setattr(document_module.raw, "detect_version", fake_detect_version)
-    monkeypatch.setattr(document_module, "_convert_to_ac1018", fail_convert)
 
     doc = document_module.read(str(source_path))
 

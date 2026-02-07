@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 import fnmatch
-import hashlib
 import math
 import re
-import shutil
-import subprocess
-import tempfile
 from functools import lru_cache
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Iterable, Iterator
 
 from . import raw
@@ -17,7 +12,6 @@ from .entity import Entity
 
 SUPPORTED_VERSIONS = {"AC1015", "AC1018", "AC1021", "AC1024", "AC1027"}
 SUPPORTED_PARSE_VERSIONS = {"AC1015", "AC1018", "AC1021", "AC1024", "AC1027"}
-COMPAT_CONVERSION_VERSIONS = set()
 SUPPORTED_ENTITY_TYPES = (
     "LINE",
     "LWPOLYLINE",
@@ -41,18 +35,13 @@ def read(path: str) -> "Document":
     version = raw.detect_version(path)
     if version not in SUPPORTED_VERSIONS:
         raise ValueError(f"unsupported DWG version: {version}")
-    decode_path = path
-    decode_version = version
-    if version in COMPAT_CONVERSION_VERSIONS:
-        decode_path = _convert_to_ac1018(path, version)
-        decode_version = raw.detect_version(decode_path)
-    if decode_version not in SUPPORTED_PARSE_VERSIONS:
-        raise ValueError(f"unsupported DWG parse backend version: {decode_version}")
+    if version not in SUPPORTED_PARSE_VERSIONS:
+        raise ValueError(f"unsupported DWG parse backend version: {version}")
     return Document(
         path=path,
         version=version,
-        decode_path=decode_path,
-        decode_version=decode_version,
+        decode_path=path,
+        decode_version=version,
     )
 
 
@@ -374,61 +363,6 @@ class Layout:
             f"unsupported entity type: {dxftype}. "
             "Supported types: LINE, LWPOLYLINE, ARC, CIRCLE, ELLIPSE, POINT, TEXT, MTEXT, DIMENSION"
         )
-
-
-def _convert_to_ac1018(path: str, source_version: str) -> str:
-    source = Path(path).resolve()
-    if not source.exists():
-        raise FileNotFoundError(path)
-
-    converter = shutil.which("ODAFileConverter")
-    xvfb_run = shutil.which("xvfb-run")
-    if converter is None or xvfb_run is None:
-        raise ValueError(
-            f"{source_version} reading requires ODAFileConverter and xvfb-run "
-            "for compatibility conversion."
-        )
-
-    stat = source.stat()
-    digest = hashlib.sha1(
-        f"{source}:{stat.st_mtime_ns}:{stat.st_size}".encode("utf-8")
-    ).hexdigest()
-    cache_dir = Path(tempfile.gettempdir()) / "ezdwg_compat_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    converted_path = cache_dir / f"{digest}.dwg"
-    if converted_path.exists():
-        return str(converted_path)
-
-    with tempfile.TemporaryDirectory(dir=cache_dir) as workdir:
-        in_dir = Path(workdir) / "in"
-        out_dir = Path(workdir) / "out"
-        in_dir.mkdir(parents=True, exist_ok=True)
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        shutil.copy2(source, in_dir / "source.DWG")
-        cmd = [
-            xvfb_run,
-            "-a",
-            converter,
-            str(in_dir),
-            str(out_dir),
-            "ACAD2004",
-            "DWG",
-            "0",
-            "1",
-            "*.DWG",
-        ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if proc.returncode != 0:
-            message = (proc.stderr or proc.stdout or "").strip()
-            raise ValueError(f"{source_version} conversion failed: {message}")
-
-        candidates = sorted(out_dir.glob("*.dwg")) + sorted(out_dir.glob("*.DWG"))
-        if not candidates:
-            raise ValueError(f"{source_version} conversion produced no output DWG")
-        shutil.copy2(candidates[0], converted_path)
-
-    return str(converted_path)
 
 
 def _decode_mtext_plain_text(value: str) -> str:

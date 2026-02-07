@@ -23,13 +23,6 @@ Plotting (optional):
 pip install "ezdwg[plot]"
 ```
 
-Compatibility conversion (optional fallback) requires:
-
-```bash
-ODAFileConverter
-xvfb-run
-```
-
 ## Quick Start
 ```python
 import ezdwg
