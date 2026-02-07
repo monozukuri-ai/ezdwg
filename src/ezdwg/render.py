@@ -52,7 +52,7 @@ def plot_layout(
     for entity in layout.query(types):
         color = _resolve_dwg_color(entity.dxf)
         if color is None:
-            color = _next_entity_color(ax)
+            color = "#000000"
         dxftype = entity.dxftype
         if dxftype == "LINE":
             _draw_line(ax, entity.dxf["start"], entity.dxf["end"], line_width, color=color)
@@ -159,6 +159,13 @@ def _next_entity_color(ax):
 
 
 def _resolve_dwg_color(dxf):
+    true_color = dxf.get("resolved_true_color")
+    if true_color is None:
+        true_color = dxf.get("true_color")
+    color = _true_color_to_hex(true_color)
+    if color is not None:
+        return color
+
     index = dxf.get("resolved_color_index")
     if index is None:
         index = dxf.get("color_index")
@@ -171,13 +178,6 @@ def _resolve_dwg_color(dxf):
             mapped = _aci_to_hex(aci)
             if mapped is not None:
                 return mapped
-
-    true_color = dxf.get("resolved_true_color")
-    if true_color is None:
-        true_color = dxf.get("true_color")
-    color = _true_color_to_hex(true_color)
-    if color is not None:
-        return color
 
     return None
 
@@ -202,7 +202,9 @@ def _aci_to_hex(index: int):
         4: (0, 255, 255),
         5: (0, 0, 255),
         6: (255, 0, 255),
-        7: (255, 255, 255),
+        # ACI 7 is white/black depending on background. Use black for
+        # matplotlib's default light background so geometry stays visible.
+        7: (0, 0, 0),
         8: (128, 128, 128),
         9: (192, 192, 192),
     }

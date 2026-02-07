@@ -219,7 +219,7 @@ impl<'a> BitReader<'a> {
     pub fn read_be(&mut self) -> Result<(f64, f64, f64)> {
         let what_it_is = self.read_b()?;
         if what_it_is == 1 {
-            Ok((0.0, 0.0, 0.1))
+            Ok((0.0, 0.0, 1.0))
         } else {
             Ok((self.read_bd()?, self.read_bd()?, self.read_bd()?))
         }

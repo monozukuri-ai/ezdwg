@@ -30,16 +30,20 @@ pub fn decode_line_r2007(reader: &mut BitReader<'_>) -> Result<LineEntity> {
 pub fn decode_line_r2010(
     reader: &mut BitReader<'_>,
     object_data_end_bit: u32,
+    object_handle: u64,
 ) -> Result<LineEntity> {
-    let header = parse_common_entity_header_r2010(reader, object_data_end_bit)?;
+    let mut header = parse_common_entity_header_r2010(reader, object_data_end_bit)?;
+    header.handle = object_handle;
     decode_line_with_header(reader, header, true, true)
 }
 
 pub fn decode_line_r2013(
     reader: &mut BitReader<'_>,
     object_data_end_bit: u32,
+    object_handle: u64,
 ) -> Result<LineEntity> {
-    let header = parse_common_entity_header_r2013(reader, object_data_end_bit)?;
+    let mut header = parse_common_entity_header_r2013(reader, object_data_end_bit)?;
+    header.handle = object_handle;
     decode_line_with_header(reader, header, true, true)
 }
 

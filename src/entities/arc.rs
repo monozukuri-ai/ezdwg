@@ -29,13 +29,23 @@ pub fn decode_arc_r2007(reader: &mut BitReader<'_>) -> Result<ArcEntity> {
     decode_arc_with_header(reader, header, true, true)
 }
 
-pub fn decode_arc_r2010(reader: &mut BitReader<'_>, object_data_end_bit: u32) -> Result<ArcEntity> {
-    let header = parse_common_entity_header_r2010(reader, object_data_end_bit)?;
+pub fn decode_arc_r2010(
+    reader: &mut BitReader<'_>,
+    object_data_end_bit: u32,
+    object_handle: u64,
+) -> Result<ArcEntity> {
+    let mut header = parse_common_entity_header_r2010(reader, object_data_end_bit)?;
+    header.handle = object_handle;
     decode_arc_with_header(reader, header, true, true)
 }
 
-pub fn decode_arc_r2013(reader: &mut BitReader<'_>, object_data_end_bit: u32) -> Result<ArcEntity> {
-    let header = parse_common_entity_header_r2013(reader, object_data_end_bit)?;
+pub fn decode_arc_r2013(
+    reader: &mut BitReader<'_>,
+    object_data_end_bit: u32,
+    object_handle: u64,
+) -> Result<ArcEntity> {
+    let mut header = parse_common_entity_header_r2013(reader, object_data_end_bit)?;
+    header.handle = object_handle;
     decode_arc_with_header(reader, header, true, true)
 }
 

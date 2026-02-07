@@ -214,6 +214,8 @@ pub fn decode_entity_styles(
     let best_effort = is_best_effort_compat_version(&decoder);
     let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
     let index = decoder.build_object_index().map_err(to_py_err)?;
+    let known_layer_handles =
+        collect_known_layer_handles(&decoder, &dynamic_types, &index, best_effort)?;
     let mut result = Vec::new();
 
     for obj in index.objects.iter() {
@@ -230,143 +232,283 @@ pub fn decode_entity_styles(
             return Err(to_py_err(err));
         }
         if matches_type_name(header.type_code, 0x13, "LINE", &dynamic_types) {
-            let entity = match decode_line_for_version(&mut reader, decoder.version(), &header) {
+            let entity = match decode_line_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
                 Ok(entity) => entity,
                 Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
                 Err(err) => return Err(to_py_err(err)),
             };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
             result.push((
                 entity.handle,
                 entity.color_index,
                 entity.true_color,
-                entity.layer_handle,
+                layer_handle,
             ));
         } else if matches_type_name(header.type_code, 0x1B, "POINT", &dynamic_types) {
-            let entity = match decode_point_for_version(&mut reader, decoder.version(), &header) {
+            let entity = match decode_point_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
                 Ok(entity) => entity,
                 Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
                 Err(err) => return Err(to_py_err(err)),
             };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
             result.push((
                 entity.handle,
                 entity.color_index,
                 entity.true_color,
-                entity.layer_handle,
+                layer_handle,
             ));
         } else if matches_type_name(header.type_code, 0x11, "ARC", &dynamic_types) {
-            let entity = match decode_arc_for_version(&mut reader, decoder.version(), &header) {
+            let entity =
+                match decode_arc_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
+                {
                 Ok(entity) => entity,
                 Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
                 Err(err) => return Err(to_py_err(err)),
             };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
             result.push((
                 entity.handle,
                 entity.color_index,
                 entity.true_color,
-                entity.layer_handle,
+                layer_handle,
             ));
         } else if matches_type_name(header.type_code, 0x12, "CIRCLE", &dynamic_types) {
-            let entity = match decode_circle_for_version(&mut reader, decoder.version(), &header) {
+            let entity = match decode_circle_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
                 Ok(entity) => entity,
                 Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
                 Err(err) => return Err(to_py_err(err)),
             };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
             result.push((
                 entity.handle,
                 entity.color_index,
                 entity.true_color,
-                entity.layer_handle,
+                layer_handle,
             ));
         } else if matches_type_name(header.type_code, 0x23, "ELLIPSE", &dynamic_types) {
-            let entity = match decode_ellipse_for_version(&mut reader, decoder.version(), &header) {
+            let entity = match decode_ellipse_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
                 Ok(entity) => entity,
                 Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
                 Err(err) => return Err(to_py_err(err)),
             };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
             result.push((
                 entity.handle,
                 entity.color_index,
                 entity.true_color,
-                entity.layer_handle,
+                layer_handle,
             ));
         } else if matches_type_name(header.type_code, 0x01, "TEXT", &dynamic_types) {
-            let entity = match decode_text_for_version(&mut reader, decoder.version(), &header) {
+            let entity = match decode_text_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
                 Ok(entity) => entity,
                 Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
                 Err(err) => return Err(to_py_err(err)),
             };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
             result.push((
                 entity.handle,
                 entity.color_index,
                 entity.true_color,
-                entity.layer_handle,
+                layer_handle,
             ));
         } else if matches_type_name(header.type_code, 0x2C, "MTEXT", &dynamic_types) {
-            let entity = match decode_mtext_for_version(&mut reader, decoder.version(), &header) {
+            let entity = match decode_mtext_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
                 Ok(entity) => entity,
                 Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
                 Err(err) => return Err(to_py_err(err)),
             };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
             result.push((
                 entity.handle,
                 entity.color_index,
                 entity.true_color,
-                entity.layer_handle,
+                layer_handle,
             ));
         } else if matches_type_name(header.type_code, 0x4D, "LWPOLYLINE", &dynamic_types) {
             let entity =
-                match decode_lwpolyline_for_version(&mut reader, decoder.version(), &header) {
+                match decode_lwpolyline_for_version(
+                    &mut reader,
+                    decoder.version(),
+                    &header,
+                    obj.handle.0,
+                ) {
                     Ok(entity) => entity,
                     Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
                     Err(err) => return Err(to_py_err(err)),
                 };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
             result.push((
                 entity.handle,
                 entity.color_index,
                 entity.true_color,
-                entity.layer_handle,
+                layer_handle,
             ));
         } else if matches_type_name(header.type_code, 0x15, "DIM_LINEAR", &dynamic_types) {
             let entity =
-                match decode_dim_linear_for_version(&mut reader, decoder.version(), &header) {
+                match decode_dim_linear_for_version(
+                    &mut reader,
+                    decoder.version(),
+                    &header,
+                    obj.handle.0,
+                ) {
                     Ok(entity) => entity,
                     Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
                     Err(err) => return Err(to_py_err(err)),
                 };
             let common = &entity.common;
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                common.layer_handle,
+                &known_layer_handles,
+            );
             result.push((
                 common.handle,
                 common.color_index,
                 common.true_color,
-                common.layer_handle,
+                layer_handle,
             ));
         } else if matches_type_name(header.type_code, 0x1A, "DIM_DIAMETER", &dynamic_types) {
             let entity =
-                match decode_dim_diameter_for_version(&mut reader, decoder.version(), &header) {
+                match decode_dim_diameter_for_version(
+                    &mut reader,
+                    decoder.version(),
+                    &header,
+                    obj.handle.0,
+                ) {
                     Ok(entity) => entity,
                     Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
                     Err(err) => return Err(to_py_err(err)),
                 };
             let common = &entity.common;
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                common.layer_handle,
+                &known_layer_handles,
+            );
             result.push((
                 common.handle,
                 common.color_index,
                 common.true_color,
-                common.layer_handle,
+                layer_handle,
             ));
         } else if matches_type_name(header.type_code, 0x19, "DIM_RADIUS", &dynamic_types) {
             let entity =
-                match decode_dim_radius_for_version(&mut reader, decoder.version(), &header) {
+                match decode_dim_radius_for_version(
+                    &mut reader,
+                    decoder.version(),
+                    &header,
+                    obj.handle.0,
+                ) {
                     Ok(entity) => entity,
                     Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
                     Err(err) => return Err(to_py_err(err)),
                 };
             let common = &entity.common;
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                common.layer_handle,
+                &known_layer_handles,
+            );
             result.push((
                 common.handle,
                 common.color_index,
                 common.true_color,
-                common.layer_handle,
+                layer_handle,
             ));
         } else {
             continue;
@@ -410,7 +552,8 @@ pub fn decode_layer_colors(
             }
             return Err(to_py_err(err));
         }
-        let (handle, color_index, true_color) = match decode_layer_color_record(&mut reader) {
+        let (handle, color_index, true_color) =
+            match decode_layer_color_record(&mut reader, decoder.version(), obj.handle.0) {
             Ok(decoded) => decoded,
             Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
             Err(err) => return Err(to_py_err(err)),
@@ -419,6 +562,22 @@ pub fn decode_layer_colors(
         if let Some(limit) = limit {
             if result.len() >= limit {
                 break;
+            }
+        }
+    }
+
+    if result.len() >= 3 {
+        if let Some(owned_handles) = decode_layer_control_owned_handles(
+            &decoder,
+            &dynamic_types,
+            &index,
+            result.len(),
+            best_effort,
+        )? {
+            if owned_handles.len() == result.len() {
+                for (row, owned) in result.iter_mut().zip(owned_handles.into_iter()) {
+                    row.0 = owned;
+                }
             }
         }
     }
@@ -452,7 +611,8 @@ pub fn decode_line_entities(
             }
             return Err(to_py_err(err));
         }
-        let entity = match decode_line_for_version(&mut reader, decoder.version(), &header) {
+        let entity =
+            match decode_line_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
             Ok(entity) => entity,
             Err(err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
@@ -501,7 +661,12 @@ pub fn decode_point_entities(
             }
             return Err(to_py_err(err));
         }
-        let entity = match decode_point_for_version(&mut reader, decoder.version(), &header) {
+        let entity = match decode_point_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
             Ok(entity) => entity,
             Err(err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
@@ -548,7 +713,8 @@ pub fn decode_arc_entities(
             }
             return Err(to_py_err(err));
         }
-        let entity = match decode_arc_for_version(&mut reader, decoder.version(), &header) {
+        let entity =
+            match decode_arc_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
             Ok(entity) => entity,
             Err(err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
@@ -597,7 +763,12 @@ pub fn decode_circle_entities(
             }
             return Err(to_py_err(err));
         }
-        let entity = match decode_circle_for_version(&mut reader, decoder.version(), &header) {
+        let entity = match decode_circle_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
             Ok(entity) => entity,
             Err(err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
@@ -654,7 +825,12 @@ pub fn decode_ellipse_entities(
             }
             return Err(to_py_err(err));
         }
-        let entity = match decode_ellipse_for_version(&mut reader, decoder.version(), &header) {
+        let entity = match decode_ellipse_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
             Ok(entity) => entity,
             Err(err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
@@ -714,7 +890,12 @@ pub fn decode_text_entities(
             }
             return Err(to_py_err(err));
         }
-        let entity = match decode_text_for_version(&mut reader, decoder.version(), &header) {
+        let entity = match decode_text_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
             Ok(entity) => entity,
             Err(err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
@@ -786,7 +967,12 @@ pub fn decode_mtext_entities(
             }
             return Err(to_py_err(err));
         }
-        let entity = match decode_mtext_for_version(&mut reader, decoder.version(), &header) {
+        let entity = match decode_mtext_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
             Ok(entity) => entity,
             Err(err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
@@ -851,7 +1037,12 @@ pub fn decode_dim_linear_entities(
             }
             return Err(to_py_err(err));
         }
-        let entity = match decode_dim_linear_for_version(&mut reader, decoder.version(), &header) {
+        let entity = match decode_dim_linear_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
             Ok(entity) => entity,
             Err(err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
@@ -931,8 +1122,12 @@ pub fn decode_dim_diameter_entities(
             }
             return Err(to_py_err(err));
         }
-        let entity = match decode_dim_diameter_for_version(&mut reader, decoder.version(), &header)
-        {
+        let entity = match decode_dim_diameter_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
             Ok(entity) => entity,
             Err(err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
@@ -1012,7 +1207,12 @@ pub fn decode_dim_radius_entities(
             }
             return Err(to_py_err(err));
         }
-        let entity = match decode_dim_radius_for_version(&mut reader, decoder.version(), &header) {
+        let entity = match decode_dim_radius_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
             Ok(entity) => entity,
             Err(err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
@@ -1218,7 +1418,12 @@ pub fn decode_lwpolyline_entities(
             }
             return Err(to_py_err(err));
         }
-        let entity = match decode_lwpolyline_for_version(&mut reader, decoder.version(), &header) {
+        let entity = match decode_lwpolyline_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
             Ok(entity) => entity,
             Err(err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
@@ -1699,15 +1904,16 @@ fn decode_line_for_version(
     reader: &mut BitReader<'_>,
     version: &version::DwgVersion,
     header: &ApiObjectHeader,
+    object_handle: u64,
 ) -> crate::core::result::Result<entities::LineEntity> {
     match version {
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_line_r2010(reader, object_data_end_bit)
+            entities::decode_line_r2010(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2013 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_line_r2013(reader, object_data_end_bit)
+            entities::decode_line_r2013(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2007 => entities::decode_line_r2007(reader),
         _ => entities::decode_line(reader),
@@ -1718,15 +1924,16 @@ fn decode_point_for_version(
     reader: &mut BitReader<'_>,
     version: &version::DwgVersion,
     header: &ApiObjectHeader,
+    object_handle: u64,
 ) -> crate::core::result::Result<entities::PointEntity> {
     match version {
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_point_r2010(reader, object_data_end_bit)
+            entities::decode_point_r2010(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2013 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_point_r2013(reader, object_data_end_bit)
+            entities::decode_point_r2013(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2007 => entities::decode_point_r2007(reader),
         _ => entities::decode_point(reader),
@@ -1737,15 +1944,16 @@ fn decode_arc_for_version(
     reader: &mut BitReader<'_>,
     version: &version::DwgVersion,
     header: &ApiObjectHeader,
+    object_handle: u64,
 ) -> crate::core::result::Result<entities::ArcEntity> {
     match version {
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_arc_r2010(reader, object_data_end_bit)
+            entities::decode_arc_r2010(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2013 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_arc_r2013(reader, object_data_end_bit)
+            entities::decode_arc_r2013(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2007 => entities::decode_arc_r2007(reader),
         _ => entities::decode_arc(reader),
@@ -1756,15 +1964,16 @@ fn decode_circle_for_version(
     reader: &mut BitReader<'_>,
     version: &version::DwgVersion,
     header: &ApiObjectHeader,
+    object_handle: u64,
 ) -> crate::core::result::Result<entities::CircleEntity> {
     match version {
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_circle_r2010(reader, object_data_end_bit)
+            entities::decode_circle_r2010(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2013 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_circle_r2013(reader, object_data_end_bit)
+            entities::decode_circle_r2013(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2007 => entities::decode_circle_r2007(reader),
         _ => entities::decode_circle(reader),
@@ -1775,15 +1984,16 @@ fn decode_ellipse_for_version(
     reader: &mut BitReader<'_>,
     version: &version::DwgVersion,
     header: &ApiObjectHeader,
+    object_handle: u64,
 ) -> crate::core::result::Result<entities::EllipseEntity> {
     match version {
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_ellipse_r2010(reader, object_data_end_bit)
+            entities::decode_ellipse_r2010(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2013 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_ellipse_r2013(reader, object_data_end_bit)
+            entities::decode_ellipse_r2013(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2007 => entities::decode_ellipse_r2007(reader),
         _ => entities::decode_ellipse(reader),
@@ -1794,15 +2004,16 @@ fn decode_text_for_version(
     reader: &mut BitReader<'_>,
     version: &version::DwgVersion,
     header: &ApiObjectHeader,
+    object_handle: u64,
 ) -> crate::core::result::Result<entities::TextEntity> {
     match version {
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_text_r2010(reader, object_data_end_bit)
+            entities::decode_text_r2010(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2013 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_text_r2013(reader, object_data_end_bit)
+            entities::decode_text_r2013(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2007 => entities::decode_text_r2007(reader),
         _ => entities::decode_text(reader),
@@ -1813,15 +2024,16 @@ fn decode_mtext_for_version(
     reader: &mut BitReader<'_>,
     version: &version::DwgVersion,
     header: &ApiObjectHeader,
+    object_handle: u64,
 ) -> crate::core::result::Result<entities::MTextEntity> {
     match version {
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_mtext_r2010(reader, object_data_end_bit)
+            entities::decode_mtext_r2010(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2013 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_mtext_r2013(reader, object_data_end_bit)
+            entities::decode_mtext_r2013(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2007 => entities::decode_mtext_r2007(reader),
         _ => entities::decode_mtext(reader),
@@ -1832,15 +2044,16 @@ fn decode_dim_linear_for_version(
     reader: &mut BitReader<'_>,
     version: &version::DwgVersion,
     header: &ApiObjectHeader,
+    object_handle: u64,
 ) -> crate::core::result::Result<entities::DimLinearEntity> {
     match version {
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_dim_linear_r2010(reader, object_data_end_bit)
+            entities::decode_dim_linear_r2010(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2013 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_dim_linear_r2013(reader, object_data_end_bit)
+            entities::decode_dim_linear_r2013(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2007 => entities::decode_dim_linear_r2007(reader),
         _ => entities::decode_dim_linear(reader),
@@ -1851,15 +2064,16 @@ fn decode_dim_radius_for_version(
     reader: &mut BitReader<'_>,
     version: &version::DwgVersion,
     header: &ApiObjectHeader,
+    object_handle: u64,
 ) -> crate::core::result::Result<entities::DimRadiusEntity> {
     match version {
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_dim_radius_r2010(reader, object_data_end_bit)
+            entities::decode_dim_radius_r2010(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2013 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_dim_radius_r2013(reader, object_data_end_bit)
+            entities::decode_dim_radius_r2013(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2007 => entities::decode_dim_radius_r2007(reader),
         _ => entities::decode_dim_radius(reader),
@@ -1870,15 +2084,16 @@ fn decode_dim_diameter_for_version(
     reader: &mut BitReader<'_>,
     version: &version::DwgVersion,
     header: &ApiObjectHeader,
+    object_handle: u64,
 ) -> crate::core::result::Result<entities::DimDiameterEntity> {
     match version {
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_dim_diameter_r2010(reader, object_data_end_bit)
+            entities::decode_dim_diameter_r2010(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2013 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_dim_diameter_r2013(reader, object_data_end_bit)
+            entities::decode_dim_diameter_r2013(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2007 => entities::decode_dim_diameter_r2007(reader),
         _ => entities::decode_dim_diameter(reader),
@@ -1889,15 +2104,16 @@ fn decode_lwpolyline_for_version(
     reader: &mut BitReader<'_>,
     version: &version::DwgVersion,
     header: &ApiObjectHeader,
+    object_handle: u64,
 ) -> crate::core::result::Result<entities::LwPolylineEntity> {
     match version {
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_lwpolyline_r2010(reader, object_data_end_bit)
+            entities::decode_lwpolyline_r2010(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2013 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_lwpolyline_r2013(reader, object_data_end_bit)
+            entities::decode_lwpolyline_r2013(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2007 => entities::decode_lwpolyline_r2007(reader),
         _ => entities::decode_lwpolyline(reader),
@@ -1912,12 +2128,49 @@ fn resolve_r2010_object_data_end_bit(header: &ApiObjectHeader) -> crate::core::r
     let handle_bits = header
         .handle_stream_size_bits
         .ok_or_else(|| DwgError::new(ErrorKind::Format, "missing R2010 handle stream size"))?;
-    total_bits.checked_sub(handle_bits).ok_or_else(|| {
+    // R2010+/R2013 object header reports handle stream size with an extra
+    // one-byte string-stream marker payload. Exclude it from the handle stream
+    // bit count when seeking to entity handle references.
+    let effective_handle_bits = handle_bits.saturating_sub(8);
+    total_bits.checked_sub(effective_handle_bits).ok_or_else(|| {
         DwgError::new(
             ErrorKind::Format,
             "R2010 handle stream exceeds object data size",
         )
     })
+}
+
+fn resolve_r2010_object_data_end_bit_candidates(header: &ApiObjectHeader) -> Vec<u32> {
+    let total_bits = header.data_size.saturating_mul(8);
+    let Some(handle_bits) = header.handle_stream_size_bits else {
+        return Vec::new();
+    };
+
+    let bases = [
+        total_bits.saturating_sub(handle_bits),
+        total_bits.saturating_sub(handle_bits.saturating_sub(8)),
+    ];
+    let deltas = [-16i32, -8, 0, 8, 16];
+
+    let mut out = Vec::new();
+    for base in bases {
+        for delta in deltas {
+            let candidate_i64 = i64::from(base) + i64::from(delta);
+            if candidate_i64 < 0 {
+                continue;
+            }
+            let Ok(candidate) = u32::try_from(candidate_i64) else {
+                continue;
+            };
+            if candidate > total_bits {
+                continue;
+            }
+            out.push(candidate);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 fn skip_object_type_prefix(
@@ -2003,16 +2256,315 @@ fn load_dynamic_types(
     }
 }
 
+fn collect_known_layer_handles(
+    decoder: &decoder::Decoder<'_>,
+    dynamic_types: &HashMap<u16, String>,
+    index: &objects::ObjectIndex,
+    best_effort: bool,
+) -> PyResult<HashSet<u64>> {
+    let mut layer_handles = HashSet::new();
+    for obj in index.objects.iter() {
+        let Some((_record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if matches_type_name(header.type_code, 0x33, "LAYER", dynamic_types) {
+            layer_handles.insert(obj.handle.0);
+        }
+    }
+    Ok(layer_handles)
+}
+
+fn decode_layer_control_owned_handles(
+    decoder: &decoder::Decoder<'_>,
+    dynamic_types: &HashMap<u16, String>,
+    index: &objects::ObjectIndex,
+    expected_layer_count: usize,
+    best_effort: bool,
+) -> PyResult<Option<Vec<u64>>> {
+    if expected_layer_count == 0 {
+        return Ok(None);
+    }
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x32, "LAYER_CONTROL", dynamic_types) {
+            continue;
+        }
+
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                return Ok(None);
+            }
+            return Err(to_py_err(err));
+        }
+
+        let base_handle = match reader.read_h() {
+            Ok(handle) => handle.value,
+            Err(err) if best_effort => return Ok(None),
+            Err(err) => return Err(to_py_err(err)),
+        };
+        if let Err(err) = skip_eed(&mut reader) {
+            if best_effort {
+                return Ok(None);
+            }
+            return Err(to_py_err(err));
+        }
+        let _num_reactors = match reader.read_bl() {
+            Ok(value) => value,
+            Err(err) if best_effort => return Ok(None),
+            Err(err) => return Err(to_py_err(err)),
+        };
+        let xdic_missing_flag = match reader.read_b() {
+            Ok(value) => value,
+            Err(err) if best_effort => return Ok(None),
+            Err(err) => return Err(to_py_err(err)),
+        };
+        if matches!(decoder.version(), version::DwgVersion::R2013) {
+            let _has_ds_binary_data = match reader.read_b() {
+                Ok(value) => value,
+                Err(err) if best_effort => return Ok(None),
+                Err(err) => return Err(to_py_err(err)),
+            };
+        }
+        let _num_entries_hint = reader.read_bl().ok().map(|v| v as usize);
+
+        let candidates = match decoder.version() {
+            version::DwgVersion::R2010 | version::DwgVersion::R2013 => {
+                resolve_r2010_object_data_end_bit_candidates(&header)
+            }
+            _ => return Ok(None),
+        };
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        let hint = _num_entries_hint.unwrap_or(expected_layer_count);
+        let mut best: Option<(u64, Vec<u64>)> = None;
+
+        for end_bit in candidates {
+            let mut r = record.bit_reader();
+            if skip_object_type_prefix(&mut r, decoder.version()).is_err() {
+                continue;
+            }
+            r.set_bit_pos(end_bit);
+            let max_refs = hint.max(expected_layer_count).saturating_add(10);
+            let mut refs = Vec::new();
+            for _ in 0..max_refs {
+                match entities::common::read_handle_reference(&mut r, base_handle) {
+                    Ok(handle) => refs.push(handle),
+                    Err(_) => break,
+                }
+            }
+            if refs.len() < expected_layer_count {
+                continue;
+            }
+
+            let max_start = refs.len().saturating_sub(expected_layer_count).min(3);
+            for start in 0..=max_start {
+                let owned = refs[start..start + expected_layer_count].to_vec();
+                let score = score_layer_control_owned_candidate(
+                    &owned,
+                    hint,
+                    expected_layer_count,
+                    xdic_missing_flag == 0,
+                    start,
+                );
+                match &best {
+                    Some((best_score, _)) if score >= *best_score => {}
+                    _ => best = Some((score, owned)),
+                }
+            }
+        }
+
+        if let Some((_, owned)) = best {
+            return Ok(Some(owned));
+        }
+        return Ok(None);
+    }
+
+    Ok(None)
+}
+
+fn score_layer_control_owned_candidate(
+    owned: &[u64],
+    num_entries_hint: usize,
+    expected_layer_count: usize,
+    has_xdic: bool,
+    start_index: usize,
+) -> u64 {
+    let mut score = 0u64;
+    if owned.len() != expected_layer_count {
+        score = score.saturating_add(100_000);
+    }
+    if num_entries_hint != 0 && owned.len() != num_entries_hint {
+        score = score.saturating_add(10_000);
+    }
+    if has_xdic && start_index == 0 {
+        // Usually null/xdic handles appear before owned refs.
+        score = score.saturating_add(100);
+    }
+
+    let mut seen = HashSet::with_capacity(owned.len());
+    for handle in owned {
+        if *handle == 0 {
+            score = score.saturating_add(2_000);
+        }
+        if !seen.insert(*handle) {
+            score = score.saturating_add(5_000);
+        }
+        if *handle > 0x00FF_FFFF {
+            score = score.saturating_add(10_000);
+        }
+    }
+
+    // Favor candidates that keep references in expected address ranges.
+    let first_handle = owned.first().copied().unwrap_or(0);
+    if first_handle > 0x1000 {
+        score = score.saturating_add(20_000);
+    } else if first_handle > 0x0400 {
+        score = score.saturating_add(2_000);
+    } else if first_handle > 0x0100 {
+        score = score.saturating_add(200);
+    }
+    for pair in owned.windows(2) {
+        if pair[1] < pair[0] {
+            score = score.saturating_add(1_000);
+        }
+    }
+    let max_handle = owned.iter().copied().max().unwrap_or(0);
+    if max_handle < 16 {
+        score = score.saturating_add(5_000);
+    }
+
+    score
+}
+
+fn recover_entity_layer_handle_r2010_plus(
+    record: &objects::ObjectRecord<'_>,
+    version: &version::DwgVersion,
+    api_header: &ApiObjectHeader,
+    object_handle: u64,
+    parsed_layer_handle: u64,
+    known_layer_handles: &HashSet<u64>,
+) -> u64 {
+    if !matches!(
+        version,
+        version::DwgVersion::R2010 | version::DwgVersion::R2013
+    ) {
+        return parsed_layer_handle;
+    }
+    if known_layer_handles.is_empty() || known_layer_handles.contains(&parsed_layer_handle) {
+        return parsed_layer_handle;
+    }
+
+    let parsed_score = layer_handle_score(parsed_layer_handle, known_layer_handles);
+    let mut best = (parsed_score, parsed_layer_handle);
+    let default_layer = known_layer_handles.iter().copied().min();
+    let mut base_handles = vec![object_handle];
+    let mut base_reader = record.bit_reader();
+    if skip_object_type_prefix(&mut base_reader, version).is_ok() {
+        if let Ok(record_handle) = base_reader.read_h() {
+            let record_base = record_handle.value;
+            if record_base != 0 && record_base != object_handle {
+                base_handles.push(record_base);
+            }
+        }
+    }
+
+    for object_data_end_bit in resolve_r2010_object_data_end_bit_candidates(api_header) {
+        for base_handle in base_handles.iter().copied() {
+            let mut reader = record.bit_reader();
+            if skip_object_type_prefix(&mut reader, version).is_err() {
+                continue;
+            }
+            reader.set_bit_pos(object_data_end_bit);
+            let mut handle_index = 0u64;
+            while handle_index < 64 {
+                let Ok(layer_handle) =
+                    entities::common::read_handle_reference(&mut reader, base_handle)
+                else {
+                    break;
+                };
+                let mut score = layer_handle_score(layer_handle, known_layer_handles)
+                    .saturating_add(handle_index);
+                if handle_index == 0 {
+                    // First handle is often owner-related; avoid overfitting to it.
+                    score = score.saturating_add(200);
+                }
+                if Some(layer_handle) == default_layer {
+                    score = score.saturating_add(150);
+                }
+                if score < best.0 {
+                    best = (score, layer_handle);
+                    if score == 0 {
+                        break;
+                    }
+                }
+                handle_index += 1;
+            }
+            if best.0 == 0 {
+                break;
+            }
+        }
+        if best.0 == 0 {
+            break;
+        }
+    }
+
+    if known_layer_handles.contains(&best.1) {
+        return best.1;
+    }
+    if parsed_layer_handle == 0 || best.1 == 0 {
+        if let Some(default_layer) = known_layer_handles.iter().copied().min() {
+            return default_layer;
+        }
+    }
+    best.1
+}
+
+fn layer_handle_score(layer_handle: u64, known_layer_handles: &HashSet<u64>) -> u64 {
+    if known_layer_handles.contains(&layer_handle) {
+        0
+    } else if layer_handle == 0 {
+        10_000
+    } else {
+        50_000
+    }
+}
+
 fn decode_layer_color_record(
     reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    expected_handle: u64,
 ) -> crate::core::result::Result<(u64, u16, Option<u32>)> {
-    let _obj_size = reader.read_rl(Endian::Little)?;
-    let handle = reader.read_h()?.value;
+    // R2010+/R2013 objects start with handle directly after OT prefix.
+    // Older versions keep ObjSize (RL) before handle.
+    if !matches!(
+        version,
+        version::DwgVersion::R2010 | version::DwgVersion::R2013
+    ) {
+        let _obj_size = reader.read_rl(Endian::Little)?;
+    }
+    let record_handle = reader.read_h()?.value;
     skip_eed(reader)?;
 
     let _num_reactors = reader.read_bl()?;
     let _xdic_missing_flag = reader.read_b()?;
-    let _entry_name = reader.read_tv()?;
+    if matches!(version, version::DwgVersion::R2013) {
+        let _has_ds_binary_data = reader.read_b()?;
+    }
+    // R2010+ stores entry name in string stream. The data stream directly
+    // continues with layer state flags and color data.
+    if !matches!(
+        version,
+        version::DwgVersion::R2010 | version::DwgVersion::R2013
+    ) {
+        let _entry_name = reader.read_tv()?;
+    }
 
     let style_start = reader.get_pos();
     let variants = [
@@ -2073,12 +2625,22 @@ fn decode_layer_color_record(
     }
 
     if let Some((_, (color_index, true_color))) = best {
+        let handle = if record_handle != 0 {
+            record_handle
+        } else {
+            expected_handle
+        };
         return Ok((handle, color_index, true_color));
     }
 
     // Last resort: parse in the simplest form to keep progress.
     reader.set_pos(style_start.0, style_start.1);
     let (color_index, true_color, _) = decode_layer_color_cmc(reader, variants[0])?;
+    let handle = if record_handle != 0 {
+        record_handle
+    } else {
+        expected_handle
+    };
     Ok((handle, color_index, true_color))
 }
 

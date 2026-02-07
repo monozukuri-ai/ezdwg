@@ -91,24 +91,27 @@ fn parse_object_map(bytes: &[u8], _config: &ParseConfig) -> Result<ObjectIndex> 
         }
 
         let start = reader.tell();
-        let mut last_handle: i64 = 0;
-        let mut last_offset: i64 = 0;
+        let mut last_handle: u64 = 0;
+        let mut last_offset: u64 = 0;
 
         while (reader.tell() - start) < (section_size as u64 - 2) {
-            let delta_handle = read_modular_char(&mut reader)?;
-            let delta_offset = read_modular_char(&mut reader)?;
-            last_handle += delta_handle;
-            last_offset += delta_offset;
-            if last_handle < 0 || last_offset < 0 {
-                return Err(DwgError::new(
-                    ErrorKind::Format,
-                    "object map contains negative handle or offset",
-                )
-                .with_offset(reader.tell()));
-            }
+            let delta_handle = read_modular_char_unsigned(&mut reader)?;
+            let delta_offset = read_modular_char_unsigned(&mut reader)?;
+            last_handle = last_handle.checked_add(delta_handle).ok_or_else(|| {
+                DwgError::new(ErrorKind::Format, "object map handle overflow")
+                    .with_offset(reader.tell())
+            })?;
+            last_offset = last_offset.checked_add(delta_offset).ok_or_else(|| {
+                DwgError::new(ErrorKind::Format, "object map offset overflow")
+                    .with_offset(reader.tell())
+            })?;
+            let offset = u32::try_from(last_offset).map_err(|_| {
+                DwgError::new(ErrorKind::Format, "object map offset exceeds u32 range")
+                    .with_offset(reader.tell())
+            })?;
             objects.push(ObjectRef {
-                handle: Handle(last_handle as u64),
-                offset: last_offset as u32,
+                handle: Handle(last_handle),
+                offset,
             });
         }
 
@@ -128,25 +131,15 @@ fn read_u16_be(reader: &mut ByteReader<'_>) -> Result<u16> {
     Ok((hi << 8) | lo)
 }
 
-fn read_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
-    let mut value: i64 = 0;
-    let mut shift = 0;
+fn read_modular_char_unsigned(reader: &mut ByteReader<'_>) -> Result<u64> {
+    let mut value: u64 = 0;
+    let mut shift = 0u32;
 
-    for _ in 0..4 {
-        let mut byte = reader.read_u8()?;
+    for _ in 0..5 {
+        let byte = reader.read_u8()?;
+        value |= u64::from(byte & 0x7F) << shift;
         if (byte & 0x80) == 0 {
-            let negative = (byte & 0x40) != 0;
-            if negative {
-                byte &= 0xBF;
-            }
-            value |= (byte as i64) << shift;
-            if negative {
-                value = -value;
-            }
             return Ok(value);
-        } else {
-            byte &= 0x7F;
-            value |= (byte as i64) << shift;
         }
         shift += 7;
     }
