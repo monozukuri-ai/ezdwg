@@ -50,6 +50,13 @@ doc = ezdwg.read("path/to/file.dwg")
 doc.plot(types="ARC", arc_segments=96)
 ```
 
+## CLI
+```bash
+ezdwg --version
+ezdwg inspect examples/data/line_2000.dwg
+python -m ezdwg inspect examples/data/line_2000.dwg
+```
+
 ## Examples
 Sample DWG files are available under `examples/data/`.
 

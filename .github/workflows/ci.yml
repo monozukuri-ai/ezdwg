@@ -1,0 +1,70 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+          - os: macos-latest
+            python-version: "3.10"
+          - os: windows-latest
+            python-version: "3.10"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Create virtual environment
+        shell: bash
+        run: |
+          python -m venv .venv
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            echo "VENV_PY=.venv/Scripts/python.exe" >> "${GITHUB_ENV}"
+          else
+            echo "VENV_PY=.venv/bin/python" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Install build tools
+        shell: bash
+        run: |
+          "${VENV_PY}" -m pip install --upgrade pip
+          "${VENV_PY}" -m pip install maturin
+
+      - name: Rust tests
+        run: cargo test --all --quiet
+
+      - name: Python smoke tests (maturin develop)
+        shell: bash
+        run: |
+          "${VENV_PY}" -m maturin develop --release
+          "${VENV_PY}" -c "import ezdwg; doc = ezdwg.read('examples/data/line_2000.dwg'); assert doc.version == 'AC1015'; print(doc.version)"
+          "${VENV_PY}" examples/basic_read.py
+
+      - name: Build wheel
+        shell: bash
+        run: |
+          "${VENV_PY}" -m maturin build --release --out dist
+          "${VENV_PY}" -c "from pathlib import Path; wheels = list(Path('dist').glob('*.whl')); assert wheels, 'no wheel produced'; print(wheels[0].name)"

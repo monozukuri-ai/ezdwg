@@ -1,15 +1,12 @@
 [project]
 name = "ezdwg"
 version = "0.1.0"
-description = "Add your description here"
+description = "Minimal read-only DWG parser (Rust core + Python API)"
 readme = "README.md"
 authors = [
     { name = "neka-nat", email = "nekanat.stock@gmail.com" }
 ]
-requires-python = ">=3.13"
-dependencies = [
-    "matplotlib>=3.10.8",
-]
+requires-python = ">=3.10"
 
 [project.optional-dependencies]
 plot = ["matplotlib>=3.8"]

@@ -1,3 +1,5 @@
+from typing import Sequence
+
 from ezdwg.document import Document, Layout, read
 from ezdwg.entity import Entity
 from ezdwg import raw
@@ -13,5 +15,7 @@ __all__ = [
 ]
 
 
-def main() -> None:
-    print("ezdwg")
+def main(argv: Sequence[str] | None = None) -> int:
+    from ezdwg.cli import main as cli_main
+
+    return cli_main(argv)
