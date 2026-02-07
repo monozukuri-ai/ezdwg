@@ -1685,7 +1685,10 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 fn is_best_effort_compat_version(decoder: &decoder::Decoder<'_>) -> bool {
-    matches!(decoder.version(), version::DwgVersion::R2010)
+    matches!(
+        decoder.version(),
+        version::DwgVersion::R2010 | version::DwgVersion::R2013
+    )
 }
 
 fn decode_line_for_version(
@@ -1697,6 +1700,10 @@ fn decode_line_for_version(
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_line_r2010(reader, object_data_end_bit)
+        }
+        version::DwgVersion::R2013 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_line_r2013(reader, object_data_end_bit)
         }
         version::DwgVersion::R2007 => entities::decode_line_r2007(reader),
         _ => entities::decode_line(reader),
@@ -1713,6 +1720,10 @@ fn decode_arc_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_arc_r2010(reader, object_data_end_bit)
         }
+        version::DwgVersion::R2013 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_arc_r2013(reader, object_data_end_bit)
+        }
         version::DwgVersion::R2007 => entities::decode_arc_r2007(reader),
         _ => entities::decode_arc(reader),
     }
@@ -1727,6 +1738,10 @@ fn decode_lwpolyline_for_version(
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_lwpolyline_r2010(reader, object_data_end_bit)
+        }
+        version::DwgVersion::R2013 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_lwpolyline_r2013(reader, object_data_end_bit)
         }
         version::DwgVersion::R2007 => entities::decode_lwpolyline_r2007(reader),
         _ => entities::decode_lwpolyline(reader),
@@ -1754,7 +1769,7 @@ fn skip_object_type_prefix(
     version: &version::DwgVersion,
 ) -> crate::core::result::Result<u16> {
     match version {
-        version::DwgVersion::R2010 => {
+        version::DwgVersion::R2010 | version::DwgVersion::R2013 => {
             let _handle_stream_size_bits = reader.read_umc()?;
             let type_code = reader.read_ot_r2010()?;
             if type_code == 0 {
@@ -1784,7 +1799,7 @@ fn parse_object_header_for_version(
     version: &version::DwgVersion,
 ) -> crate::core::result::Result<ApiObjectHeader> {
     match version {
-        version::DwgVersion::R2010 => {
+        version::DwgVersion::R2010 | version::DwgVersion::R2013 => {
             let header = objects::object_header_r2010::parse_from_record(record)?;
             Ok(ApiObjectHeader {
                 data_size: header.data_size,

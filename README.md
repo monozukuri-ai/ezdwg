@@ -4,8 +4,8 @@ Minimal DWG (R2000-R2013 / AC1015-AC1027) reader with a Python API inspired by e
 This project is **read-only** today and focuses on a simple, friendly API.
 
 ## Status
-- High-level API (`ezdwg.read`): **R2000 / AC1015**, **R2004 / AC1018**, **R2007 / AC1021** (native), **R2010 / AC1024** (native), **R2013 / AC1027** (compat mode)
-- Raw API (`ezdwg.raw`): **R2000 / AC1015**, **R2004 / AC1018**, **R2007 / AC1021**, plus native **AC1024** support for object listing and `LINE`/`ARC`/`LWPOLYLINE` decode
+- High-level API (`ezdwg.read`): **R2000 / AC1015**, **R2004 / AC1018**, **R2007 / AC1021**, **R2010 / AC1024**, **R2013 / AC1027**
+- Raw API (`ezdwg.raw`): **R2000 / AC1015**, **R2004 / AC1018**, **R2007 / AC1021**, plus native **AC1024/AC1027** support for object listing and `LINE`/`ARC`/`LWPOLYLINE` decode
 - High-level entities: **LINE**, **ARC**, **LWPOLYLINE**, **POINT**, **CIRCLE**, **ELLIPSE**, **TEXT**, **MTEXT**, **DIMENSION** (linear + radius + diameter)
 - Additional raw decode: **INSERT** (+ low-level POLYLINE/VERTEX helpers)
 - Output units/angles: high-level API returns ARC angles in **degrees**
@@ -23,7 +23,7 @@ Plotting (optional):
 pip install "ezdwg[plot]"
 ```
 
-Compatibility mode for AC1027 requires:
+Compatibility conversion (optional fallback) requires:
 
 ```bash
 ODAFileConverter
@@ -81,8 +81,7 @@ raw.decode_line_entities("path/to/file.dwg")
 ## Limitations
 - Read‑only
 - High-level API supports R2000 (AC1015), R2004 (AC1018), R2007 (AC1021), R2010 (AC1024), and R2013 (AC1027)
-- AC1027 uses compatibility conversion to AC1018 via `ODAFileConverter` + `xvfb-run`
-- AC1021/AC1024 use native decode for LINE/ARC/LWPOLYLINE and are regression-tested against paired DXF samples
-- AC1021/AC1024 entity style handle resolution for LINE/ARC/LWPOLYLINE is currently best-effort (layer handle can be `0` on some files)
+- AC1021/AC1024/AC1027 use native decode for LINE/ARC/LWPOLYLINE and are regression-tested against paired DXF samples
+- AC1021/AC1024/AC1027 entity style/layer color resolution is currently best-effort on some files
 - Legacy `POLYLINE/VERTEX/SEQEND` samples are not yet covered in AC1018 test data
 - ARC angles in raw API are **radians** (high‑level API converts to degrees)

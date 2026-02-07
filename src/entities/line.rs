@@ -3,7 +3,8 @@ use crate::core::error::ErrorKind;
 use crate::core::result::Result;
 use crate::entities::common::{
     parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r2007,
-    parse_common_entity_header_r2010, parse_common_entity_layer_handle, CommonEntityHeader,
+    parse_common_entity_header_r2010, parse_common_entity_header_r2013,
+    parse_common_entity_layer_handle, CommonEntityHeader,
 };
 
 #[derive(Debug, Clone)]
@@ -31,6 +32,14 @@ pub fn decode_line_r2010(
     object_data_end_bit: u32,
 ) -> Result<LineEntity> {
     let header = parse_common_entity_header_r2010(reader, object_data_end_bit)?;
+    decode_line_with_header(reader, header, true, true)
+}
+
+pub fn decode_line_r2013(
+    reader: &mut BitReader<'_>,
+    object_data_end_bit: u32,
+) -> Result<LineEntity> {
+    let header = parse_common_entity_header_r2013(reader, object_data_end_bit)?;
     decode_line_with_header(reader, header, true, true)
 }
 

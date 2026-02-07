@@ -16,8 +16,8 @@ from . import raw
 from .entity import Entity
 
 SUPPORTED_VERSIONS = {"AC1015", "AC1018", "AC1021", "AC1024", "AC1027"}
-SUPPORTED_PARSE_VERSIONS = {"AC1015", "AC1018", "AC1021", "AC1024"}
-COMPAT_CONVERSION_VERSIONS = {"AC1027"}
+SUPPORTED_PARSE_VERSIONS = {"AC1015", "AC1018", "AC1021", "AC1024", "AC1027"}
+COMPAT_CONVERSION_VERSIONS = set()
 SUPPORTED_ENTITY_TYPES = (
     "LINE",
     "LWPOLYLINE",
@@ -580,15 +580,24 @@ def _normalize_types(types: str | Iterable[str] | None) -> list[str]:
 
 @lru_cache(maxsize=16)
 def _entity_style_map(path: str) -> dict[int, tuple[int | None, int | None, int]]:
-    return {
-        handle: (index, true_color, layer_handle)
-        for handle, index, true_color, layer_handle in raw.decode_entity_styles(path)
-    }
+    try:
+        return {
+            handle: (index, true_color, layer_handle)
+            for handle, index, true_color, layer_handle in raw.decode_entity_styles(path)
+        }
+    except Exception:
+        return {}
 
 
 @lru_cache(maxsize=16)
 def _layer_color_map(path: str) -> dict[int, tuple[int, int | None]]:
-    return {handle: (index, true_color) for handle, index, true_color in raw.decode_layer_colors(path)}
+    try:
+        return {
+            handle: (index, true_color)
+            for handle, index, true_color in raw.decode_layer_colors(path)
+        }
+    except Exception:
+        return {}
 
 
 def _attach_entity_color(

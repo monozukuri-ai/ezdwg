@@ -16,6 +16,7 @@ pub struct CommonEntityHeader {
     pub entity_mode: u8,
     pub num_of_reactors: u32,
     pub xdic_missing_flag: u8,
+    pub has_ds_binary_data: bool,
     pub ltype_flags: u8,
     pub plotstyle_flags: u8,
     pub material_flags: u8,
@@ -36,24 +37,32 @@ pub struct CommonEntityHandles {
 }
 
 pub fn parse_common_entity_header(reader: &mut BitReader<'_>) -> Result<CommonEntityHeader> {
-    parse_common_entity_header_impl(reader, false, false, None)
+    parse_common_entity_header_impl(reader, false, false, false, None)
 }
 
 pub fn parse_common_entity_header_r2007(reader: &mut BitReader<'_>) -> Result<CommonEntityHeader> {
-    parse_common_entity_header_impl(reader, true, false, None)
+    parse_common_entity_header_impl(reader, true, false, false, None)
 }
 
 pub fn parse_common_entity_header_r2010(
     reader: &mut BitReader<'_>,
     object_data_end_bit: u32,
 ) -> Result<CommonEntityHeader> {
-    parse_common_entity_header_impl(reader, true, true, Some(object_data_end_bit))
+    parse_common_entity_header_impl(reader, true, true, false, Some(object_data_end_bit))
+}
+
+pub fn parse_common_entity_header_r2013(
+    reader: &mut BitReader<'_>,
+    object_data_end_bit: u32,
+) -> Result<CommonEntityHeader> {
+    parse_common_entity_header_impl(reader, true, true, true, Some(object_data_end_bit))
 }
 
 fn parse_common_entity_header_impl(
     reader: &mut BitReader<'_>,
     with_material_and_shadow: bool,
     r2010_plus: bool,
+    r2013_plus: bool,
     object_data_end_bit: Option<u32>,
 ) -> Result<CommonEntityHeader> {
     let obj_size = match object_data_end_bit {
@@ -88,6 +97,11 @@ fn parse_common_entity_header_impl(
     let entity_mode = reader.read_bb()?;
     let num_of_reactors = reader.read_bl()?;
     let xdic_missing_flag = reader.read_b()?;
+    let has_ds_binary_data = if r2013_plus {
+        reader.read_b()? != 0
+    } else {
+        false
+    };
 
     let mut color = CommonEntityColor::default();
     let no_links = reader.read_b()?;
@@ -140,6 +154,7 @@ fn parse_common_entity_header_impl(
         entity_mode,
         num_of_reactors,
         xdic_missing_flag,
+        has_ds_binary_data,
         ltype_flags,
         plotstyle_flags,
         material_flags,
