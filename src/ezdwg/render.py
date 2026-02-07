@@ -12,6 +12,9 @@ def plot(
     title: str | None = None,
     line_width: float = 1.0,
     arc_segments: int = 64,
+    auto_fit: bool = True,
+    fit_margin: float = 0.04,
+    dimension_color: Any | None = "black",
 ):
     layout = _resolve_layout(target)
     return plot_layout(
@@ -23,6 +26,9 @@ def plot(
         title=title,
         line_width=line_width,
         arc_segments=arc_segments,
+        auto_fit=auto_fit,
+        fit_margin=fit_margin,
+        dimension_color=dimension_color,
     )
 
 
@@ -35,6 +41,9 @@ def plot_layout(
     title: str | None = None,
     line_width: float = 1.0,
     arc_segments: int = 64,
+    auto_fit: bool = True,
+    fit_margin: float = 0.04,
+    dimension_color: Any | None = "black",
 ):
     plt = _require_matplotlib()
     if ax is None:
@@ -102,14 +111,18 @@ def plot_layout(
                 color=color,
             )
         elif dxftype == "DIMENSION":
-            _draw_dimension(ax, entity.dxf, line_width, color=color)
+            dim_color = color if dimension_color is None else dimension_color
+            _draw_dimension(ax, entity.dxf, line_width, color=dim_color)
 
     if title:
         ax.set_title(title)
-    ax.autoscale(True)
-    if equal:
-        _apply_equal_limits(ax)
-        ax.set_aspect("equal", adjustable="box")
+    if auto_fit:
+        _apply_auto_limits(ax, equal=equal, margin=fit_margin)
+    else:
+        ax.autoscale(True)
+        if equal:
+            _apply_equal_limits(ax)
+            ax.set_aspect("equal", adjustable="box")
     if show:
         plt.show()
     return ax
@@ -392,6 +405,126 @@ def _apply_equal_limits(ax):
     half = span * 0.5
     ax.set_xlim(cx - half, cx + half)
     ax.set_ylim(cy - half, cy + half)
+
+
+def _apply_auto_limits(ax, equal: bool, margin: float):
+    points = _collect_axes_points(ax)
+    if not points:
+        ax.autoscale(True)
+        if equal:
+            _apply_equal_limits(ax)
+            ax.set_aspect("equal", adjustable="box")
+        return
+
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    full = _bounds_from_xy(xs, ys)
+    robust = _robust_bounds(xs, ys, q_low=0.02, q_high=0.98)
+    chosen = _choose_bounds(full, robust)
+    if chosen is None:
+        chosen = full
+    if chosen is None:
+        ax.autoscale(True)
+        return
+
+    x0, x1, y0, y1 = _expand_bounds(chosen, margin=margin)
+    if equal:
+        x0, x1, y0, y1 = _square_bounds(x0, x1, y0, y1)
+        ax.set_aspect("equal", adjustable="box")
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y0, y1)
+
+
+def _collect_axes_points(ax):
+    import math
+
+    points = []
+    for line in ax.lines:
+        xs = line.get_xdata()
+        ys = line.get_ydata()
+        for x, y in zip(xs, ys):
+            try:
+                xf = float(x)
+                yf = float(y)
+            except Exception:
+                continue
+            if math.isfinite(xf) and math.isfinite(yf):
+                points.append((xf, yf))
+    for text in ax.texts:
+        x, y = text.get_position()
+        try:
+            xf = float(x)
+            yf = float(y)
+        except Exception:
+            continue
+        if math.isfinite(xf) and math.isfinite(yf):
+            points.append((xf, yf))
+    return points
+
+
+def _bounds_from_xy(xs, ys):
+    if not xs or not ys:
+        return None
+    return (min(xs), max(xs), min(ys), max(ys))
+
+
+def _robust_bounds(xs, ys, q_low: float, q_high: float):
+    if len(xs) < 16 or len(ys) < 16:
+        return None
+    x0 = _quantile(xs, q_low)
+    x1 = _quantile(xs, q_high)
+    y0 = _quantile(ys, q_low)
+    y1 = _quantile(ys, q_high)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return (x0, x1, y0, y1)
+
+
+def _choose_bounds(full, robust):
+    if full is None:
+        return robust
+    if robust is None:
+        return full
+    fx = max(1.0e-12, full[1] - full[0])
+    fy = max(1.0e-12, full[3] - full[2])
+    rx = max(1.0e-12, robust[1] - robust[0])
+    ry = max(1.0e-12, robust[3] - robust[2])
+    if (fx / rx) >= 1.6 or (fy / ry) >= 1.6:
+        return robust
+    return full
+
+
+def _expand_bounds(bounds, margin: float):
+    x0, x1, y0, y1 = bounds
+    dx = max(1.0e-9, x1 - x0)
+    dy = max(1.0e-9, y1 - y0)
+    m = max(0.0, float(margin))
+    return (x0 - dx * m, x1 + dx * m, y0 - dy * m, y1 + dy * m)
+
+
+def _square_bounds(x0, x1, y0, y1):
+    dx = x1 - x0
+    dy = y1 - y0
+    span = max(dx, dy)
+    cx = (x0 + x1) * 0.5
+    cy = (y0 + y1) * 0.5
+    half = span * 0.5
+    return (cx - half, cx + half, cy - half, cy + half)
+
+
+def _quantile(values, q: float):
+    data = sorted(float(v) for v in values)
+    if not data:
+        return 0.0
+    if len(data) == 1:
+        return data[0]
+    qn = min(1.0, max(0.0, float(q)))
+    pos = qn * (len(data) - 1)
+    i = int(pos)
+    frac = pos - i
+    if i >= len(data) - 1:
+        return data[-1]
+    return data[i] * (1.0 - frac) + data[i + 1] * frac
 
 
 def _safe_point(value):
