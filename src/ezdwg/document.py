@@ -77,6 +77,11 @@ class Document:
 
         return plot(self, *args, **kwargs)
 
+    def export_dxf(self, output_path: str, **kwargs):
+        from .convert import to_dxf
+
+        return to_dxf(self, output_path, **kwargs)
+
     @property
     def raw(self):
         return raw
@@ -99,6 +104,11 @@ class Layout:
         from .render import plot
 
         return plot(self, *args, **kwargs)
+
+    def export_dxf(self, output_path: str, **kwargs):
+        from .convert import to_dxf
+
+        return to_dxf(self, output_path, **kwargs)
 
     def _iter_type(self, dxftype: str) -> Iterator[Entity]:
         decode_path = self.doc.decode_path

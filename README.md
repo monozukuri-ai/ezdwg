@@ -1,7 +1,7 @@
 # ezdwg
 
 Minimal DWG (R2000-R2013 / AC1015-AC1027) reader with a Python API inspired by ezdxf.
-This project is **read-only** today and focuses on a simple, friendly API.
+This project is **DWG read-focused** today and focuses on a simple, friendly API.
 
 ## Status
 - High-level API (`ezdwg.read`): **R2000 / AC1015**, **R2004 / AC1018**, **R2007 / AC1021**, **R2010 / AC1024**, **R2013 / AC1027**
@@ -21,6 +21,12 @@ Plotting (optional):
 
 ```bash
 pip install "ezdwg[plot]"
+```
+
+DWG to DXF conversion (optional, ezdxf backend):
+
+```bash
+pip install "ezdwg[dxf]"
 ```
 
 ## Quick Start
@@ -48,6 +54,30 @@ doc.plot(types="ARC", arc_segments=96)
 ezdwg --version
 ezdwg inspect examples/data/line_2000.dwg
 python -m ezdwg inspect examples/data/line_2000.dwg
+ezdwg convert examples/data/line_2000.dwg /tmp/line_2000_out.dxf
+ezdwg convert examples/data/arc_2000.dwg /tmp/arc_2000_out.dxf --types "ARC" --dxf-version R2010
+```
+
+## DWG to DXF
+`ezdxf` is used as the DXF writing backend.
+
+```python
+import ezdwg
+
+result = ezdwg.to_dxf(
+    "examples/data/line_2000.dwg",
+    "/tmp/line_2000_out.dxf",
+    types="LINE ARC LWPOLYLINE",
+    dxf_version="R2010",
+)
+print(result)
+```
+
+Or from an already opened document/layout:
+
+```python
+doc = ezdwg.read("examples/data/line_2000.dwg")
+doc.export_dxf("/tmp/line_2000_out.dxf")
 ```
 
 ## Examples
@@ -60,6 +90,7 @@ python examples/plot.py
 python examples/text_mtext.py
 python examples/dimensions.py
 python examples/raw_insert_2004.py
+python examples/convert_to_dxf.py
 ```
 
 ## Low-Level API

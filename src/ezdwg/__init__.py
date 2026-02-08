@@ -1,5 +1,6 @@
 from typing import Sequence
 
+from .convert import ConvertResult, to_dxf
 from .document import Document, Layout, read
 from .entity import Entity
 from . import raw
@@ -11,6 +12,8 @@ __all__ = [
     "Layout",
     "Entity",
     "plot",
+    "to_dxf",
+    "ConvertResult",
     "raw",
 ]
 
