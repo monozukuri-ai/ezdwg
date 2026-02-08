@@ -127,6 +127,21 @@ type VertexPFaceEntityRow = (u64, u8, f64, f64, f64);
 type VertexPFaceFaceEntityRow = (u64, u16, u16, u16, u16);
 type PFaceFaceRow = (u16, u16, u16, u16);
 type PolylinePFaceFacesRow = (u64, u16, u16, Vec<Point3>, Vec<PFaceFaceRow>);
+type Face3dEntityRow = (u64, Point3, Point3, Point3, Point3, u16);
+type SolidEntityRow = (u64, Point3, Point3, Point3, Point3, f64, Point3);
+type TraceEntityRow = (u64, Point3, Point3, Point3, Point3, f64, Point3);
+type ShapeEntityRow = (
+    u64,
+    Point3,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    u16,
+    Point3,
+    Option<u64>,
+);
 type PolylineVerticesRow = (u64, u16, Vec<Point3>);
 type PolylineInterpolatedRow = (u64, u16, bool, Vec<Point3>);
 type Vertex2dEntityRow = (u64, u16, f64, f64, f64, f64, f64, f64, f64);
@@ -821,6 +836,122 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
+        } else if matches_type_name(header.type_code, 0x1C, "3DFACE", &dynamic_types) {
+            let entity = match decode_3dface_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
+            let layer_handle = layer_handle_remap
+                .get(&layer_handle)
+                .copied()
+                .unwrap_or(layer_handle);
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x1F, "SOLID", &dynamic_types) {
+            let entity = match decode_solid_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
+            let layer_handle = layer_handle_remap
+                .get(&layer_handle)
+                .copied()
+                .unwrap_or(layer_handle);
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x20, "TRACE", &dynamic_types) {
+            let entity = match decode_trace_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
+            let layer_handle = layer_handle_remap
+                .get(&layer_handle)
+                .copied()
+                .unwrap_or(layer_handle);
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x21, "SHAPE", &dynamic_types) {
+            let entity = match decode_shape_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
+            let layer_handle = layer_handle_remap
+                .get(&layer_handle)
+                .copied()
+                .unwrap_or(layer_handle);
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                layer_handle,
+            ));
         } else if matches_type_name(header.type_code, 0x15, "DIM_LINEAR", &dynamic_types) {
             let entity = match decode_dim_linear_for_version(
                 &mut reader,
@@ -1169,6 +1300,56 @@ pub fn decode_point_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<P
             entity.location.1,
             entity.location.2,
             entity.x_axis_angle,
+        ));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_3dface_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<Face3dEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x1C, "3DFACE", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity = match decode_3dface_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(entity) => entity,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        result.push((
+            entity.handle,
+            entity.p1,
+            entity.p2,
+            entity.p3,
+            entity.p4,
+            entity.invisible_edge_flags,
         ));
         if let Some(limit) = limit {
             if result.len() >= limit {
@@ -2936,6 +3117,150 @@ pub fn decode_polyline_pface_with_faces(
     Ok(result)
 }
 
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_solid_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<SolidEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x1F, "SOLID", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity =
+            match decode_solid_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+        result.push((
+            entity.handle,
+            entity.p1,
+            entity.p2,
+            entity.p3,
+            entity.p4,
+            entity.thickness,
+            entity.extrusion,
+        ));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_trace_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<TraceEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x20, "TRACE", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity =
+            match decode_trace_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+        result.push((
+            entity.handle,
+            entity.p1,
+            entity.p2,
+            entity.p3,
+            entity.p4,
+            entity.thickness,
+            entity.extrusion,
+        ));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_shape_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<ShapeEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x21, "SHAPE", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity =
+            match decode_shape_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+        result.push((
+            entity.handle,
+            entity.insertion,
+            entity.scale,
+            entity.rotation,
+            entity.width_factor,
+            entity.oblique,
+            entity.thickness,
+            entity.shape_no,
+            entity.extrusion,
+            entity.shapefile_handle,
+        ));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
 #[derive(Debug, Clone)]
 struct PolylinePFaceRow {
     handle: u64,
@@ -3534,6 +3859,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_layer_colors, module)?)?;
     module.add_function(wrap_pyfunction!(decode_line_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_point_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_3dface_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_arc_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_circle_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_ellipse_entities, module)?)?;
@@ -3568,6 +3894,9 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(decode_polyline_pface_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_polyline_pface_with_faces, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_solid_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_trace_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_shape_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_polyline_2d_with_vertices, module)?)?;
     module.add_function(wrap_pyfunction!(
         decode_polyline_2d_with_vertices_interpolated,
@@ -4011,6 +4340,86 @@ fn decode_vertex_pface_face_for_version(
         }
         version::DwgVersion::R2007 => entities::decode_vertex_pface_face_r2007(reader),
         _ => entities::decode_vertex_pface_face(reader),
+    }
+}
+
+fn decode_3dface_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::Face3dEntity> {
+    match version {
+        version::DwgVersion::R2010 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_3dface_r2010(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2013 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_3dface_r2013(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2007 => entities::decode_3dface_r2007(reader),
+        _ => entities::decode_3dface(reader),
+    }
+}
+
+fn decode_solid_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::SolidEntity> {
+    match version {
+        version::DwgVersion::R2010 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_solid_r2010(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2013 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_solid_r2013(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2007 => entities::decode_solid_r2007(reader),
+        _ => entities::decode_solid(reader),
+    }
+}
+
+fn decode_trace_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::TraceEntity> {
+    match version {
+        version::DwgVersion::R2010 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_trace_r2010(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2013 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_trace_r2013(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2007 => entities::decode_trace_r2007(reader),
+        _ => entities::decode_trace(reader),
+    }
+}
+
+fn decode_shape_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::ShapeEntity> {
+    match version {
+        version::DwgVersion::R2010 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_shape_r2010(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2013 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_shape_r2013(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2007 => entities::decode_shape_r2007(reader),
+        _ => entities::decode_shape(reader),
     }
 }
 

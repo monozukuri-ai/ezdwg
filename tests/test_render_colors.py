@@ -417,3 +417,94 @@ def test_plot_layout_polyline_pface_uses_face_edges(monkeypatch) -> None:
     assert captured == [
         ([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)], True)
     ]
+
+
+def test_plot_layout_3dface_uses_face_drawer(monkeypatch) -> None:
+    captured: list[tuple[list, int]] = []
+    monkeypatch.setattr(render_module, "_require_matplotlib", lambda: object())
+    monkeypatch.setattr(
+        render_module,
+        "_draw_3dface",
+        lambda _ax, points, invisible_edge_flags, _line_width, color=None: captured.append(
+            (list(points), int(invisible_edge_flags))
+        ),
+    )
+
+    layout = _FakeLayout(
+        [
+            SimpleNamespace(
+                dxftype="3DFACE",
+                dxf={
+                    "points": [
+                        (0.0, 0.0, 0.0),
+                        (2.0, 0.0, 0.0),
+                        (2.0, 2.0, 0.0),
+                        (0.0, 2.0, 0.0),
+                    ],
+                    "invisible_edge_flags": 6,
+                },
+            )
+        ]
+    )
+    ax = _FakeAx()
+
+    render_module.plot_layout(layout, ax=ax, show=False, auto_fit=False, equal=False)
+
+    assert captured == [
+        (
+            [(0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (2.0, 2.0, 0.0), (0.0, 2.0, 0.0)],
+            6,
+        )
+    ]
+
+
+def test_plot_layout_solid_uses_closed_polyline(monkeypatch) -> None:
+    captured: list[tuple[list, bool]] = []
+    monkeypatch.setattr(render_module, "_require_matplotlib", lambda: object())
+    monkeypatch.setattr(
+        render_module,
+        "_draw_polyline",
+        lambda _ax, points, _line_width, color=None, bulges=None, closed=False, arc_segments=64: captured.append(
+            (list(points), closed)
+        ),
+    )
+
+    layout = _FakeLayout(
+        [
+            SimpleNamespace(
+                dxftype="SOLID",
+                dxf={
+                    "points": [
+                        (0.0, 0.0, 0.0),
+                        (1.0, 0.0, 0.0),
+                        (1.0, 1.0, 0.0),
+                        (0.0, 1.0, 0.0),
+                    ]
+                },
+            )
+        ]
+    )
+    ax = _FakeAx()
+
+    render_module.plot_layout(layout, ax=ax, show=False, auto_fit=False, equal=False)
+
+    assert captured == [
+        ([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)], True)
+    ]
+
+
+def test_plot_layout_shape_uses_point_drawer(monkeypatch) -> None:
+    captured: list[tuple[float, float, float]] = []
+    monkeypatch.setattr(render_module, "_require_matplotlib", lambda: object())
+    monkeypatch.setattr(
+        render_module,
+        "_draw_point",
+        lambda _ax, location, _line_width, color=None: captured.append(location),
+    )
+
+    layout = _FakeLayout([SimpleNamespace(dxftype="SHAPE", dxf={"insert": (9.0, 8.0, 0.0)})])
+    ax = _FakeAx()
+
+    render_module.plot_layout(layout, ax=ax, show=False, auto_fit=False, equal=False)
+
+    assert captured == [(9.0, 8.0, 0.0)]

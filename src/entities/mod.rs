@@ -6,6 +6,7 @@ pub mod dim_diameter;
 pub mod dim_linear;
 pub mod dim_radius;
 pub mod ellipse;
+pub mod face3d;
 pub mod hatch;
 pub mod insert;
 pub mod leader;
@@ -19,8 +20,11 @@ pub mod polyline_3d;
 pub mod polyline_mesh;
 pub mod polyline_pface;
 pub mod seqend;
+pub mod shape;
+pub mod solid;
 pub mod spline;
 pub mod text;
+pub mod trace;
 pub mod vertex_2d;
 pub mod vertex_3d;
 pub mod vertex_pface_face;
@@ -47,6 +51,9 @@ pub use dim_radius::{
 };
 pub use ellipse::{
     decode_ellipse, decode_ellipse_r2007, decode_ellipse_r2010, decode_ellipse_r2013, EllipseEntity,
+};
+pub use face3d::{
+    decode_3dface, decode_3dface_r2007, decode_3dface_r2010, decode_3dface_r2013, Face3dEntity,
 };
 pub use hatch::{
     decode_hatch, decode_hatch_r2004, decode_hatch_r2007, decode_hatch_r2010, decode_hatch_r2013,
@@ -83,11 +90,20 @@ pub use polyline_pface::{
     decode_polyline_pface_r2013, PolylinePFaceEntity,
 };
 pub use seqend::{decode_seqend, SeqendEntity};
+pub use shape::{
+    decode_shape, decode_shape_r2007, decode_shape_r2010, decode_shape_r2013, ShapeEntity,
+};
+pub use solid::{
+    decode_solid, decode_solid_r2007, decode_solid_r2010, decode_solid_r2013, SolidEntity,
+};
 pub use spline::{
     catmull_rom_spline, decode_spline, decode_spline_r2007, decode_spline_r2010,
     decode_spline_r2013, SplineEntity,
 };
 pub use text::{decode_text, decode_text_r2007, decode_text_r2010, decode_text_r2013, TextEntity};
+pub use trace::{
+    decode_trace, decode_trace_r2007, decode_trace_r2010, decode_trace_r2013, TraceEntity,
+};
 pub use vertex_2d::{decode_vertex_2d, Vertex2dEntity};
 pub use vertex_3d::{
     decode_vertex_3d, decode_vertex_3d_r2007, decode_vertex_3d_r2010, decode_vertex_3d_r2013,

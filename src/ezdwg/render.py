@@ -97,6 +97,25 @@ def plot_layout(
                 color=color,
                 arc_segments=arc_segments,
             )
+        elif dxftype == "3DFACE":
+            _draw_3dface(
+                ax,
+                entity.dxf.get("points", []),
+                int(entity.dxf.get("invisible_edge_flags", 0)),
+                line_width,
+                color=color,
+            )
+        elif dxftype == "SOLID" or dxftype == "TRACE":
+            _draw_polyline(
+                ax,
+                entity.dxf.get("points", []),
+                line_width,
+                color=color,
+                closed=True,
+                arc_segments=arc_segments,
+            )
+        elif dxftype == "SHAPE":
+            _draw_point(ax, entity.dxf.get("insert", (0.0, 0.0, 0.0)), line_width, color=color)
         elif dxftype == "ARC":
             _draw_arc(
                 ax,
@@ -442,6 +461,24 @@ def _draw_polyline_pface(
             closed=False,
             arc_segments=arc_segments,
         )
+
+
+def _draw_3dface(ax, points, invisible_edge_flags: int, line_width: float, color=None):
+    pts = list(points)[:4]
+    if len(pts) < 3:
+        return
+    while len(pts) < 4:
+        pts.append(pts[-1])
+
+    edges = ((0, 1, 1), (1, 2, 2), (2, 3, 4), (3, 0, 8))
+    for start_i, end_i, mask in edges:
+        if invisible_edge_flags & mask:
+            continue
+        p1 = pts[start_i]
+        p2 = pts[end_i]
+        if p1 == p2:
+            continue
+        _draw_line(ax, p1, p2, line_width, color=color)
 
 
 def _build_lwpolyline_path(points, bulges=None, closed: bool = False, arc_segments: int = 64):

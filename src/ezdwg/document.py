@@ -17,6 +17,10 @@ SUPPORTED_ENTITY_TYPES = (
     "POLYLINE_3D",
     "POLYLINE_MESH",
     "POLYLINE_PFACE",
+    "3DFACE",
+    "SOLID",
+    "TRACE",
+    "SHAPE",
     "ARC",
     "CIRCLE",
     "ELLIPSE",
@@ -271,6 +275,108 @@ class Layout:
                         layer_color_map,
                         layer_color_overrides,
                         dxftype="POLYLINE_PFACE",
+                    ),
+                )
+            return
+
+        if dxftype == "3DFACE":
+            for handle, p1, p2, p3, p4, invisible_edge_flags in raw.decode_3dface_entities(
+                decode_path
+            ):
+                yield Entity(
+                    dxftype="3DFACE",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "points": [p1, p2, p3, p4],
+                            "invisible_edge_flags": int(invisible_edge_flags),
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="3DFACE",
+                    ),
+                )
+            return
+
+        if dxftype == "SOLID":
+            for handle, p1, p2, p3, p4, thickness, extrusion in raw.decode_solid_entities(
+                decode_path
+            ):
+                yield Entity(
+                    dxftype="SOLID",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "points": [p1, p2, p3, p4],
+                            "thickness": thickness,
+                            "extrusion": extrusion,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="SOLID",
+                    ),
+                )
+            return
+
+        if dxftype == "TRACE":
+            for handle, p1, p2, p3, p4, thickness, extrusion in raw.decode_trace_entities(
+                decode_path
+            ):
+                yield Entity(
+                    dxftype="TRACE",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "points": [p1, p2, p3, p4],
+                            "thickness": thickness,
+                            "extrusion": extrusion,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="TRACE",
+                    ),
+                )
+            return
+
+        if dxftype == "SHAPE":
+            for (
+                handle,
+                insertion,
+                scale,
+                rotation,
+                width_factor,
+                oblique,
+                thickness,
+                shape_no,
+                extrusion,
+                shapefile_handle,
+            ) in raw.decode_shape_entities(decode_path):
+                yield Entity(
+                    dxftype="SHAPE",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "insert": insertion,
+                            "scale": scale,
+                            "rotation": math.degrees(rotation),
+                            "width": width_factor,
+                            "oblique": math.degrees(oblique),
+                            "thickness": thickness,
+                            "shape_no": int(shape_no),
+                            "extrusion": extrusion,
+                            "shapefile_handle": shapefile_handle,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="SHAPE",
                     ),
                 )
             return
@@ -778,7 +884,7 @@ class Layout:
 
         raise ValueError(
             f"unsupported entity type: {dxftype}. "
-            "Supported types: LINE, LWPOLYLINE, POLYLINE_3D, POLYLINE_MESH, POLYLINE_PFACE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, MINSERT, DIMENSION"
+            "Supported types: LINE, LWPOLYLINE, POLYLINE_3D, POLYLINE_MESH, POLYLINE_PFACE, 3DFACE, SOLID, TRACE, SHAPE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, MINSERT, DIMENSION"
         )
 
 
