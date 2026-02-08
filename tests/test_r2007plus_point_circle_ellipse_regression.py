@@ -8,7 +8,7 @@ from ezdwg import raw
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SAMPLES = ROOT / "dwg_samples"
+SAMPLES = ROOT / "test_dwg"
 
 
 def _iter_dxf_entities(path: Path) -> Iterator[dict[str, object]]:

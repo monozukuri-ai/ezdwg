@@ -17,7 +17,7 @@ from tests._dxf_helpers import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SAMPLES = ROOT / "dwg_samples"
+SAMPLES = ROOT / "test_dwg"
 CASES = (
     {
         "version": "AC1021",

@@ -61,10 +61,10 @@ jobs:
         run: |
           "${VENV_PY}" -m maturin develop --release
           "${VENV_PY}" -c "import ezdwg; doc = ezdwg.read('examples/data/line_2000.dwg'); assert doc.version == 'AC1015'; print(doc.version)"
-          "${VENV_PY}" -c "import ezdwg; doc = ezdwg.read('dwg_samples/line_2007.dwg'); assert doc.version == 'AC1021'; assert doc.decode_version == 'AC1021'; assert sum(1 for _ in doc.modelspace().query('LINE')) == 1; print(doc.decode_version)"
-          "${VENV_PY}" -m ezdwg inspect dwg_samples/line_2007.dwg
+          "${VENV_PY}" -c "import ezdwg; doc = ezdwg.read('test_dwg/line_2007.dwg'); assert doc.version == 'AC1021'; assert doc.decode_version == 'AC1021'; assert sum(1 for _ in doc.modelspace().query('LINE')) == 1; print(doc.decode_version)"
+          "${VENV_PY}" -m ezdwg inspect test_dwg/line_2007.dwg
           "${VENV_PY}" examples/basic_read.py
-          "${VENV_PY}" -m pytest -q tests/test_versions.py tests/test_read_versions.py tests/test_ac1021_regression.py
+          "${VENV_PY}" -m pytest -q tests/test_read_versions.py tests/test_r2007plus_regression.py tests/test_r2007plus_point_circle_ellipse_regression.py tests/test_text_mtext_regression.py
 
       - name: Build wheel
         shell: bash

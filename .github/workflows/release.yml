@@ -34,8 +34,8 @@ jobs:
           python -m maturin develop --release
           python -m ezdwg --version
           python -m ezdwg inspect examples/data/line_2000.dwg
-          python -m ezdwg inspect dwg_samples/line_2007.dwg
-          python -c "import ezdwg; doc = ezdwg.read('dwg_samples/line_2007.dwg'); assert doc.version == 'AC1021'; assert doc.decode_version == 'AC1021'; assert sum(1 for _ in doc.modelspace().query('LINE')) == 1; print(doc.decode_version)"
+          python -m ezdwg inspect test_dwg/line_2007.dwg
+          python -c "import ezdwg; doc = ezdwg.read('test_dwg/line_2007.dwg'); assert doc.version == 'AC1021'; assert doc.decode_version == 'AC1021'; assert sum(1 for _ in doc.modelspace().query('LINE')) == 1; print(doc.decode_version)"
           python examples/basic_read.py
 
   publish:

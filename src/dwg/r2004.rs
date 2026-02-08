@@ -910,7 +910,7 @@ mod tests {
 
     #[test]
     fn parses_section_directory_from_sample() {
-        let bytes = std::fs::read("dwg_samples/line_2004.dwg").expect("sample file");
+        let bytes = std::fs::read("test_dwg/line_2004.dwg").expect("sample file");
         let directory =
             parse_section_directory(&bytes, &ParseConfig::default()).expect("directory");
         assert!(directory.record_count > 0);
@@ -922,14 +922,14 @@ mod tests {
 
     #[test]
     fn builds_object_index_from_handles_section() {
-        let bytes = std::fs::read("dwg_samples/line_2004.dwg").expect("sample file");
+        let bytes = std::fs::read("test_dwg/line_2004.dwg").expect("sample file");
         let index = build_object_index(&bytes, &ParseConfig::default()).expect("object index");
         assert_eq!(index.objects.len(), 199);
     }
 
     #[test]
     fn parses_object_record_from_acdbobjects() {
-        let bytes = std::fs::read("dwg_samples/line_2004.dwg").expect("sample file");
+        let bytes = std::fs::read("test_dwg/line_2004.dwg").expect("sample file");
         let config = ParseConfig::default();
         let index = build_object_index(&bytes, &config).expect("object index");
         let object = index.objects.first().expect("object");
@@ -939,7 +939,7 @@ mod tests {
 
     #[test]
     fn parses_object_headers_from_records() {
-        let bytes = std::fs::read("dwg_samples/line_2004.dwg").expect("sample file");
+        let bytes = std::fs::read("test_dwg/line_2004.dwg").expect("sample file");
         let config = ParseConfig::default();
         let index = build_object_index(&bytes, &config).expect("object index");
 
@@ -958,7 +958,7 @@ mod tests {
     fn resolves_basic_entity_type_codes_in_r2004_samples() {
         let config = ParseConfig::default();
 
-        let line_bytes = std::fs::read("dwg_samples/line_2004.dwg").expect("line sample");
+        let line_bytes = std::fs::read("test_dwg/line_2004.dwg").expect("line sample");
         let line_index = build_object_index(&line_bytes, &config).expect("line object index");
         let mut line_count = 0usize;
         for object in &line_index.objects {
@@ -972,7 +972,7 @@ mod tests {
         }
         assert_eq!(line_count, 1);
 
-        let arc_bytes = std::fs::read("dwg_samples/arc_2004.dwg").expect("arc sample");
+        let arc_bytes = std::fs::read("test_dwg/arc_2004.dwg").expect("arc sample");
         let arc_index = build_object_index(&arc_bytes, &config).expect("arc object index");
         let mut arc_count = 0usize;
         for object in &arc_index.objects {
@@ -987,7 +987,7 @@ mod tests {
         assert_eq!(arc_count, 1);
 
         let poly_bytes =
-            std::fs::read("dwg_samples/polyline2d_line_2004.dwg").expect("polyline sample");
+            std::fs::read("test_dwg/polyline2d_line_2004.dwg").expect("polyline sample");
         let poly_index = build_object_index(&poly_bytes, &config).expect("poly object index");
         let mut lw_count = 0usize;
         for object in &poly_index.objects {
@@ -1004,7 +1004,7 @@ mod tests {
 
     #[test]
     fn decodes_insert_entity_from_r2004_sample() {
-        let bytes = std::fs::read("dwg_samples/insert_2004.dwg").expect("insert sample");
+        let bytes = std::fs::read("test_dwg/insert_2004.dwg").expect("insert sample");
         let config = ParseConfig::default();
         let index = build_object_index(&bytes, &config).expect("object index");
 
@@ -1034,7 +1034,7 @@ mod tests {
 
     #[test]
     fn legacy_polyline_sample_is_normalized_to_lwpolyline() {
-        let bytes = std::fs::read("dwg_samples/polyline2d_old_2004.dwg").expect("polyline sample");
+        let bytes = std::fs::read("test_dwg/polyline2d_old_2004.dwg").expect("polyline sample");
         let config = ParseConfig::default();
         let index = build_object_index(&bytes, &config).expect("object index");
 
@@ -1067,7 +1067,7 @@ mod tests {
     fn decodes_point_circle_ellipse_from_r2004_samples() {
         let config = ParseConfig::default();
 
-        let point2d_bytes = std::fs::read("dwg_samples/point2d_2004.dwg").expect("point2d sample");
+        let point2d_bytes = std::fs::read("test_dwg/point2d_2004.dwg").expect("point2d sample");
         let point2d_index =
             build_object_index(&point2d_bytes, &config).expect("point2d object index");
         let mut point2d_count = 0usize;
@@ -1088,7 +1088,7 @@ mod tests {
         }
         assert_eq!(point2d_count, 1);
 
-        let point3d_bytes = std::fs::read("dwg_samples/point3d_2004.dwg").expect("point3d sample");
+        let point3d_bytes = std::fs::read("test_dwg/point3d_2004.dwg").expect("point3d sample");
         let point3d_index =
             build_object_index(&point3d_bytes, &config).expect("point3d object index");
         let mut point3d_count = 0usize;
@@ -1108,7 +1108,7 @@ mod tests {
         }
         assert_eq!(point3d_count, 1);
 
-        let circle_bytes = std::fs::read("dwg_samples/circle_2004.dwg").expect("circle sample");
+        let circle_bytes = std::fs::read("test_dwg/circle_2004.dwg").expect("circle sample");
         let circle_index = build_object_index(&circle_bytes, &config).expect("circle object index");
         let mut circle_count = 0usize;
         for object in &circle_index.objects {
@@ -1127,7 +1127,7 @@ mod tests {
         }
         assert_eq!(circle_count, 1);
 
-        let ellipse_bytes = std::fs::read("dwg_samples/ellipse_2004.dwg").expect("ellipse sample");
+        let ellipse_bytes = std::fs::read("test_dwg/ellipse_2004.dwg").expect("ellipse sample");
         let ellipse_index =
             build_object_index(&ellipse_bytes, &config).expect("ellipse object index");
         let mut ellipse_count = 0usize;
@@ -1156,7 +1156,7 @@ mod tests {
     fn decodes_text_mtext_from_r2004_samples() {
         let config = ParseConfig::default();
 
-        let text_bytes = std::fs::read("dwg_samples/text_2004.dwg").expect("text sample");
+        let text_bytes = std::fs::read("test_dwg/text_2004.dwg").expect("text sample");
         let text_index = build_object_index(&text_bytes, &config).expect("text object index");
         let mut text_count = 0usize;
         for object in &text_index.objects {
@@ -1181,7 +1181,7 @@ mod tests {
         }
         assert_eq!(text_count, 1);
 
-        let mtext_bytes = std::fs::read("dwg_samples/mtext_2004.dwg").expect("mtext sample");
+        let mtext_bytes = std::fs::read("test_dwg/mtext_2004.dwg").expect("mtext sample");
         let mtext_index = build_object_index(&mtext_bytes, &config).expect("mtext object index");
         let mut mtext_count = 0usize;
         for object in &mtext_index.objects {

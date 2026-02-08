@@ -14,11 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.parametrize(
     ("relative_path", "expected_version"),
     [
-        ("dwg_samples/line_2000.dwg", "AC1015"),
-        ("dwg_samples/line_2004.dwg", "AC1018"),
-        ("dwg_samples/line_2007.dwg", "AC1021"),
-        ("dwg_samples/line_2010.dwg", "AC1024"),
-        ("dwg_samples/line_2013.dwg", "AC1027"),
+        ("test_dwg/line_2000.dwg", "AC1015"),
+        ("test_dwg/line_2004.dwg", "AC1018"),
+        ("test_dwg/line_2007.dwg", "AC1021"),
+        ("test_dwg/line_2010.dwg", "AC1024"),
+        ("test_dwg/line_2013.dwg", "AC1027"),
     ],
 )
 def test_detect_version_from_samples(relative_path: str, expected_version: str) -> None:
@@ -30,11 +30,11 @@ def test_detect_version_from_samples(relative_path: str, expected_version: str) 
 @pytest.mark.parametrize(
     ("relative_path", "expected_version"),
     [
-        ("dwg_samples/line_2000.dwg", "AC1015"),
-        ("dwg_samples/line_2004.dwg", "AC1018"),
-        ("dwg_samples/line_2007.dwg", "AC1021"),
-        ("dwg_samples/line_2010.dwg", "AC1024"),
-        ("dwg_samples/line_2013.dwg", "AC1027"),
+        ("test_dwg/line_2000.dwg", "AC1015"),
+        ("test_dwg/line_2004.dwg", "AC1018"),
+        ("test_dwg/line_2007.dwg", "AC1021"),
+        ("test_dwg/line_2010.dwg", "AC1024"),
+        ("test_dwg/line_2013.dwg", "AC1027"),
     ],
 )
 def test_read_native_versions(relative_path: str, expected_version: str) -> None:
