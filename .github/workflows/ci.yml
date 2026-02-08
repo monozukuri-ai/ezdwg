@@ -69,5 +69,6 @@ jobs:
       - name: Build wheel
         shell: bash
         run: |
+          rm -f src/ezdwg/_core.pyd src/ezdwg/_core.so src/ezdwg/_core.abi3.so src/ezdwg/_core.dll src/ezdwg/_core.dylib
           "${VENV_PY}" -m maturin build --release --out dist
           "${VENV_PY}" -c "from pathlib import Path; wheels = list(Path('dist').glob('*.whl')); assert wheels, 'no wheel produced'; print(wheels[0].name)"
