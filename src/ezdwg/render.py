@@ -68,6 +68,35 @@ def plot_layout(
                 closed=bool(entity.dxf.get("closed", False)),
                 arc_segments=arc_segments,
             )
+        elif dxftype == "POLYLINE_3D":
+            _draw_polyline(
+                ax,
+                entity.dxf.get("points", []),
+                line_width,
+                color=color,
+                closed=bool(entity.dxf.get("closed", False)),
+                arc_segments=arc_segments,
+            )
+        elif dxftype == "POLYLINE_MESH":
+            _draw_polyline_mesh(
+                ax,
+                entity.dxf.get("points", []),
+                entity.dxf.get("m_vertex_count", 0),
+                entity.dxf.get("n_vertex_count", 0),
+                bool(entity.dxf.get("closed", False)),
+                line_width,
+                color=color,
+                arc_segments=arc_segments,
+            )
+        elif dxftype == "POLYLINE_PFACE":
+            _draw_polyline_pface(
+                ax,
+                entity.dxf.get("vertices", []),
+                entity.dxf.get("faces", []),
+                line_width,
+                color=color,
+                arc_segments=arc_segments,
+            )
         elif dxftype == "ARC":
             _draw_arc(
                 ax,
@@ -303,6 +332,116 @@ def _draw_polyline(
     xs = [pt[0] for pt in path]
     ys = [pt[1] for pt in path]
     ax.plot(xs, ys, linewidth=line_width, color=color)
+
+
+def _draw_polyline_mesh(
+    ax,
+    points,
+    m_vertex_count,
+    n_vertex_count,
+    closed: bool,
+    line_width: float,
+    color=None,
+    arc_segments: int = 64,
+):
+    try:
+        m_count = int(m_vertex_count)
+    except Exception:
+        m_count = 0
+    try:
+        n_count = int(n_vertex_count)
+    except Exception:
+        n_count = 0
+
+    points3d = [pt for pt in points if _to_xy(pt) is not None]
+    if m_count <= 1 or n_count <= 1 or len(points3d) < (m_count * n_count):
+        _draw_polyline(
+            ax,
+            points3d,
+            line_width,
+            color=color,
+            closed=closed,
+            arc_segments=arc_segments,
+        )
+        return
+
+    for row in range(n_count):
+        start = row * m_count
+        row_points = points3d[start : start + m_count]
+        if len(row_points) >= 2:
+            _draw_polyline(
+                ax,
+                row_points,
+                line_width,
+                color=color,
+                closed=False,
+                arc_segments=arc_segments,
+            )
+
+    for col in range(m_count):
+        col_points = []
+        for row in range(n_count):
+            idx = row * m_count + col
+            if idx < len(points3d):
+                col_points.append(points3d[idx])
+        if len(col_points) >= 2:
+            _draw_polyline(
+                ax,
+                col_points,
+                line_width,
+                color=color,
+                closed=False,
+                arc_segments=arc_segments,
+            )
+
+
+def _draw_polyline_pface(
+    ax,
+    vertices,
+    faces,
+    line_width: float,
+    color=None,
+    arc_segments: int = 64,
+):
+    vertex_points = [pt for pt in vertices if _to_xy(pt) is not None]
+    if not vertex_points:
+        return
+
+    face_drawn = False
+    for face in faces or []:
+        if not isinstance(face, (tuple, list)) or not face:
+            continue
+        face_points = []
+        for raw_index in face:
+            try:
+                index = abs(int(raw_index))
+            except Exception:
+                continue
+            if index <= 0:
+                continue
+            idx0 = index - 1
+            if 0 <= idx0 < len(vertex_points):
+                face_points.append(vertex_points[idx0])
+        if len(face_points) >= 2:
+            _draw_polyline(
+                ax,
+                face_points,
+                line_width,
+                color=color,
+                closed=True,
+                arc_segments=arc_segments,
+            )
+            face_drawn = True
+
+    if not face_drawn:
+        _draw_polyline(
+            ax,
+            vertex_points,
+            line_width,
+            color=color,
+            closed=False,
+            arc_segments=arc_segments,
+        )
 
 
 def _build_lwpolyline_path(points, bulges=None, closed: bool = False, arc_segments: int = 64):

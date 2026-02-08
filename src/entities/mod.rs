@@ -15,10 +15,15 @@ pub mod minsert;
 pub mod mtext;
 pub mod point;
 pub mod polyline_2d;
+pub mod polyline_3d;
+pub mod polyline_mesh;
+pub mod polyline_pface;
 pub mod seqend;
 pub mod spline;
 pub mod text;
 pub mod vertex_2d;
+pub mod vertex_3d;
+pub mod vertex_pface_face;
 
 pub use arc::{decode_arc, decode_arc_r2007, decode_arc_r2010, decode_arc_r2013, ArcEntity};
 pub use attrib::{
@@ -65,6 +70,18 @@ pub use point::{
     decode_point, decode_point_r2007, decode_point_r2010, decode_point_r2013, PointEntity,
 };
 pub use polyline_2d::{decode_polyline_2d, Polyline2dEntity, PolylineCurveType, PolylineFlagsInfo};
+pub use polyline_3d::{
+    decode_polyline_3d, decode_polyline_3d_r2007, decode_polyline_3d_r2010,
+    decode_polyline_3d_r2013, Polyline3dEntity,
+};
+pub use polyline_mesh::{
+    decode_polyline_mesh, decode_polyline_mesh_r2007, decode_polyline_mesh_r2010,
+    decode_polyline_mesh_r2013, PolylineMeshEntity,
+};
+pub use polyline_pface::{
+    decode_polyline_pface, decode_polyline_pface_r2007, decode_polyline_pface_r2010,
+    decode_polyline_pface_r2013, PolylinePFaceEntity,
+};
 pub use seqend::{decode_seqend, SeqendEntity};
 pub use spline::{
     catmull_rom_spline, decode_spline, decode_spline_r2007, decode_spline_r2010,
@@ -72,3 +89,11 @@ pub use spline::{
 };
 pub use text::{decode_text, decode_text_r2007, decode_text_r2010, decode_text_r2013, TextEntity};
 pub use vertex_2d::{decode_vertex_2d, Vertex2dEntity};
+pub use vertex_3d::{
+    decode_vertex_3d, decode_vertex_3d_r2007, decode_vertex_3d_r2010, decode_vertex_3d_r2013,
+    Vertex3dEntity,
+};
+pub use vertex_pface_face::{
+    decode_vertex_pface_face, decode_vertex_pface_face_r2007, decode_vertex_pface_face_r2010,
+    decode_vertex_pface_face_r2013, VertexPFaceFaceEntity,
+};

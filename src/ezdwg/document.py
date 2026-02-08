@@ -14,6 +14,9 @@ SUPPORTED_VERSIONS = {"AC1015", "AC1018", "AC1021", "AC1024", "AC1027"}
 SUPPORTED_ENTITY_TYPES = (
     "LINE",
     "LWPOLYLINE",
+    "POLYLINE_3D",
+    "POLYLINE_MESH",
+    "POLYLINE_PFACE",
     "ARC",
     "CIRCLE",
     "ELLIPSE",
@@ -190,6 +193,84 @@ class Layout:
                         layer_color_map,
                         layer_color_overrides,
                         dxftype="LWPOLYLINE",
+                    ),
+                )
+            return
+
+        if dxftype == "POLYLINE_3D":
+            for handle, flags_70_bits, closed, points in raw.decode_polyline_3d_with_vertices(
+                decode_path
+            ):
+                yield Entity(
+                    dxftype="POLYLINE_3D",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "points": list(points),
+                            "flags": int(flags_70_bits),
+                            "closed": bool(closed),
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="POLYLINE_3D",
+                    ),
+                )
+            return
+
+        if dxftype == "POLYLINE_MESH":
+            for (
+                handle,
+                flags,
+                m_vertex_count,
+                n_vertex_count,
+                closed,
+                points,
+            ) in raw.decode_polyline_mesh_with_vertices(decode_path):
+                yield Entity(
+                    dxftype="POLYLINE_MESH",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "points": list(points),
+                            "flags": int(flags),
+                            "m_vertex_count": int(m_vertex_count),
+                            "n_vertex_count": int(n_vertex_count),
+                            "closed": bool(closed),
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="POLYLINE_MESH",
+                    ),
+                )
+            return
+
+        if dxftype == "POLYLINE_PFACE":
+            for (
+                handle,
+                num_vertices,
+                num_faces,
+                vertices,
+                faces,
+            ) in raw.decode_polyline_pface_with_faces(decode_path):
+                yield Entity(
+                    dxftype="POLYLINE_PFACE",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "num_vertices": int(num_vertices),
+                            "num_faces": int(num_faces),
+                            "vertices": list(vertices),
+                            "faces": list(faces),
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="POLYLINE_PFACE",
                     ),
                 )
             return
@@ -697,7 +778,7 @@ class Layout:
 
         raise ValueError(
             f"unsupported entity type: {dxftype}. "
-            "Supported types: LINE, LWPOLYLINE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, MINSERT, DIMENSION"
+            "Supported types: LINE, LWPOLYLINE, POLYLINE_3D, POLYLINE_MESH, POLYLINE_PFACE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, MINSERT, DIMENSION"
         )
 
 

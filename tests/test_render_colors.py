@@ -313,3 +313,107 @@ def test_plot_layout_hatch_uses_polyline_drawer_for_each_path(monkeypatch) -> No
         ([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)], False),
         ([(2.0, 2.0, 0.0), (3.0, 2.0, 0.0)], True),
     ]
+
+
+def test_plot_layout_polyline_3d_uses_polyline_drawer(monkeypatch) -> None:
+    captured: list[tuple[list, bool]] = []
+    monkeypatch.setattr(render_module, "_require_matplotlib", lambda: object())
+    monkeypatch.setattr(
+        render_module,
+        "_draw_polyline",
+        lambda _ax, points, _line_width, color=None, bulges=None, closed=False, arc_segments=64: captured.append(
+            (list(points), closed)
+        ),
+    )
+
+    layout = _FakeLayout(
+        [
+            SimpleNamespace(
+                dxftype="POLYLINE_3D",
+                dxf={
+                    "points": [(0.0, 0.0, 1.0), (1.0, 0.0, 2.0), (1.0, 1.0, 3.0)],
+                    "closed": True,
+                },
+            )
+        ]
+    )
+    ax = _FakeAx()
+
+    render_module.plot_layout(layout, ax=ax, show=False, auto_fit=False, equal=False)
+
+    assert captured == [([(0.0, 0.0, 1.0), (1.0, 0.0, 2.0), (1.0, 1.0, 3.0)], True)]
+
+
+def test_plot_layout_polyline_mesh_uses_polyline_drawer(monkeypatch) -> None:
+    captured: list[tuple[list, bool]] = []
+    monkeypatch.setattr(render_module, "_require_matplotlib", lambda: object())
+    monkeypatch.setattr(
+        render_module,
+        "_draw_polyline",
+        lambda _ax, points, _line_width, color=None, bulges=None, closed=False, arc_segments=64: captured.append(
+            (list(points), closed)
+        ),
+    )
+
+    layout = _FakeLayout(
+        [
+            SimpleNamespace(
+                dxftype="POLYLINE_MESH",
+                dxf={
+                    "points": [
+                        (0.0, 0.0, 0.0),
+                        (1.0, 0.0, 0.0),
+                        (2.0, 0.0, 0.0),
+                        (0.0, 1.0, 0.0),
+                        (1.0, 1.0, 0.0),
+                        (2.0, 1.0, 0.0),
+                    ],
+                    "m_vertex_count": 3,
+                    "n_vertex_count": 2,
+                    "closed": False,
+                },
+            )
+        ]
+    )
+    ax = _FakeAx()
+
+    render_module.plot_layout(layout, ax=ax, show=False, auto_fit=False, equal=False)
+
+    # 2 horizontal + 3 vertical grid lines
+    assert len(captured) == 5
+
+
+def test_plot_layout_polyline_pface_uses_face_edges(monkeypatch) -> None:
+    captured: list[tuple[list, bool]] = []
+    monkeypatch.setattr(render_module, "_require_matplotlib", lambda: object())
+    monkeypatch.setattr(
+        render_module,
+        "_draw_polyline",
+        lambda _ax, points, _line_width, color=None, bulges=None, closed=False, arc_segments=64: captured.append(
+            (list(points), closed)
+        ),
+    )
+
+    layout = _FakeLayout(
+        [
+            SimpleNamespace(
+                dxftype="POLYLINE_PFACE",
+                dxf={
+                    "vertices": [
+                        (0.0, 0.0, 0.0),
+                        (1.0, 0.0, 0.0),
+                        (1.0, 1.0, 0.0),
+                        (0.0, 1.0, 0.0),
+                    ],
+                    "faces": [(1, 2, 3, 4)],
+                },
+            )
+        ]
+    )
+    ax = _FakeAx()
+
+    render_module.plot_layout(layout, ax=ax, show=False, auto_fit=False, equal=False)
+
+    assert captured == [
+        ([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)], True)
+    ]

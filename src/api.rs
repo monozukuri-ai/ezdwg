@@ -116,6 +116,17 @@ type Polyline2dInterpretedRow = (
     bool,
 );
 type LwPolylineEntityRow = (u64, u16, Vec<Point2>, Vec<f64>, Vec<Point2>, Option<f64>);
+type Polyline3dEntityRow = (u64, u8, u8);
+type Vertex3dEntityRow = (u64, u8, f64, f64, f64);
+type Polyline3dVerticesRow = (u64, u8, bool, Vec<Point3>);
+type PolylineMeshEntityRow = (u64, u16, u16, u16, u16, u16, u16);
+type VertexMeshEntityRow = (u64, u8, f64, f64, f64);
+type PolylineMeshVerticesRow = (u64, u16, u16, u16, bool, Vec<Point3>);
+type PolylinePFaceEntityRow = (u64, u16, u16);
+type VertexPFaceEntityRow = (u64, u8, f64, f64, f64);
+type VertexPFaceFaceEntityRow = (u64, u16, u16, u16, u16);
+type PFaceFaceRow = (u16, u16, u16, u16);
+type PolylinePFaceFacesRow = (u64, u16, u16, Vec<Point3>, Vec<PFaceFaceRow>);
 type PolylineVerticesRow = (u64, u16, Vec<Point3>);
 type PolylineInterpolatedRow = (u64, u16, bool, Vec<Point3>);
 type Vertex2dEntityRow = (u64, u16, f64, f64, f64, f64, f64, f64, f64);
@@ -696,6 +707,93 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
             ));
         } else if matches_type_name(header.type_code, 0x4D, "LWPOLYLINE", &dynamic_types) {
             let entity = match decode_lwpolyline_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
+            let layer_handle = layer_handle_remap
+                .get(&layer_handle)
+                .copied()
+                .unwrap_or(layer_handle);
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x10, "POLYLINE_3D", &dynamic_types) {
+            let entity = match decode_polyline_3d_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
+            let layer_handle = layer_handle_remap
+                .get(&layer_handle)
+                .copied()
+                .unwrap_or(layer_handle);
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x1E, "POLYLINE_MESH", &dynamic_types) {
+            let entity = match decode_polyline_mesh_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
+            let layer_handle = layer_handle_remap
+                .get(&layer_handle)
+                .copied()
+                .unwrap_or(layer_handle);
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x1D, "POLYLINE_PFACE", &dynamic_types) {
+            let entity = match decode_polyline_pface_for_version(
                 &mut reader,
                 decoder.version(),
                 &header,
@@ -2025,6 +2123,1092 @@ pub fn decode_lwpolyline_entities(
 }
 
 #[pyfunction(signature = (path, limit=None))]
+pub fn decode_polyline_3d_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<Polyline3dEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x10, "POLYLINE_3D", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity = match decode_polyline_3d_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(entity) => entity,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        result.push((entity.handle, entity.flags_75_bits, entity.flags_70_bits));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_vertex_3d_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<Vertex3dEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x0B, "VERTEX_3D", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity = match decode_vertex_3d_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(entity) => entity,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        result.push((
+            entity.handle,
+            entity.flags,
+            entity.position.0,
+            entity.position.1,
+            entity.position.2,
+        ));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_polyline_3d_with_vertices(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<Polyline3dVerticesRow>> {
+    let decoded_rows = decode_polyline_3d_vertex_rows(path, limit)?;
+    let mut result = Vec::with_capacity(decoded_rows.len());
+    for row in decoded_rows {
+        let mut vertices: Vec<Point3> = row.vertices.iter().map(|vertex| vertex.position).collect();
+        if row.closed && vertices.len() > 1 {
+            let first = vertices[0];
+            let last = *vertices.last().unwrap();
+            if !points_equal_3d(first, last) {
+                vertices.push(first);
+            }
+        }
+        result.push((row.handle, row.flags_70_bits, row.closed, vertices));
+    }
+    Ok(result)
+}
+
+#[derive(Debug, Clone)]
+struct Polyline3dVertexRow {
+    handle: u64,
+    flags_70_bits: u8,
+    closed: bool,
+    vertices: Vec<entities::Vertex3dEntity>,
+}
+
+fn decode_polyline_3d_vertex_rows(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<Polyline3dVertexRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut sorted = index.objects.clone();
+    sorted.sort_by_key(|obj| obj.offset);
+
+    let vertex_map = build_vertex_3d_map(&decoder, &sorted, &dynamic_types, best_effort)?;
+    let mut result = Vec::new();
+    let mut i = 0usize;
+    while i < sorted.len() {
+        let Some((record, header)) =
+            parse_record_and_header(&decoder, sorted[i].offset, best_effort)?
+        else {
+            i += 1;
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x10, "POLYLINE_3D", &dynamic_types) {
+            i += 1;
+            continue;
+        }
+
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                i += 1;
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let poly = match decode_polyline_3d_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            sorted[i].handle.0,
+        ) {
+            Ok(poly) => poly,
+            Err(err) if best_effort => {
+                i += 1;
+                continue;
+            }
+            Err(err) => return Err(to_py_err(err)),
+        };
+        let (vertices, next_i) = collect_polyline_3d_vertices(
+            &decoder,
+            &sorted,
+            &dynamic_types,
+            &vertex_map,
+            &poly,
+            i,
+            best_effort,
+        )?;
+        i = next_i;
+        result.push(Polyline3dVertexRow {
+            handle: poly.handle,
+            flags_70_bits: poly.flags_70_bits,
+            closed: (poly.flags_70_bits & 0x01) != 0,
+            vertices,
+        });
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn build_vertex_3d_map(
+    decoder: &decoder::Decoder<'_>,
+    sorted: &[objects::ObjectRef],
+    dynamic_types: &HashMap<u16, String>,
+    best_effort: bool,
+) -> PyResult<HashMap<u64, entities::Vertex3dEntity>> {
+    let mut vertex_map = HashMap::new();
+    for obj in sorted {
+        let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x0B, "VERTEX_3D", dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let vertex = match decode_vertex_3d_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(vertex) => vertex,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        vertex_map.insert(vertex.handle, vertex);
+    }
+    Ok(vertex_map)
+}
+
+fn collect_polyline_3d_vertices(
+    decoder: &decoder::Decoder<'_>,
+    sorted: &[objects::ObjectRef],
+    dynamic_types: &HashMap<u16, String>,
+    vertex_map: &HashMap<u64, entities::Vertex3dEntity>,
+    poly: &entities::Polyline3dEntity,
+    start_index: usize,
+    best_effort: bool,
+) -> PyResult<(Vec<entities::Vertex3dEntity>, usize)> {
+    let mut vertices = Vec::new();
+
+    if !poly.owned_handles.is_empty() {
+        for handle in &poly.owned_handles {
+            if let Some(vertex) = vertex_map.get(handle) {
+                vertices.push(vertex.clone());
+            }
+        }
+        return Ok((vertices, start_index + 1));
+    }
+
+    let mut next_i = start_index + 1;
+    while next_i < sorted.len() {
+        let Some((next_record, next_header)) =
+            parse_record_and_header(decoder, sorted[next_i].offset, best_effort)?
+        else {
+            next_i += 1;
+            continue;
+        };
+        let mut next_reader = next_record.bit_reader();
+        if matches_type_name(next_header.type_code, 0x0B, "VERTEX_3D", dynamic_types) {
+            if let Err(err) = skip_object_type_prefix(&mut next_reader, decoder.version()) {
+                if best_effort {
+                    next_i += 1;
+                    continue;
+                }
+                return Err(to_py_err(err));
+            }
+            let vertex = match decode_vertex_3d_for_version(
+                &mut next_reader,
+                decoder.version(),
+                &next_header,
+                sorted[next_i].handle.0,
+            ) {
+                Ok(vertex) => vertex,
+                Err(err) if best_effort => {
+                    next_i += 1;
+                    continue;
+                }
+                Err(err) => return Err(to_py_err(err)),
+            };
+            vertices.push(vertex);
+            next_i += 1;
+            continue;
+        }
+        if matches_type_name(next_header.type_code, 0x06, "SEQEND", dynamic_types) {
+            if let Err(err) = skip_object_type_prefix(&mut next_reader, decoder.version()) {
+                if best_effort {
+                    next_i += 1;
+                    continue;
+                }
+                return Err(to_py_err(err));
+            }
+            if let Err(err) = entities::decode_seqend(&mut next_reader) {
+                if !best_effort {
+                    return Err(to_py_err(err));
+                }
+            }
+            next_i += 1;
+        }
+        break;
+    }
+
+    Ok((vertices, next_i))
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_polyline_mesh_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<PolylineMeshEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x1E, "POLYLINE_MESH", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity = match decode_polyline_mesh_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(entity) => entity,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        result.push((
+            entity.handle,
+            entity.flags,
+            entity.curve_type,
+            entity.m_vertex_count,
+            entity.n_vertex_count,
+            entity.m_density,
+            entity.n_density,
+        ));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_vertex_mesh_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<VertexMeshEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x0C, "VERTEX_MESH", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity = match decode_vertex_3d_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(entity) => entity,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        result.push((
+            entity.handle,
+            entity.flags,
+            entity.position.0,
+            entity.position.1,
+            entity.position.2,
+        ));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_polyline_mesh_with_vertices(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<PolylineMeshVerticesRow>> {
+    let decoded_rows = decode_polyline_mesh_vertex_rows(path, limit)?;
+    let mut result = Vec::with_capacity(decoded_rows.len());
+    for row in decoded_rows {
+        let mut vertices: Vec<Point3> = row.vertices.iter().map(|vertex| vertex.position).collect();
+        if row.closed && vertices.len() > 1 {
+            let first = vertices[0];
+            let last = *vertices.last().unwrap();
+            if !points_equal_3d(first, last) {
+                vertices.push(first);
+            }
+        }
+        result.push((
+            row.handle,
+            row.flags,
+            row.m_vertex_count,
+            row.n_vertex_count,
+            row.closed,
+            vertices,
+        ));
+    }
+    Ok(result)
+}
+
+#[derive(Debug, Clone)]
+struct PolylineMeshVertexRow {
+    handle: u64,
+    flags: u16,
+    m_vertex_count: u16,
+    n_vertex_count: u16,
+    closed: bool,
+    vertices: Vec<entities::Vertex3dEntity>,
+}
+
+fn decode_polyline_mesh_vertex_rows(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<PolylineMeshVertexRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut sorted = index.objects.clone();
+    sorted.sort_by_key(|obj| obj.offset);
+
+    let vertex_map = build_vertex_mesh_map(&decoder, &sorted, &dynamic_types, best_effort)?;
+    let mut result = Vec::new();
+    let mut i = 0usize;
+    while i < sorted.len() {
+        let Some((record, header)) =
+            parse_record_and_header(&decoder, sorted[i].offset, best_effort)?
+        else {
+            i += 1;
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x1E, "POLYLINE_MESH", &dynamic_types) {
+            i += 1;
+            continue;
+        }
+
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                i += 1;
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let poly = match decode_polyline_mesh_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            sorted[i].handle.0,
+        ) {
+            Ok(poly) => poly,
+            Err(err) if best_effort => {
+                i += 1;
+                continue;
+            }
+            Err(err) => return Err(to_py_err(err)),
+        };
+        let (vertices, next_i) = collect_polyline_mesh_vertices(
+            &decoder,
+            &sorted,
+            &dynamic_types,
+            &vertex_map,
+            &poly,
+            i,
+            best_effort,
+        )?;
+        i = next_i;
+        result.push(PolylineMeshVertexRow {
+            handle: poly.handle,
+            flags: poly.flags,
+            m_vertex_count: poly.m_vertex_count,
+            n_vertex_count: poly.n_vertex_count,
+            closed: (poly.flags & 0x01) != 0,
+            vertices,
+        });
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn build_vertex_mesh_map(
+    decoder: &decoder::Decoder<'_>,
+    sorted: &[objects::ObjectRef],
+    dynamic_types: &HashMap<u16, String>,
+    best_effort: bool,
+) -> PyResult<HashMap<u64, entities::Vertex3dEntity>> {
+    let mut vertex_map = HashMap::new();
+    for obj in sorted {
+        let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x0C, "VERTEX_MESH", dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let vertex = match decode_vertex_3d_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(vertex) => vertex,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        vertex_map.insert(vertex.handle, vertex);
+    }
+    Ok(vertex_map)
+}
+
+fn collect_polyline_mesh_vertices(
+    decoder: &decoder::Decoder<'_>,
+    sorted: &[objects::ObjectRef],
+    dynamic_types: &HashMap<u16, String>,
+    vertex_map: &HashMap<u64, entities::Vertex3dEntity>,
+    poly: &entities::PolylineMeshEntity,
+    start_index: usize,
+    best_effort: bool,
+) -> PyResult<(Vec<entities::Vertex3dEntity>, usize)> {
+    let mut vertices = Vec::new();
+
+    if !poly.owned_handles.is_empty() {
+        for handle in &poly.owned_handles {
+            if let Some(vertex) = vertex_map.get(handle) {
+                vertices.push(vertex.clone());
+            }
+        }
+        return Ok((vertices, start_index + 1));
+    }
+
+    let mut next_i = start_index + 1;
+    while next_i < sorted.len() {
+        let Some((next_record, next_header)) =
+            parse_record_and_header(decoder, sorted[next_i].offset, best_effort)?
+        else {
+            next_i += 1;
+            continue;
+        };
+        let mut next_reader = next_record.bit_reader();
+        if matches_type_name(next_header.type_code, 0x0C, "VERTEX_MESH", dynamic_types) {
+            if let Err(err) = skip_object_type_prefix(&mut next_reader, decoder.version()) {
+                if best_effort {
+                    next_i += 1;
+                    continue;
+                }
+                return Err(to_py_err(err));
+            }
+            let vertex = match decode_vertex_3d_for_version(
+                &mut next_reader,
+                decoder.version(),
+                &next_header,
+                sorted[next_i].handle.0,
+            ) {
+                Ok(vertex) => vertex,
+                Err(err) if best_effort => {
+                    next_i += 1;
+                    continue;
+                }
+                Err(err) => return Err(to_py_err(err)),
+            };
+            vertices.push(vertex);
+            next_i += 1;
+            continue;
+        }
+        if matches_type_name(next_header.type_code, 0x06, "SEQEND", dynamic_types) {
+            if let Err(err) = skip_object_type_prefix(&mut next_reader, decoder.version()) {
+                if best_effort {
+                    next_i += 1;
+                    continue;
+                }
+                return Err(to_py_err(err));
+            }
+            if let Err(err) = entities::decode_seqend(&mut next_reader) {
+                if !best_effort {
+                    return Err(to_py_err(err));
+                }
+            }
+            next_i += 1;
+        }
+        break;
+    }
+
+    Ok((vertices, next_i))
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_polyline_pface_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<PolylinePFaceEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x1D, "POLYLINE_PFACE", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity = match decode_polyline_pface_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(entity) => entity,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        result.push((entity.handle, entity.num_vertices, entity.num_faces));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_vertex_pface_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<VertexPFaceEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x0D, "VERTEX_PFACE", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity = match decode_vertex_3d_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(entity) => entity,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        result.push((
+            entity.handle,
+            entity.flags,
+            entity.position.0,
+            entity.position.1,
+            entity.position.2,
+        ));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_vertex_pface_face_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<VertexPFaceFaceEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x0E, "VERTEX_PFACE_FACE", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity = match decode_vertex_pface_face_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(entity) => entity,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        result.push((
+            entity.handle,
+            entity.index1,
+            entity.index2,
+            entity.index3,
+            entity.index4,
+        ));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_polyline_pface_with_faces(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<PolylinePFaceFacesRow>> {
+    let decoded_rows = decode_polyline_pface_rows(path, limit)?;
+    let mut result = Vec::with_capacity(decoded_rows.len());
+    for row in decoded_rows {
+        let vertices: Vec<Point3> = row.vertices.iter().map(|vertex| vertex.position).collect();
+        let faces: Vec<PFaceFaceRow> = row
+            .faces
+            .iter()
+            .map(|face| (face.index1, face.index2, face.index3, face.index4))
+            .collect();
+        result.push((row.handle, row.num_vertices, row.num_faces, vertices, faces));
+    }
+    Ok(result)
+}
+
+#[derive(Debug, Clone)]
+struct PolylinePFaceRow {
+    handle: u64,
+    num_vertices: u16,
+    num_faces: u16,
+    vertices: Vec<entities::Vertex3dEntity>,
+    faces: Vec<entities::VertexPFaceFaceEntity>,
+}
+
+fn decode_polyline_pface_rows(path: &str, limit: Option<usize>) -> PyResult<Vec<PolylinePFaceRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut sorted = index.objects.clone();
+    sorted.sort_by_key(|obj| obj.offset);
+
+    let vertex_map = build_vertex_pface_map(&decoder, &sorted, &dynamic_types, best_effort)?;
+    let face_map = build_vertex_pface_face_map(&decoder, &sorted, &dynamic_types, best_effort)?;
+    let mut result = Vec::new();
+    let mut i = 0usize;
+    while i < sorted.len() {
+        let Some((record, header)) =
+            parse_record_and_header(&decoder, sorted[i].offset, best_effort)?
+        else {
+            i += 1;
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x1D, "POLYLINE_PFACE", &dynamic_types) {
+            i += 1;
+            continue;
+        }
+
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                i += 1;
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let poly = match decode_polyline_pface_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            sorted[i].handle.0,
+        ) {
+            Ok(poly) => poly,
+            Err(err) if best_effort => {
+                i += 1;
+                continue;
+            }
+            Err(err) => return Err(to_py_err(err)),
+        };
+        let (vertices, faces, next_i) = collect_polyline_pface_data(
+            &decoder,
+            &sorted,
+            &dynamic_types,
+            &vertex_map,
+            &face_map,
+            &poly,
+            i,
+            best_effort,
+        )?;
+        i = next_i;
+        result.push(PolylinePFaceRow {
+            handle: poly.handle,
+            num_vertices: poly.num_vertices,
+            num_faces: poly.num_faces,
+            vertices,
+            faces,
+        });
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn build_vertex_pface_map(
+    decoder: &decoder::Decoder<'_>,
+    sorted: &[objects::ObjectRef],
+    dynamic_types: &HashMap<u16, String>,
+    best_effort: bool,
+) -> PyResult<HashMap<u64, entities::Vertex3dEntity>> {
+    let mut vertex_map = HashMap::new();
+    for obj in sorted {
+        let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x0D, "VERTEX_PFACE", dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let vertex = match decode_vertex_3d_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(vertex) => vertex,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        vertex_map.insert(vertex.handle, vertex);
+    }
+    Ok(vertex_map)
+}
+
+fn build_vertex_pface_face_map(
+    decoder: &decoder::Decoder<'_>,
+    sorted: &[objects::ObjectRef],
+    dynamic_types: &HashMap<u16, String>,
+    best_effort: bool,
+) -> PyResult<HashMap<u64, entities::VertexPFaceFaceEntity>> {
+    let mut face_map = HashMap::new();
+    for obj in sorted {
+        let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x0E, "VERTEX_PFACE_FACE", dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let face = match decode_vertex_pface_face_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(face) => face,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        face_map.insert(face.handle, face);
+    }
+    Ok(face_map)
+}
+
+fn collect_polyline_pface_data(
+    decoder: &decoder::Decoder<'_>,
+    sorted: &[objects::ObjectRef],
+    dynamic_types: &HashMap<u16, String>,
+    vertex_map: &HashMap<u64, entities::Vertex3dEntity>,
+    face_map: &HashMap<u64, entities::VertexPFaceFaceEntity>,
+    poly: &entities::PolylinePFaceEntity,
+    start_index: usize,
+    best_effort: bool,
+) -> PyResult<(
+    Vec<entities::Vertex3dEntity>,
+    Vec<entities::VertexPFaceFaceEntity>,
+    usize,
+)> {
+    let mut vertices = Vec::new();
+    let mut faces = Vec::new();
+
+    if !poly.owned_handles.is_empty() {
+        for handle in &poly.owned_handles {
+            if let Some(vertex) = vertex_map.get(handle) {
+                vertices.push(vertex.clone());
+                continue;
+            }
+            if let Some(face) = face_map.get(handle) {
+                faces.push(face.clone());
+            }
+        }
+        return Ok((vertices, faces, start_index + 1));
+    }
+
+    let mut next_i = start_index + 1;
+    while next_i < sorted.len() {
+        let Some((next_record, next_header)) =
+            parse_record_and_header(decoder, sorted[next_i].offset, best_effort)?
+        else {
+            next_i += 1;
+            continue;
+        };
+        let mut next_reader = next_record.bit_reader();
+        if matches_type_name(next_header.type_code, 0x0D, "VERTEX_PFACE", dynamic_types) {
+            if let Err(err) = skip_object_type_prefix(&mut next_reader, decoder.version()) {
+                if best_effort {
+                    next_i += 1;
+                    continue;
+                }
+                return Err(to_py_err(err));
+            }
+            let vertex = match decode_vertex_3d_for_version(
+                &mut next_reader,
+                decoder.version(),
+                &next_header,
+                sorted[next_i].handle.0,
+            ) {
+                Ok(vertex) => vertex,
+                Err(err) if best_effort => {
+                    next_i += 1;
+                    continue;
+                }
+                Err(err) => return Err(to_py_err(err)),
+            };
+            vertices.push(vertex);
+            next_i += 1;
+            continue;
+        }
+        if matches_type_name(
+            next_header.type_code,
+            0x0E,
+            "VERTEX_PFACE_FACE",
+            dynamic_types,
+        ) {
+            if let Err(err) = skip_object_type_prefix(&mut next_reader, decoder.version()) {
+                if best_effort {
+                    next_i += 1;
+                    continue;
+                }
+                return Err(to_py_err(err));
+            }
+            let face = match decode_vertex_pface_face_for_version(
+                &mut next_reader,
+                decoder.version(),
+                &next_header,
+                sorted[next_i].handle.0,
+            ) {
+                Ok(face) => face,
+                Err(err) if best_effort => {
+                    next_i += 1;
+                    continue;
+                }
+                Err(err) => return Err(to_py_err(err)),
+            };
+            faces.push(face);
+            next_i += 1;
+            continue;
+        }
+        if matches_type_name(next_header.type_code, 0x06, "SEQEND", dynamic_types) {
+            if let Err(err) = skip_object_type_prefix(&mut next_reader, decoder.version()) {
+                if best_effort {
+                    next_i += 1;
+                    continue;
+                }
+                return Err(to_py_err(err));
+            }
+            if let Err(err) = entities::decode_seqend(&mut next_reader) {
+                if !best_effort {
+                    return Err(to_py_err(err));
+                }
+            }
+            next_i += 1;
+        }
+        break;
+    }
+
+    Ok((vertices, faces, next_i))
+}
+
+#[pyfunction(signature = (path, limit=None))]
 pub fn decode_polyline_2d_with_vertices(
     path: &str,
     limit: Option<usize>,
@@ -2375,12 +3559,25 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(decode_lwpolyline_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_polyline_3d_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_polyline_3d_with_vertices, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_polyline_mesh_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        decode_polyline_mesh_with_vertices,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(decode_polyline_pface_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_polyline_pface_with_faces, module)?)?;
     module.add_function(wrap_pyfunction!(decode_polyline_2d_with_vertices, module)?)?;
     module.add_function(wrap_pyfunction!(
         decode_polyline_2d_with_vertices_interpolated,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(decode_vertex_2d_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_vertex_3d_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_vertex_mesh_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_vertex_pface_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_vertex_pface_face_entities, module)?)?;
     module.add_function(wrap_pyfunction!(
         decode_polyline_2d_with_vertex_data,
         module
@@ -2714,6 +3911,106 @@ fn decode_lwpolyline_for_version(
         }
         version::DwgVersion::R2007 => entities::decode_lwpolyline_r2007(reader),
         _ => entities::decode_lwpolyline(reader),
+    }
+}
+
+fn decode_polyline_3d_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::Polyline3dEntity> {
+    match version {
+        version::DwgVersion::R2010 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_polyline_3d_r2010(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2013 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_polyline_3d_r2013(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2007 => entities::decode_polyline_3d_r2007(reader),
+        _ => entities::decode_polyline_3d(reader),
+    }
+}
+
+fn decode_vertex_3d_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::Vertex3dEntity> {
+    match version {
+        version::DwgVersion::R2010 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_vertex_3d_r2010(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2013 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_vertex_3d_r2013(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2007 => entities::decode_vertex_3d_r2007(reader),
+        _ => entities::decode_vertex_3d(reader),
+    }
+}
+
+fn decode_polyline_mesh_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::PolylineMeshEntity> {
+    match version {
+        version::DwgVersion::R2010 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_polyline_mesh_r2010(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2013 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_polyline_mesh_r2013(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2007 => entities::decode_polyline_mesh_r2007(reader),
+        _ => entities::decode_polyline_mesh(reader),
+    }
+}
+
+fn decode_polyline_pface_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::PolylinePFaceEntity> {
+    match version {
+        version::DwgVersion::R2010 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_polyline_pface_r2010(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2013 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_polyline_pface_r2013(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2007 => entities::decode_polyline_pface_r2007(reader),
+        _ => entities::decode_polyline_pface(reader),
+    }
+}
+
+fn decode_vertex_pface_face_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::VertexPFaceFaceEntity> {
+    match version {
+        version::DwgVersion::R2010 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_vertex_pface_face_r2010(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2013 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_vertex_pface_face_r2013(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2007 => entities::decode_vertex_pface_face_r2007(reader),
+        _ => entities::decode_vertex_pface_face(reader),
     }
 }
 
