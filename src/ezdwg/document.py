@@ -32,6 +32,8 @@ SUPPORTED_ENTITY_TYPES = (
     "MTEXT",
     "LEADER",
     "HATCH",
+    "TOLERANCE",
+    "MLINE",
     "MINSERT",
     "DIMENSION",
 )
@@ -757,6 +759,85 @@ class Layout:
                 )
             return
 
+        if dxftype == "TOLERANCE":
+            for (
+                handle,
+                text,
+                insertion,
+                x_direction,
+                extrusion,
+                height,
+                dimgap,
+                dimstyle_handle,
+            ) in raw.decode_tolerance_entities(decode_path):
+                rotation = math.degrees(math.atan2(x_direction[1], x_direction[0]))
+                yield Entity(
+                    dxftype="TOLERANCE",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "text": text,
+                            "insert": insertion,
+                            "x_direction": x_direction,
+                            "extrusion": extrusion,
+                            "height": height,
+                            "dimgap": dimgap,
+                            "rotation": rotation,
+                            "dimstyle_handle": dimstyle_handle,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="TOLERANCE",
+                    ),
+                )
+            return
+
+        if dxftype == "MLINE":
+            for (
+                handle,
+                scale,
+                justification,
+                base_point,
+                extrusion,
+                open_closed,
+                lines_in_style,
+                vertices,
+                mlinestyle_handle,
+            ) in raw.decode_mline_entities(decode_path):
+                vertices_list = list(vertices)
+                points = [vertex[0] for vertex in vertices_list if len(vertex) >= 1]
+                vertex_directions = [vertex[1] for vertex in vertices_list if len(vertex) >= 2]
+                miter_directions = [vertex[2] for vertex in vertices_list if len(vertex) >= 3]
+                flags = int(open_closed)
+                closed = flags == 3 or bool(flags & 0x02)
+                yield Entity(
+                    dxftype="MLINE",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "scale": scale,
+                            "justification": int(justification),
+                            "base_point": base_point,
+                            "extrusion": extrusion,
+                            "flags": flags,
+                            "closed": closed,
+                            "line_count": int(lines_in_style),
+                            "points": points,
+                            "vertex_directions": vertex_directions,
+                            "miter_directions": miter_directions,
+                            "mlinestyle_handle": mlinestyle_handle,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="MLINE",
+                    ),
+                )
+            return
+
         if dxftype == "MINSERT":
             for (
                 handle,
@@ -884,7 +965,7 @@ class Layout:
 
         raise ValueError(
             f"unsupported entity type: {dxftype}. "
-            "Supported types: LINE, LWPOLYLINE, POLYLINE_3D, POLYLINE_MESH, POLYLINE_PFACE, 3DFACE, SOLID, TRACE, SHAPE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, MINSERT, DIMENSION"
+            "Supported types: LINE, LWPOLYLINE, POLYLINE_3D, POLYLINE_MESH, POLYLINE_PFACE, 3DFACE, SOLID, TRACE, SHAPE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, TOLERANCE, MLINE, MINSERT, DIMENSION"
         )
 
 

@@ -206,6 +206,31 @@ def plot_layout(
                     closed=closed,
                     arc_segments=arc_segments,
                 )
+        elif dxftype == "TOLERANCE":
+            text_height = entity.dxf.get("height", 1.0)
+            try:
+                text_height = float(text_height)
+            except Exception:
+                text_height = 1.0
+            if text_height <= 0.0:
+                text_height = 1.0
+            _draw_text(
+                ax,
+                entity.dxf.get("insert", (0.0, 0.0, 0.0)),
+                entity.dxf.get("text", ""),
+                text_height,
+                entity.dxf.get("rotation", 0.0),
+                color=color,
+            )
+        elif dxftype == "MLINE":
+            _draw_polyline(
+                ax,
+                entity.dxf.get("points", []),
+                line_width,
+                color=color,
+                closed=bool(entity.dxf.get("closed", False)),
+                arc_segments=arc_segments,
+            )
         elif dxftype == "MINSERT":
             _draw_point(ax, entity.dxf.get("insert", (0.0, 0.0, 0.0)), line_width, color=color)
         elif dxftype == "DIMENSION":

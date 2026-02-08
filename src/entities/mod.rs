@@ -13,6 +13,7 @@ pub mod leader;
 pub mod line;
 pub mod lwpolyline;
 pub mod minsert;
+pub mod mline;
 pub mod mtext;
 pub mod point;
 pub mod polyline_2d;
@@ -24,6 +25,7 @@ pub mod shape;
 pub mod solid;
 pub mod spline;
 pub mod text;
+pub mod tolerance;
 pub mod trace;
 pub mod vertex_2d;
 pub mod vertex_3d;
@@ -69,6 +71,10 @@ pub use lwpolyline::{
     LwPolylineEntity,
 };
 pub use minsert::{decode_minsert, MInsertEntity};
+pub use mline::{
+    decode_mline, decode_mline_r2007, decode_mline_r2010, decode_mline_r2013, MLineEntity,
+    MLineVertex,
+};
 pub use mtext::{
     decode_mtext, decode_mtext_r2004, decode_mtext_r2007, decode_mtext_r2010, decode_mtext_r2013,
     MTextEntity,
@@ -101,6 +107,10 @@ pub use spline::{
     decode_spline_r2013, SplineEntity,
 };
 pub use text::{decode_text, decode_text_r2007, decode_text_r2010, decode_text_r2013, TextEntity};
+pub use tolerance::{
+    decode_tolerance, decode_tolerance_r2007, decode_tolerance_r2010, decode_tolerance_r2013,
+    ToleranceEntity,
+};
 pub use trace::{
     decode_trace, decode_trace_r2007, decode_trace_r2010, decode_trace_r2013, TraceEntity,
 };

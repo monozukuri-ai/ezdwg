@@ -508,3 +508,63 @@ def test_plot_layout_shape_uses_point_drawer(monkeypatch) -> None:
     render_module.plot_layout(layout, ax=ax, show=False, auto_fit=False, equal=False)
 
     assert captured == [(9.0, 8.0, 0.0)]
+
+
+def test_plot_layout_tolerance_uses_text_drawer(monkeypatch) -> None:
+    captured: list[tuple[str, float, float]] = []
+    monkeypatch.setattr(render_module, "_require_matplotlib", lambda: object())
+    monkeypatch.setattr(
+        render_module,
+        "_draw_text",
+        lambda _ax, _insert, text, height, rotation, color=None, background=None: captured.append(
+            (text, float(height), float(rotation))
+        ),
+    )
+
+    layout = _FakeLayout(
+        [
+            SimpleNamespace(
+                dxftype="TOLERANCE",
+                dxf={
+                    "insert": (1.0, 2.0, 0.0),
+                    "text": "{\\Fgdt;jIS0.7x;1.0}",
+                    "height": 2.0,
+                    "rotation": 15.0,
+                },
+            )
+        ]
+    )
+    ax = _FakeAx()
+
+    render_module.plot_layout(layout, ax=ax, show=False, auto_fit=False, equal=False)
+
+    assert captured == [("{\\Fgdt;jIS0.7x;1.0}", 2.0, 15.0)]
+
+
+def test_plot_layout_mline_uses_polyline_drawer(monkeypatch) -> None:
+    captured: list[tuple[list, bool]] = []
+    monkeypatch.setattr(render_module, "_require_matplotlib", lambda: object())
+    monkeypatch.setattr(
+        render_module,
+        "_draw_polyline",
+        lambda _ax, points, _line_width, color=None, bulges=None, closed=False, arc_segments=64: captured.append(
+            (list(points), bool(closed))
+        ),
+    )
+
+    layout = _FakeLayout(
+        [
+            SimpleNamespace(
+                dxftype="MLINE",
+                dxf={
+                    "points": [(0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (2.0, 1.0, 0.0)],
+                    "closed": True,
+                },
+            )
+        ]
+    )
+    ax = _FakeAx()
+
+    render_module.plot_layout(layout, ax=ax, show=False, auto_fit=False, equal=False)
+
+    assert captured == [([(0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (2.0, 1.0, 0.0)], True)]
