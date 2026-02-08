@@ -1,9 +1,9 @@
 from typing import Sequence
 
-from ezdwg.document import Document, Layout, read
-from ezdwg.entity import Entity
-from ezdwg import raw
-from ezdwg.render import plot
+from .document import Document, Layout, read
+from .entity import Entity
+from . import raw
+from .render import plot
 
 __all__ = [
     "read",

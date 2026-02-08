@@ -151,13 +151,6 @@ def _resolve_layout(target: Any):
     raise TypeError("plot() expects a path, Document, or Layout")
 
 
-def _next_entity_color(ax):
-    try:
-        return ax._get_lines.get_next_color()
-    except Exception:
-        return "C0"
-
-
 def _resolve_dwg_color(dxf):
     true_color = dxf.get("resolved_true_color")
     if true_color is None:

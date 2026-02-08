@@ -1,10 +1,13 @@
 use crate::core::result::Result;
 
+type Point3 = (f64, f64, f64);
+type Knots = (f64, f64, f64, f64);
+
 pub fn catmull_rom_spline(
-    points: &[(f64, f64, f64)],
+    points: &[Point3],
     closed: bool,
     segments_per_span: usize,
-) -> Result<Vec<(f64, f64, f64)>> {
+) -> Result<Vec<Point3>> {
     if points.len() < 2 {
         return Ok(points.to_vec());
     }
@@ -46,7 +49,7 @@ pub fn catmull_rom_spline(
             }
             let u = s as f64 / steps as f64;
             let t = t1 + (t2 - t1) * u;
-            let pt = catmull_rom_point(p0, p1, p2, p3, t0, t1, t2, t3, t);
+            let pt = catmull_rom_point([p0, p1, p2, p3], (t0, t1, t2, t3), t);
             out.push(pt);
         }
     }
@@ -62,29 +65,21 @@ pub fn catmull_rom_spline(
     Ok(out)
 }
 
-fn tj(ti: f64, p0: (f64, f64, f64), p1: (f64, f64, f64), alpha: f64) -> f64 {
+fn tj(ti: f64, p0: Point3, p1: Point3, alpha: f64) -> f64 {
     let dist = distance(p0, p1);
     ti + dist.powf(alpha)
 }
 
-fn distance(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
+fn distance(a: Point3, b: Point3) -> f64 {
     let dx = a.0 - b.0;
     let dy = a.1 - b.1;
     let dz = a.2 - b.2;
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
-fn catmull_rom_point(
-    p0: (f64, f64, f64),
-    p1: (f64, f64, f64),
-    p2: (f64, f64, f64),
-    p3: (f64, f64, f64),
-    t0: f64,
-    t1: f64,
-    t2: f64,
-    t3: f64,
-    t: f64,
-) -> (f64, f64, f64) {
+fn catmull_rom_point(points: [Point3; 4], knots: Knots, t: f64) -> Point3 {
+    let [p0, p1, p2, p3] = points;
+    let (t0, t1, t2, t3) = knots;
     let a1 = lerp(p0, p1, t0, t1, t);
     let a2 = lerp(p1, p2, t1, t2, t);
     let a3 = lerp(p2, p3, t2, t3, t);
@@ -95,7 +90,7 @@ fn catmull_rom_point(
     lerp(b1, b2, t1, t2, t)
 }
 
-fn lerp(p0: (f64, f64, f64), p1: (f64, f64, f64), t0: f64, t1: f64, t: f64) -> (f64, f64, f64) {
+fn lerp(p0: Point3, p1: Point3, t0: f64, t1: f64, t: f64) -> Point3 {
     if (t1 - t0).abs() < 1e-12 {
         return p0;
     }
@@ -108,7 +103,7 @@ fn lerp(p0: (f64, f64, f64), p1: (f64, f64, f64), t0: f64, t1: f64, t: f64) -> (
     )
 }
 
-fn points_equal(a: (f64, f64, f64), b: (f64, f64, f64)) -> bool {
+fn points_equal(a: Point3, b: Point3) -> bool {
     const EPS: f64 = 1e-9;
     (a.0 - b.0).abs() < EPS && (a.1 - b.1).abs() < EPS && (a.2 - b.2).abs() < EPS
 }

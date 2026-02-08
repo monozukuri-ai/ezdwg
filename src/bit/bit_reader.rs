@@ -153,8 +153,8 @@ impl<'a> BitReader<'a> {
 
     pub fn read_rd(&mut self, endian: Endian) -> Result<f64> {
         let mut data = [0u8; 8];
-        for idx in 0..8 {
-            data[idx] = self.read_rc()?;
+        for byte in &mut data {
+            *byte = self.read_rc()?;
         }
         let value = match endian {
             Endian::Little => f64::from_le_bytes(data),

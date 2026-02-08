@@ -252,7 +252,7 @@ pub fn read_handle_reference(reader: &mut BitReader<'_>, base_handle: u64) -> Re
         0x08 => base_handle.saturating_sub(1),
         0x0A => base_handle.saturating_add(value),
         0x0C => base_handle.saturating_sub(value),
-        0x02 | 0x03 | 0x04 | 0x05 => value,
+        0x02..=0x05 => value,
         _ => value,
     };
     Ok(absolute)

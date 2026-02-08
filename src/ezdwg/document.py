@@ -11,7 +11,6 @@ from . import raw
 from .entity import Entity
 
 SUPPORTED_VERSIONS = {"AC1015", "AC1018", "AC1021", "AC1024", "AC1027"}
-SUPPORTED_PARSE_VERSIONS = {"AC1015", "AC1018", "AC1021", "AC1024", "AC1027"}
 SUPPORTED_ENTITY_TYPES = (
     "LINE",
     "LWPOLYLINE",
@@ -35,22 +34,21 @@ def read(path: str) -> "Document":
     version = raw.detect_version(path)
     if version not in SUPPORTED_VERSIONS:
         raise ValueError(f"unsupported DWG version: {version}")
-    if version not in SUPPORTED_PARSE_VERSIONS:
-        raise ValueError(f"unsupported DWG parse backend version: {version}")
-    return Document(
-        path=path,
-        version=version,
-        decode_path=path,
-        decode_version=version,
-    )
+    return Document(path=path, version=version)
 
 
 @dataclass(frozen=True)
 class Document:
     path: str
     version: str
-    decode_path: str
-    decode_version: str
+    decode_path: str | None = None
+    decode_version: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.decode_path is None:
+            object.__setattr__(self, "decode_path", self.path)
+        if self.decode_version is None:
+            object.__setattr__(self, "decode_version", self.version)
 
     def modelspace(self) -> "Layout":
         return Layout(self, "MODELSPACE")

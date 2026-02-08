@@ -23,84 +23,54 @@ const SENTINEL_CLASSES_AFTER: [u8; 16] = [
 ];
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct HeaderData {
-    section_page_map_id: u32,
     section_page_map_address: u64,
     section_map_id: u32,
-    section_page_array_size: u32,
-    gap_array_size: u32,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct SystemSectionHeader {
     signature: u32,
     decompressed_size: u32,
     compressed_size: u32,
     compressed_type: u32,
-    checksum: u32,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct PageMapEntry {
     id: i32,
-    size: u32,
     address: u64,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct SectionMapHeader {
     section_entry_count: u32,
-    x02: u32,
-    x00007400: u32,
-    x00: u32,
-    unknown: u32,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct SectionEntry {
     size: u64,
-    page_count: u32,
     max_decompressed_size: u32,
-    unknown: u32,
     compressed: u32,
-    section_id: u32,
     encrypted: u32,
     name: String,
     pages: Vec<SectionPageInfo>,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct SectionPageInfo {
     page_id: u32,
-    data_size: u32,
-    start_offset: u64,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct DataSectionHeader {
     signature: u32,
-    data_type: u32,
     compressed_size: u32,
-    decompressed_size: u32,
-    start_offset: u32,
-    page_header_checksum: u32,
-    data_checksum: u32,
-    unknown: u32,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct ClassEntry {
-    pub class_number: u16,
-    pub dxf_name: String,
-    pub item_class_id: u16,
+struct ClassEntry {
+    dxf_name: String,
 }
 
 pub fn parse_section_directory(bytes: &[u8], _config: &ParseConfig) -> Result<SectionDirectory> {
@@ -270,18 +240,15 @@ fn read_header_data(bytes: &[u8]) -> Result<HeaderData> {
 
     let mut reader = ByteReader::new(&decrypted);
     reader.seek(0x50)?;
-    let section_page_map_id = reader.read_u32_le()?;
+    let _section_page_map_id = reader.read_u32_le()?;
     let section_page_map_address = reader.read_u64_le()?;
     let section_map_id = reader.read_u32_le()?;
-    let section_page_array_size = reader.read_u32_le()?;
-    let gap_array_size = reader.read_u32_le()?;
+    let _section_page_array_size = reader.read_u32_le()?;
+    let _gap_array_size = reader.read_u32_le()?;
 
     Ok(HeaderData {
-        section_page_map_id,
         section_page_map_address,
         section_map_id,
-        section_page_array_size,
-        gap_array_size,
     })
 }
 
@@ -299,8 +266,8 @@ fn read_system_section(bytes: &[u8], address: u64, expected_signature: u32) -> R
         decompressed_size: reader.read_u32_le()?,
         compressed_size: reader.read_u32_le()?,
         compressed_type: reader.read_u32_le()?,
-        checksum: reader.read_u32_le()?,
     };
+    let _checksum = reader.read_u32_le()?;
     if header.signature != expected_signature {
         return Err(DwgError::new(
             ErrorKind::Format,
@@ -344,7 +311,6 @@ fn read_page_map(bytes: &[u8], header: &HeaderData) -> Result<Vec<PageMapEntry>>
         let size = reader.read_u32_le()?;
         let entry = PageMapEntry {
             id,
-            size,
             address: page_address,
         };
         page_address = page_address
@@ -384,25 +350,25 @@ fn read_section_map(
             "section map header truncated",
         ));
     }
-    let _header = SectionMapHeader {
+    let header = SectionMapHeader {
         section_entry_count: reader.read_u32_le()?,
-        x02: reader.read_u32_le()?,
-        x00007400: reader.read_u32_le()?,
-        x00: reader.read_u32_le()?,
-        unknown: reader.read_u32_le()?,
     };
+    let _x02 = reader.read_u32_le()?;
+    let _x00007400 = reader.read_u32_le()?;
+    let _x00 = reader.read_u32_le()?;
+    let _unknown = reader.read_u32_le()?;
 
-    let mut sections = Vec::with_capacity(_header.section_entry_count as usize);
-    for _ in 0.._header.section_entry_count {
+    let mut sections = Vec::with_capacity(header.section_entry_count as usize);
+    for _ in 0..header.section_entry_count {
         if reader.remaining() < 88 {
             return Err(DwgError::new(ErrorKind::Format, "section entry truncated"));
         }
         let size = reader.read_u64_le()?;
         let page_count = reader.read_u32_le()?;
         let max_decompressed_size = reader.read_u32_le()?;
-        let unknown = reader.read_u32_le()?;
+        let _unknown = reader.read_u32_le()?;
         let compressed = reader.read_u32_le()?;
-        let section_id = reader.read_u32_le()?;
+        let _section_id = reader.read_u32_le()?;
         let encrypted = reader.read_u32_le()?;
         let name_bytes = reader.read_bytes(64)?;
         let name = read_cstring(name_bytes);
@@ -416,22 +382,15 @@ fn read_section_map(
                 ));
             }
             let page_id = reader.read_u32_le()?;
-            let data_size = reader.read_u32_le()?;
-            let start_offset = reader.read_u64_le()?;
-            pages.push(SectionPageInfo {
-                page_id,
-                data_size,
-                start_offset,
-            });
+            let _data_size = reader.read_u32_le()?;
+            let _start_offset = reader.read_u64_le()?;
+            pages.push(SectionPageInfo { page_id });
         }
 
         sections.push(SectionEntry {
             size,
-            page_count,
             max_decompressed_size,
-            unknown,
             compressed,
-            section_id,
             encrypted,
             name,
             pages,
@@ -454,7 +413,7 @@ fn load_section_data(
     }
     let page_size = section.max_decompressed_size as usize;
     let total_size = page_size
-        .checked_mul(section.page_count as usize)
+        .checked_mul(section.pages.len())
         .ok_or_else(|| DwgError::new(ErrorKind::Format, "section size overflow"))?;
     if total_size as u64 > config.max_section_bytes {
         return Err(DwgError::new(
@@ -539,15 +498,17 @@ fn decrypt_data_section_header(bytes: &[u8], offset: u64) -> Result<[u8; 32]> {
 
 fn parse_data_section_header(bytes: &[u8; 32]) -> Result<DataSectionHeader> {
     let mut reader = ByteReader::new(bytes);
+    let signature = reader.read_u32_le()?;
+    let _data_type = reader.read_u32_le()?;
+    let compressed_size = reader.read_u32_le()?;
+    let _decompressed_size = reader.read_u32_le()?;
+    let _start_offset = reader.read_u32_le()?;
+    let _page_header_checksum = reader.read_u32_le()?;
+    let _data_checksum = reader.read_u32_le()?;
+    let _unknown = reader.read_u32_le()?;
     Ok(DataSectionHeader {
-        signature: reader.read_u32_le()?,
-        data_type: reader.read_u32_le()?,
-        compressed_size: reader.read_u32_le()?,
-        decompressed_size: reader.read_u32_le()?,
-        start_offset: reader.read_u32_le()?,
-        page_header_checksum: reader.read_u32_le()?,
-        data_checksum: reader.read_u32_le()?,
-        unknown: reader.read_u32_le()?,
+        signature,
+        compressed_size,
     })
 }
 
@@ -602,18 +563,14 @@ fn parse_classes_section(data: &[u8]) -> Result<Vec<ClassEntry>> {
         let _cpp_name = reader.read_tv()?;
         let dxf_name = reader.read_tv()?;
         let _was_a_zombie = reader.read_b()?;
-        let item_class_id = reader.read_bs()?;
+        let _item_class_id = reader.read_bs()?;
         let _number_of_objects = reader.read_bl()?;
         let _dwg_version = reader.read_bs()?;
         let _maintenance_version = reader.read_bs()?;
         let _unknown0 = reader.read_bl()?;
         let _unknown1 = reader.read_bl()?;
 
-        classes.push(ClassEntry {
-            class_number,
-            dxf_name,
-            item_class_id,
-        });
+        classes.push(ClassEntry { dxf_name });
 
         if class_number == max_class_number {
             break;

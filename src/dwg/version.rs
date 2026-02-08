@@ -22,10 +22,6 @@ impl DwgVersion {
             Self::Unknown(value) => value.as_str(),
         }
     }
-
-    pub fn is_supported(&self) -> bool {
-        matches!(self, Self::R2000 | Self::R2004 | Self::R2010)
-    }
 }
 
 pub fn detect_version(bytes: &[u8]) -> Result<DwgVersion> {

@@ -1,3 +1,5 @@
+#![allow(clippy::useless_conversion)] // Triggered by PyO3 #[pyfunction] wrapper expansion.
+
 use pyo3::exceptions::{PyIOError, PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -10,10 +12,74 @@ use crate::dwg::version;
 use crate::entities;
 use crate::objects;
 
-#[pyfunction]
-pub fn hello_from_bin() -> String {
-    "Hello from ezdwg!".to_string()
-}
+type Point2 = (f64, f64);
+type Point3 = (f64, f64, f64);
+
+type SectionLocatorRow = (String, u32, u32);
+type ObjectMapEntryRow = (u64, u32);
+type ObjectHeaderRow = (u64, u32, u32, u16);
+type ObjectHeaderWithTypeRow = (u64, u32, u32, u16, String, String);
+type ObjectRecordBytesRow = (u64, u32, u32, u16, Vec<u8>);
+type EntityStyleRow = (u64, Option<u16>, Option<u32>, u64);
+type LayerColorRow = (u64, u16, Option<u32>);
+
+type LineEntityRow = (u64, f64, f64, f64, f64, f64, f64);
+type PointEntityRow = (u64, f64, f64, f64, f64);
+type ArcEntityRow = (u64, f64, f64, f64, f64, f64, f64);
+type CircleEntityRow = (u64, f64, f64, f64, f64);
+type EllipseEntityRow = (u64, Point3, Point3, Point3, f64, f64, f64);
+type TextMetricsRow = (f64, f64, f64, f64, f64);
+type TextAlignmentRow = (u16, u16, u16);
+type TextEntityRow = (
+    u64,
+    String,
+    Point3,
+    Option<Point3>,
+    Point3,
+    TextMetricsRow,
+    TextAlignmentRow,
+    Option<u64>,
+);
+type MTextEntityRow = (u64, String, Point3, Point3, Point3, f64, f64, u16, u16);
+type DimExtrusionScaleRow = (Point3, Point3);
+type DimAnglesRow = (f64, f64, f64, f64);
+type DimStyleRow = (u8, Option<f64>, Option<u16>, Option<u16>, Option<f64>, f64);
+type DimHandlesRow = (Option<u64>, Option<u64>);
+type DimEntityRow = (
+    u64,
+    String,
+    Point3,
+    Point3,
+    Point3,
+    Point3,
+    Option<Point3>,
+    DimExtrusionScaleRow,
+    DimAnglesRow,
+    DimStyleRow,
+    DimHandlesRow,
+);
+type InsertEntityRow = (u64, f64, f64, f64, f64, f64, f64, f64);
+type Polyline2dEntityRow = (u64, u16, u16, f64, f64, f64, f64);
+type Polyline2dInterpretedRow = (
+    u64,
+    u16,
+    u16,
+    String,
+    bool,
+    bool,
+    bool,
+    bool,
+    bool,
+    bool,
+    bool,
+    bool,
+);
+type LwPolylineEntityRow = (u64, u16, Vec<Point2>);
+type PolylineVerticesRow = (u64, u16, Vec<Point3>);
+type PolylineInterpolatedRow = (u64, u16, bool, Vec<Point3>);
+type Vertex2dEntityRow = (u64, u16, f64, f64, f64, f64, f64, f64, f64);
+type VertexDataRow = (f64, f64, f64, f64, f64, f64, f64, u16);
+type PolylineVertexDataRow = (u64, u16, Vec<VertexDataRow>);
 
 #[pyfunction]
 pub fn detect_version(path: &str) -> PyResult<String> {
@@ -23,7 +89,7 @@ pub fn detect_version(path: &str) -> PyResult<String> {
 }
 
 #[pyfunction]
-pub fn list_section_locators(path: &str) -> PyResult<Vec<(String, u32, u32)>> {
+pub fn list_section_locators(path: &str) -> PyResult<Vec<SectionLocatorRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let directory = decoder.section_directory().map_err(to_py_err)?;
@@ -50,11 +116,14 @@ pub fn read_section_bytes(path: &str, index: usize) -> PyResult<Vec<u8>> {
 }
 
 #[pyfunction(signature = (path, limit=None))]
-pub fn list_object_map_entries(path: &str, limit: Option<usize>) -> PyResult<Vec<(u64, u32)>> {
+pub fn list_object_map_entries(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<ObjectMapEntryRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut entries: Vec<(u64, u32)> = index
+    let mut entries: Vec<ObjectMapEntryRow> = index
         .objects
         .iter()
         .map(|obj| (obj.handle.0, obj.offset))
@@ -68,10 +137,7 @@ pub fn list_object_map_entries(path: &str, limit: Option<usize>) -> PyResult<Vec
 }
 
 #[pyfunction(signature = (path, limit=None))]
-pub fn list_object_headers(
-    path: &str,
-    limit: Option<usize>,
-) -> PyResult<Vec<(u64, u32, u32, u16)>> {
+pub fn list_object_headers(path: &str, limit: Option<usize>) -> PyResult<Vec<ObjectHeaderRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let index = decoder.build_object_index().map_err(to_py_err)?;
@@ -94,7 +160,7 @@ pub fn list_object_headers(
 pub fn list_object_headers_with_type(
     path: &str,
     limit: Option<usize>,
-) -> PyResult<Vec<(u64, u32, u32, u16, String, String)>> {
+) -> PyResult<Vec<ObjectHeaderWithTypeRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
@@ -128,7 +194,7 @@ pub fn list_object_headers_by_type(
     path: &str,
     type_codes: Vec<u16>,
     limit: Option<usize>,
-) -> PyResult<Vec<(u64, u32, u32, u16, String, String)>> {
+) -> PyResult<Vec<ObjectHeaderWithTypeRow>> {
     if type_codes.is_empty() {
         return Ok(Vec::new());
     }
@@ -169,7 +235,7 @@ pub fn read_object_records_by_type(
     path: &str,
     type_codes: Vec<u16>,
     limit: Option<usize>,
-) -> PyResult<Vec<(u64, u32, u32, u16, Vec<u8>)>> {
+) -> PyResult<Vec<ObjectRecordBytesRow>> {
     if type_codes.is_empty() {
         return Ok(Vec::new());
     }
@@ -205,10 +271,7 @@ pub fn read_object_records_by_type(
 }
 
 #[pyfunction(signature = (path, limit=None))]
-pub fn decode_entity_styles(
-    path: &str,
-    limit: Option<usize>,
-) -> PyResult<Vec<(u64, Option<u16>, Option<u32>, u64)>> {
+pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<EntityStyleRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let best_effort = is_best_effort_compat_version(&decoder);
@@ -579,10 +642,7 @@ pub fn decode_entity_styles(
 }
 
 #[pyfunction(signature = (path, limit=None))]
-pub fn decode_layer_colors(
-    path: &str,
-    limit: Option<usize>,
-) -> PyResult<Vec<(u64, u16, Option<u32>)>> {
+pub fn decode_layer_colors(path: &str, limit: Option<usize>) -> PyResult<Vec<LayerColorRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let best_effort = is_best_effort_compat_version(&decoder);
@@ -624,10 +684,7 @@ pub fn decode_layer_colors(
 }
 
 #[pyfunction(signature = (path, limit=None))]
-pub fn decode_line_entities(
-    path: &str,
-    limit: Option<usize>,
-) -> PyResult<Vec<(u64, f64, f64, f64, f64, f64, f64)>> {
+pub fn decode_line_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<LineEntityRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let best_effort = is_best_effort_compat_version(&decoder);
@@ -674,10 +731,7 @@ pub fn decode_line_entities(
 }
 
 #[pyfunction(signature = (path, limit=None))]
-pub fn decode_point_entities(
-    path: &str,
-    limit: Option<usize>,
-) -> PyResult<Vec<(u64, f64, f64, f64, f64)>> {
+pub fn decode_point_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<PointEntityRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let best_effort = is_best_effort_compat_version(&decoder);
@@ -722,10 +776,7 @@ pub fn decode_point_entities(
 }
 
 #[pyfunction(signature = (path, limit=None))]
-pub fn decode_arc_entities(
-    path: &str,
-    limit: Option<usize>,
-) -> PyResult<Vec<(u64, f64, f64, f64, f64, f64, f64)>> {
+pub fn decode_arc_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<ArcEntityRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let best_effort = is_best_effort_compat_version(&decoder);
@@ -772,10 +823,7 @@ pub fn decode_arc_entities(
 }
 
 #[pyfunction(signature = (path, limit=None))]
-pub fn decode_circle_entities(
-    path: &str,
-    limit: Option<usize>,
-) -> PyResult<Vec<(u64, f64, f64, f64, f64)>> {
+pub fn decode_circle_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<CircleEntityRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let best_effort = is_best_effort_compat_version(&decoder);
@@ -827,17 +875,7 @@ pub fn decode_circle_entities(
 pub fn decode_ellipse_entities(
     path: &str,
     limit: Option<usize>,
-) -> PyResult<
-    Vec<(
-        u64,
-        (f64, f64, f64),
-        (f64, f64, f64),
-        (f64, f64, f64),
-        f64,
-        f64,
-        f64,
-    )>,
-> {
+) -> PyResult<Vec<EllipseEntityRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let best_effort = is_best_effort_compat_version(&decoder);
@@ -885,21 +923,7 @@ pub fn decode_ellipse_entities(
 }
 
 #[pyfunction(signature = (path, limit=None))]
-pub fn decode_text_entities(
-    path: &str,
-    limit: Option<usize>,
-) -> PyResult<
-    Vec<(
-        u64,
-        String,
-        (f64, f64, f64),
-        Option<(f64, f64, f64)>,
-        (f64, f64, f64),
-        (f64, f64, f64, f64, f64),
-        (u16, u16, u16),
-        Option<u64>,
-    )>,
-> {
+pub fn decode_text_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<TextEntityRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let best_effort = is_best_effort_compat_version(&decoder);
@@ -957,22 +981,7 @@ pub fn decode_text_entities(
 }
 
 #[pyfunction(signature = (path, limit=None))]
-pub fn decode_mtext_entities(
-    path: &str,
-    limit: Option<usize>,
-) -> PyResult<
-    Vec<(
-        u64,
-        String,
-        (f64, f64, f64),
-        (f64, f64, f64),
-        (f64, f64, f64),
-        f64,
-        f64,
-        u16,
-        u16,
-    )>,
-> {
+pub fn decode_mtext_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<MTextEntityRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let best_effort = is_best_effort_compat_version(&decoder);
@@ -1021,123 +1030,81 @@ pub fn decode_mtext_entities(
 }
 
 #[pyfunction(signature = (path, limit=None))]
-pub fn decode_dim_linear_entities(
-    path: &str,
-    limit: Option<usize>,
-) -> PyResult<
-    Vec<(
-        u64,
-        String,
-        (f64, f64, f64),
-        (f64, f64, f64),
-        (f64, f64, f64),
-        (f64, f64, f64),
-        Option<(f64, f64, f64)>,
-        ((f64, f64, f64), (f64, f64, f64)),
-        (f64, f64, f64, f64),
-        (u8, Option<f64>, Option<u16>, Option<u16>, Option<f64>, f64),
-        (Option<u64>, Option<u64>),
-    )>,
-> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x15, "DIM_LINEAR", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity = match decode_dim_linear_for_version(
-            &mut reader,
-            decoder.version(),
-            &header,
-            obj.handle.0,
-        ) {
-            Ok(entity) => entity,
-            Err(err) if best_effort => continue,
-            Err(err) => return Err(to_py_err(err)),
-        };
-        let common = &entity.common;
-        result.push((
-            common.handle,
-            common.user_text.clone(),
-            entity.point10,
-            entity.point13,
-            entity.point14,
-            common.text_midpoint,
-            common.insert_point,
-            (common.extrusion, common.insert_scale),
-            (
-                common.text_rotation,
-                common.horizontal_direction,
-                entity.ext_line_rotation,
-                entity.dim_rotation,
-            ),
-            (
-                common.dim_flags,
-                common.actual_measurement,
-                common.attachment_point,
-                common.line_spacing_style,
-                common.line_spacing_factor,
-                common.insert_rotation,
-            ),
-            (common.dimstyle_handle, common.anonymous_block_handle),
-        ));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+pub fn decode_dim_linear_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<DimEntityRow>> {
+    decode_dim_entities_by_type(
+        path,
+        limit,
+        0x15,
+        "DIM_LINEAR",
+        |reader, version, header, object_handle| {
+            let entity = decode_dim_linear_for_version(reader, version, header, object_handle)?;
+            Ok(dim_entity_row_from_linear_like(&entity))
+        },
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_dim_diameter_entities(
     path: &str,
     limit: Option<usize>,
-) -> PyResult<
-    Vec<(
+) -> PyResult<Vec<DimEntityRow>> {
+    decode_dim_entities_by_type(
+        path,
+        limit,
+        0x1A,
+        "DIM_DIAMETER",
+        |reader, version, header, object_handle| {
+            let entity = decode_dim_diameter_for_version(reader, version, header, object_handle)?;
+            Ok(dim_entity_row_from_linear_like(&entity))
+        },
+    )
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_dim_radius_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<DimEntityRow>> {
+    decode_dim_entities_by_type(
+        path,
+        limit,
+        0x19,
+        "DIM_RADIUS",
+        |reader, version, header, object_handle| {
+            let entity = decode_dim_radius_for_version(reader, version, header, object_handle)?;
+            Ok(dim_entity_row_from_linear_like(&entity))
+        },
+    )
+}
+
+fn decode_dim_entities_by_type<F>(
+    path: &str,
+    limit: Option<usize>,
+    type_code: u16,
+    type_name: &str,
+    mut decode_entity_row: F,
+) -> PyResult<Vec<DimEntityRow>>
+where
+    F: FnMut(
+        &mut BitReader<'_>,
+        &version::DwgVersion,
+        &ApiObjectHeader,
         u64,
-        String,
-        (f64, f64, f64),
-        (f64, f64, f64),
-        (f64, f64, f64),
-        (f64, f64, f64),
-        Option<(f64, f64, f64)>,
-        ((f64, f64, f64), (f64, f64, f64)),
-        (f64, f64, f64, f64),
-        (u8, Option<f64>, Option<u16>, Option<u16>, Option<f64>, f64),
-        (Option<u64>, Option<u64>),
-    )>,
-> {
+    ) -> crate::core::result::Result<DimEntityRow>,
+{
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let best_effort = is_best_effort_compat_version(&decoder);
     let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
     let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut result = Vec::new();
+
     for obj in index.objects.iter() {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x1A, "DIM_DIAMETER", &dynamic_types) {
+        if !matches_type_name(header.type_code, type_code, type_name, &dynamic_types) {
             continue;
         }
+
         let mut reader = record.bit_reader();
         if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
             if best_effort {
@@ -1145,141 +1112,55 @@ pub fn decode_dim_diameter_entities(
             }
             return Err(to_py_err(err));
         }
-        let entity = match decode_dim_diameter_for_version(
-            &mut reader,
-            decoder.version(),
-            &header,
-            obj.handle.0,
-        ) {
-            Ok(entity) => entity,
+
+        let row = match decode_entity_row(&mut reader, decoder.version(), &header, obj.handle.0) {
+            Ok(row) => row,
             Err(err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
-        let common = &entity.common;
-        result.push((
-            common.handle,
-            common.user_text.clone(),
-            entity.point10,
-            entity.point13,
-            entity.point14,
-            common.text_midpoint,
-            common.insert_point,
-            (common.extrusion, common.insert_scale),
-            (
-                common.text_rotation,
-                common.horizontal_direction,
-                entity.ext_line_rotation,
-                entity.dim_rotation,
-            ),
-            (
-                common.dim_flags,
-                common.actual_measurement,
-                common.attachment_point,
-                common.line_spacing_style,
-                common.line_spacing_factor,
-                common.insert_rotation,
-            ),
-            (common.dimstyle_handle, common.anonymous_block_handle),
-        ));
+        result.push(row);
+
         if let Some(limit) = limit {
             if result.len() >= limit {
                 break;
             }
         }
     }
+
     Ok(result)
 }
 
-#[pyfunction(signature = (path, limit=None))]
-pub fn decode_dim_radius_entities(
-    path: &str,
-    limit: Option<usize>,
-) -> PyResult<
-    Vec<(
-        u64,
-        String,
-        (f64, f64, f64),
-        (f64, f64, f64),
-        (f64, f64, f64),
-        (f64, f64, f64),
-        Option<(f64, f64, f64)>,
-        ((f64, f64, f64), (f64, f64, f64)),
-        (f64, f64, f64, f64),
-        (u8, Option<f64>, Option<u16>, Option<u16>, Option<f64>, f64),
-        (Option<u64>, Option<u64>),
-    )>,
-> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x19, "DIM_RADIUS", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity = match decode_dim_radius_for_version(
-            &mut reader,
-            decoder.version(),
-            &header,
-            obj.handle.0,
-        ) {
-            Ok(entity) => entity,
-            Err(err) if best_effort => continue,
-            Err(err) => return Err(to_py_err(err)),
-        };
-        let common = &entity.common;
-        result.push((
-            common.handle,
-            common.user_text.clone(),
-            entity.point10,
-            entity.point13,
-            entity.point14,
-            common.text_midpoint,
-            common.insert_point,
-            (common.extrusion, common.insert_scale),
-            (
-                common.text_rotation,
-                common.horizontal_direction,
-                entity.ext_line_rotation,
-                entity.dim_rotation,
-            ),
-            (
-                common.dim_flags,
-                common.actual_measurement,
-                common.attachment_point,
-                common.line_spacing_style,
-                common.line_spacing_factor,
-                common.insert_rotation,
-            ),
-            (common.dimstyle_handle, common.anonymous_block_handle),
-        ));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+fn dim_entity_row_from_linear_like(entity: &entities::DimLinearEntity) -> DimEntityRow {
+    let common = &entity.common;
+    (
+        common.handle,
+        common.user_text.clone(),
+        entity.point10,
+        entity.point13,
+        entity.point14,
+        common.text_midpoint,
+        common.insert_point,
+        (common.extrusion, common.insert_scale),
+        (
+            common.text_rotation,
+            common.horizontal_direction,
+            entity.ext_line_rotation,
+            entity.dim_rotation,
+        ),
+        (
+            common.dim_flags,
+            common.actual_measurement,
+            common.attachment_point,
+            common.line_spacing_style,
+            common.line_spacing_factor,
+            common.insert_rotation,
+        ),
+        (common.dimstyle_handle, common.anonymous_block_handle),
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
-pub fn decode_insert_entities(
-    path: &str,
-    limit: Option<usize>,
-) -> PyResult<Vec<(u64, f64, f64, f64, f64, f64, f64, f64)>> {
+pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<InsertEntityRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
@@ -1319,7 +1200,7 @@ pub fn decode_insert_entities(
 pub fn decode_polyline_2d_entities(
     path: &str,
     limit: Option<usize>,
-) -> PyResult<Vec<(u64, u16, u16, f64, f64, f64, f64)>> {
+) -> PyResult<Vec<Polyline2dEntityRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
@@ -1358,22 +1239,7 @@ pub fn decode_polyline_2d_entities(
 pub fn decode_polyline_2d_entities_interpreted(
     path: &str,
     limit: Option<usize>,
-) -> PyResult<
-    Vec<(
-        u64,
-        u16,
-        u16,
-        String,
-        bool,
-        bool,
-        bool,
-        bool,
-        bool,
-        bool,
-        bool,
-        bool,
-    )>,
-> {
+) -> PyResult<Vec<Polyline2dInterpretedRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
@@ -1419,7 +1285,7 @@ pub fn decode_polyline_2d_entities_interpreted(
 pub fn decode_lwpolyline_entities(
     path: &str,
     limit: Option<usize>,
-) -> PyResult<Vec<(u64, u16, Vec<(f64, f64)>)>> {
+) -> PyResult<Vec<LwPolylineEntityRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let best_effort = is_best_effort_compat_version(&decoder);
@@ -1465,109 +1331,25 @@ pub fn decode_lwpolyline_entities(
 pub fn decode_polyline_2d_with_vertices(
     path: &str,
     limit: Option<usize>,
-) -> PyResult<Vec<(u64, u16, Vec<(f64, f64, f64)>)>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut sorted = index.objects.clone();
-    sorted.sort_by_key(|obj| obj.offset);
+) -> PyResult<Vec<PolylineVerticesRow>> {
+    let decoded_rows = decode_polyline_2d_vertex_rows(path, limit)?;
+    let mut result = Vec::with_capacity(decoded_rows.len());
 
-    let mut vertex_map = std::collections::HashMap::new();
-    for obj in sorted.iter() {
-        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
-        let header =
-            parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
-        if !matches_type_name(header.type_code, 0x0A, "VERTEX_2D", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        let _type_code =
-            skip_object_type_prefix(&mut reader, decoder.version()).map_err(to_py_err)?;
-        let vertex = entities::decode_vertex_2d(&mut reader).map_err(to_py_err)?;
-        vertex_map.insert(vertex.handle, vertex);
-    }
-
-    let mut result = Vec::new();
-    let mut i = 0usize;
-    while i < sorted.len() {
-        let obj = sorted[i];
-        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
-        let header =
-            parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
-        if !matches_type_name(header.type_code, 0x0F, "POLYLINE_2D", &dynamic_types) {
-            i += 1;
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        let _type_code =
-            skip_object_type_prefix(&mut reader, decoder.version()).map_err(to_py_err)?;
-        let poly = entities::decode_polyline_2d(&mut reader).map_err(to_py_err)?;
-        let mut vertices: Vec<(f64, f64, f64)> = Vec::new();
-        let use_vertex_z = poly.flags_info.is_3d_polyline
-            || poly.flags_info.is_3d_mesh
-            || poly.flags_info.is_polyface_mesh;
-
-        if !poly.owned_handles.is_empty() {
-            for handle in &poly.owned_handles {
-                if let Some(vertex) = vertex_map.get(handle) {
-                    let z = if use_vertex_z {
-                        vertex.position.2
-                    } else {
-                        poly.elevation
-                    };
-                    vertices.push((vertex.position.0, vertex.position.1, z));
-                }
-            }
-            i += 1;
-        } else {
-            let mut j = i + 1;
-            while j < sorted.len() {
-                let next = sorted[j];
-                let next_record = decoder
-                    .parse_object_record(next.offset)
-                    .map_err(to_py_err)?;
-                let next_header = parse_object_header_for_version(&next_record, decoder.version())
-                    .map_err(to_py_err)?;
-                let mut next_reader = next_record.bit_reader();
-                if matches_type_name(next_header.type_code, 0x0A, "VERTEX_2D", &dynamic_types) {
-                    let _next_type = skip_object_type_prefix(&mut next_reader, decoder.version())
-                        .map_err(to_py_err)?;
-                    let vertex = entities::decode_vertex_2d(&mut next_reader).map_err(to_py_err)?;
-                    let z = if use_vertex_z {
-                        vertex.position.2
-                    } else {
-                        poly.elevation
-                    };
-                    vertices.push((vertex.position.0, vertex.position.1, z));
-                    j += 1;
-                    continue;
-                }
-                if matches_type_name(next_header.type_code, 0x06, "SEQEND", &dynamic_types) {
-                    let _next_type = skip_object_type_prefix(&mut next_reader, decoder.version())
-                        .map_err(to_py_err)?;
-                    let _seqend = entities::decode_seqend(&mut next_reader).map_err(to_py_err)?;
-                    j += 1;
-                }
-                break;
-            }
-            i = j;
-        }
-
-        if poly.flags_info.closed && vertices.len() > 1 {
+    for row in decoded_rows {
+        let use_vertex_z = polyline_uses_vertex_z(row.flags_info);
+        let mut vertices: Vec<Point3> = row
+            .vertices
+            .iter()
+            .map(|vertex| vertex_position_for_polyline(vertex, row.elevation, use_vertex_z))
+            .collect();
+        if row.flags_info.closed && vertices.len() > 1 {
             let first = vertices[0];
             let last = *vertices.last().unwrap();
             if !points_equal_3d(first, last) {
                 vertices.push(first);
             }
         }
-
-        result.push((poly.handle, poly.flags, vertices));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
+        result.push((row.handle, row.flags, vertices));
     }
 
     Ok(result)
@@ -1578,100 +1360,22 @@ pub fn decode_polyline_2d_with_vertices_interpolated(
     path: &str,
     segments_per_span: usize,
     limit: Option<usize>,
-) -> PyResult<Vec<(u64, u16, bool, Vec<(f64, f64, f64)>)>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut sorted = index.objects.clone();
-    sorted.sort_by_key(|obj| obj.offset);
+) -> PyResult<Vec<PolylineInterpolatedRow>> {
+    let decoded_rows = decode_polyline_2d_vertex_rows(path, limit)?;
+    let mut result = Vec::with_capacity(decoded_rows.len());
 
-    let mut vertex_map = std::collections::HashMap::new();
-    for obj in sorted.iter() {
-        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
-        let header =
-            parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
-        if !matches_type_name(header.type_code, 0x0A, "VERTEX_2D", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        let _type_code =
-            skip_object_type_prefix(&mut reader, decoder.version()).map_err(to_py_err)?;
-        let vertex = entities::decode_vertex_2d(&mut reader).map_err(to_py_err)?;
-        vertex_map.insert(vertex.handle, vertex);
-    }
-
-    let mut result = Vec::new();
-    let mut i = 0usize;
-    while i < sorted.len() {
-        let obj = sorted[i];
-        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
-        let header =
-            parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
-        if !matches_type_name(header.type_code, 0x0F, "POLYLINE_2D", &dynamic_types) {
-            i += 1;
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        let _type_code =
-            skip_object_type_prefix(&mut reader, decoder.version()).map_err(to_py_err)?;
-        let poly = entities::decode_polyline_2d(&mut reader).map_err(to_py_err)?;
-        let mut vertices: Vec<(f64, f64, f64)> = Vec::new();
-        let use_vertex_z = poly.flags_info.is_3d_polyline
-            || poly.flags_info.is_3d_mesh
-            || poly.flags_info.is_polyface_mesh;
-
-        if !poly.owned_handles.is_empty() {
-            for handle in &poly.owned_handles {
-                if let Some(vertex) = vertex_map.get(handle) {
-                    let z = if use_vertex_z {
-                        vertex.position.2
-                    } else {
-                        poly.elevation
-                    };
-                    vertices.push((vertex.position.0, vertex.position.1, z));
-                }
-            }
-            i += 1;
-        } else {
-            let mut j = i + 1;
-            while j < sorted.len() {
-                let next = sorted[j];
-                let next_record = decoder
-                    .parse_object_record(next.offset)
-                    .map_err(to_py_err)?;
-                let next_header = parse_object_header_for_version(&next_record, decoder.version())
-                    .map_err(to_py_err)?;
-                let mut next_reader = next_record.bit_reader();
-                if matches_type_name(next_header.type_code, 0x0A, "VERTEX_2D", &dynamic_types) {
-                    let _next_type = skip_object_type_prefix(&mut next_reader, decoder.version())
-                        .map_err(to_py_err)?;
-                    let vertex = entities::decode_vertex_2d(&mut next_reader).map_err(to_py_err)?;
-                    let z = if use_vertex_z {
-                        vertex.position.2
-                    } else {
-                        poly.elevation
-                    };
-                    vertices.push((vertex.position.0, vertex.position.1, z));
-                    j += 1;
-                    continue;
-                }
-                if matches_type_name(next_header.type_code, 0x06, "SEQEND", &dynamic_types) {
-                    let _next_type = skip_object_type_prefix(&mut next_reader, decoder.version())
-                        .map_err(to_py_err)?;
-                    let _seqend = entities::decode_seqend(&mut next_reader).map_err(to_py_err)?;
-                    j += 1;
-                }
-                break;
-            }
-            i = j;
-        }
-
+    for row in decoded_rows {
+        let use_vertex_z = polyline_uses_vertex_z(row.flags_info);
+        let mut vertices: Vec<Point3> = row
+            .vertices
+            .iter()
+            .map(|vertex| vertex_position_for_polyline(vertex, row.elevation, use_vertex_z))
+            .collect();
         let mut applied = false;
-        let should_interpolate = poly.flags_info.curve_fit
-            || poly.flags_info.spline_fit
+        let should_interpolate = row.flags_info.curve_fit
+            || row.flags_info.spline_fit
             || matches!(
-                poly.curve_type_info,
+                row.curve_type_info,
                 entities::PolylineCurveType::QuadraticBSpline
                     | entities::PolylineCurveType::CubicBSpline
                     | entities::PolylineCurveType::Bezier
@@ -1680,11 +1384,11 @@ pub fn decode_polyline_2d_with_vertices_interpolated(
         if should_interpolate && vertices.len() > 1 {
             let base = strip_closure(vertices);
             let interpolated =
-                entities::catmull_rom_spline(&base, poly.flags_info.closed, segments_per_span)
+                entities::catmull_rom_spline(&base, row.flags_info.closed, segments_per_span)
                     .map_err(to_py_err)?;
             vertices = interpolated;
             applied = true;
-        } else if poly.flags_info.closed && vertices.len() > 1 {
+        } else if row.flags_info.closed && vertices.len() > 1 {
             let first = vertices[0];
             let last = *vertices.last().unwrap();
             if !points_equal_3d(first, last) {
@@ -1692,12 +1396,7 @@ pub fn decode_polyline_2d_with_vertices_interpolated(
             }
         }
 
-        result.push((poly.handle, poly.flags, applied, vertices));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
+        result.push((row.handle, row.flags, applied, vertices));
     }
 
     Ok(result)
@@ -1707,7 +1406,7 @@ pub fn decode_polyline_2d_with_vertices_interpolated(
 pub fn decode_vertex_2d_entities(
     path: &str,
     limit: Option<usize>,
-) -> PyResult<Vec<(u64, u16, f64, f64, f64, f64, f64, f64, f64)>> {
+) -> PyResult<Vec<Vertex2dEntityRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
@@ -1748,7 +1447,44 @@ pub fn decode_vertex_2d_entities(
 pub fn decode_polyline_2d_with_vertex_data(
     path: &str,
     limit: Option<usize>,
-) -> PyResult<Vec<(u64, u16, Vec<(f64, f64, f64, f64, f64, f64, f64, u16)>)>> {
+) -> PyResult<Vec<PolylineVertexDataRow>> {
+    let decoded_rows = decode_polyline_2d_vertex_rows(path, limit)?;
+    let mut result = Vec::with_capacity(decoded_rows.len());
+
+    for row in decoded_rows {
+        let use_vertex_z = polyline_uses_vertex_z(row.flags_info);
+        let mut vertices: Vec<VertexDataRow> = row
+            .vertices
+            .iter()
+            .map(|vertex| vertex_data_for_polyline(vertex, row.elevation, use_vertex_z))
+            .collect();
+        if row.flags_info.closed && vertices.len() > 1 {
+            let first = vertices[0];
+            let last = *vertices.last().unwrap();
+            if !points_equal_3d_with_data(first, last) {
+                vertices.push(first);
+            }
+        }
+        result.push((row.handle, row.flags, vertices));
+    }
+
+    Ok(result)
+}
+
+#[derive(Debug, Clone)]
+struct PolylineVertexRow {
+    handle: u64,
+    flags: u16,
+    flags_info: entities::PolylineFlagsInfo,
+    curve_type_info: entities::PolylineCurveType,
+    elevation: f64,
+    vertices: Vec<entities::Vertex2dEntity>,
+}
+
+fn decode_polyline_2d_vertex_rows(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<PolylineVertexRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
@@ -1756,21 +1492,7 @@ pub fn decode_polyline_2d_with_vertex_data(
     let mut sorted = index.objects.clone();
     sorted.sort_by_key(|obj| obj.offset);
 
-    let mut vertex_map = std::collections::HashMap::new();
-    for obj in sorted.iter() {
-        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
-        let header =
-            parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
-        if !matches_type_name(header.type_code, 0x0A, "VERTEX_2D", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        let _type_code =
-            skip_object_type_prefix(&mut reader, decoder.version()).map_err(to_py_err)?;
-        let vertex = entities::decode_vertex_2d(&mut reader).map_err(to_py_err)?;
-        vertex_map.insert(vertex.handle, vertex);
-    }
-
+    let vertex_map = build_vertex_2d_map(&decoder, &sorted, &dynamic_types)?;
     let mut result = Vec::new();
     let mut i = 0usize;
     while i < sorted.len() {
@@ -1782,88 +1504,23 @@ pub fn decode_polyline_2d_with_vertex_data(
             i += 1;
             continue;
         }
+
         let mut reader = record.bit_reader();
         let _type_code =
             skip_object_type_prefix(&mut reader, decoder.version()).map_err(to_py_err)?;
         let poly = entities::decode_polyline_2d(&mut reader).map_err(to_py_err)?;
-        let mut vertices: Vec<(f64, f64, f64, f64, f64, f64, f64, u16)> = Vec::new();
-        let use_vertex_z = poly.flags_info.is_3d_polyline
-            || poly.flags_info.is_3d_mesh
-            || poly.flags_info.is_polyface_mesh;
+        let (vertices, next_i) =
+            collect_polyline_vertices(&decoder, &sorted, &dynamic_types, &vertex_map, &poly, i)?;
+        i = next_i;
 
-        if !poly.owned_handles.is_empty() {
-            for handle in &poly.owned_handles {
-                if let Some(vertex) = vertex_map.get(handle) {
-                    let z = if use_vertex_z {
-                        vertex.position.2
-                    } else {
-                        poly.elevation
-                    };
-                    vertices.push((
-                        vertex.position.0,
-                        vertex.position.1,
-                        z,
-                        vertex.start_width,
-                        vertex.end_width,
-                        vertex.bulge,
-                        vertex.tangent_dir,
-                        vertex.flags,
-                    ));
-                }
-            }
-            i += 1;
-        } else {
-            let mut j = i + 1;
-            while j < sorted.len() {
-                let next = sorted[j];
-                let next_record = decoder
-                    .parse_object_record(next.offset)
-                    .map_err(to_py_err)?;
-                let next_header = parse_object_header_for_version(&next_record, decoder.version())
-                    .map_err(to_py_err)?;
-                let mut next_reader = next_record.bit_reader();
-                if matches_type_name(next_header.type_code, 0x0A, "VERTEX_2D", &dynamic_types) {
-                    let _next_type = skip_object_type_prefix(&mut next_reader, decoder.version())
-                        .map_err(to_py_err)?;
-                    let vertex = entities::decode_vertex_2d(&mut next_reader).map_err(to_py_err)?;
-                    let z = if use_vertex_z {
-                        vertex.position.2
-                    } else {
-                        poly.elevation
-                    };
-                    vertices.push((
-                        vertex.position.0,
-                        vertex.position.1,
-                        z,
-                        vertex.start_width,
-                        vertex.end_width,
-                        vertex.bulge,
-                        vertex.tangent_dir,
-                        vertex.flags,
-                    ));
-                    j += 1;
-                    continue;
-                }
-                if matches_type_name(next_header.type_code, 0x06, "SEQEND", &dynamic_types) {
-                    let _next_type = skip_object_type_prefix(&mut next_reader, decoder.version())
-                        .map_err(to_py_err)?;
-                    let _seqend = entities::decode_seqend(&mut next_reader).map_err(to_py_err)?;
-                    j += 1;
-                }
-                break;
-            }
-            i = j;
-        }
-
-        if poly.flags_info.closed && vertices.len() > 1 {
-            let first = vertices[0];
-            let last = *vertices.last().unwrap();
-            if !points_equal_3d_with_data(first, last) {
-                vertices.push(first);
-            }
-        }
-
-        result.push((poly.handle, poly.flags, vertices));
+        result.push(PolylineVertexRow {
+            handle: poly.handle,
+            flags: poly.flags,
+            flags_info: poly.flags_info,
+            curve_type_info: poly.curve_type_info,
+            elevation: poly.elevation,
+            vertices,
+        });
         if let Some(limit) = limit {
             if result.len() >= limit {
                 break;
@@ -1874,8 +1531,116 @@ pub fn decode_polyline_2d_with_vertex_data(
     Ok(result)
 }
 
+fn build_vertex_2d_map(
+    decoder: &decoder::Decoder<'_>,
+    sorted: &[objects::ObjectRef],
+    dynamic_types: &HashMap<u16, String>,
+) -> PyResult<HashMap<u64, entities::Vertex2dEntity>> {
+    let mut vertex_map = HashMap::new();
+    for obj in sorted {
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header =
+            parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
+        if !matches_type_name(header.type_code, 0x0A, "VERTEX_2D", dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        let _type_code =
+            skip_object_type_prefix(&mut reader, decoder.version()).map_err(to_py_err)?;
+        let vertex = entities::decode_vertex_2d(&mut reader).map_err(to_py_err)?;
+        vertex_map.insert(vertex.handle, vertex);
+    }
+    Ok(vertex_map)
+}
+
+fn collect_polyline_vertices(
+    decoder: &decoder::Decoder<'_>,
+    sorted: &[objects::ObjectRef],
+    dynamic_types: &HashMap<u16, String>,
+    vertex_map: &HashMap<u64, entities::Vertex2dEntity>,
+    poly: &entities::Polyline2dEntity,
+    start_index: usize,
+) -> PyResult<(Vec<entities::Vertex2dEntity>, usize)> {
+    let mut vertices = Vec::new();
+
+    if !poly.owned_handles.is_empty() {
+        for handle in &poly.owned_handles {
+            if let Some(vertex) = vertex_map.get(handle) {
+                vertices.push(vertex.clone());
+            }
+        }
+        return Ok((vertices, start_index + 1));
+    }
+
+    let mut next_i = start_index + 1;
+    while next_i < sorted.len() {
+        let next = sorted[next_i];
+        let next_record = decoder
+            .parse_object_record(next.offset)
+            .map_err(to_py_err)?;
+        let next_header =
+            parse_object_header_for_version(&next_record, decoder.version()).map_err(to_py_err)?;
+        let mut next_reader = next_record.bit_reader();
+        if matches_type_name(next_header.type_code, 0x0A, "VERTEX_2D", dynamic_types) {
+            let _next_type =
+                skip_object_type_prefix(&mut next_reader, decoder.version()).map_err(to_py_err)?;
+            let vertex = entities::decode_vertex_2d(&mut next_reader).map_err(to_py_err)?;
+            vertices.push(vertex);
+            next_i += 1;
+            continue;
+        }
+        if matches_type_name(next_header.type_code, 0x06, "SEQEND", dynamic_types) {
+            let _next_type =
+                skip_object_type_prefix(&mut next_reader, decoder.version()).map_err(to_py_err)?;
+            let _seqend = entities::decode_seqend(&mut next_reader).map_err(to_py_err)?;
+            next_i += 1;
+        }
+        break;
+    }
+
+    Ok((vertices, next_i))
+}
+
+fn polyline_uses_vertex_z(flags_info: entities::PolylineFlagsInfo) -> bool {
+    flags_info.is_3d_polyline || flags_info.is_3d_mesh || flags_info.is_polyface_mesh
+}
+
+fn vertex_position_for_polyline(
+    vertex: &entities::Vertex2dEntity,
+    polyline_elevation: f64,
+    use_vertex_z: bool,
+) -> Point3 {
+    let z = if use_vertex_z {
+        vertex.position.2
+    } else {
+        polyline_elevation
+    };
+    (vertex.position.0, vertex.position.1, z)
+}
+
+fn vertex_data_for_polyline(
+    vertex: &entities::Vertex2dEntity,
+    polyline_elevation: f64,
+    use_vertex_z: bool,
+) -> VertexDataRow {
+    let z = if use_vertex_z {
+        vertex.position.2
+    } else {
+        polyline_elevation
+    };
+    (
+        vertex.position.0,
+        vertex.position.1,
+        z,
+        vertex.start_width,
+        vertex.end_width,
+        vertex.bulge,
+        vertex.tangent_dir,
+        vertex.flags,
+    )
+}
+
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_function(wrap_pyfunction!(hello_from_bin, module)?)?;
     module.add_function(wrap_pyfunction!(detect_version, module)?)?;
     module.add_function(wrap_pyfunction!(list_section_locators, module)?)?;
     module.add_function(wrap_pyfunction!(read_section_bytes, module)?)?;
@@ -1919,7 +1684,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 fn is_best_effort_compat_version(decoder: &decoder::Decoder<'_>) -> bool {
     matches!(
         decoder.version(),
-        version::DwgVersion::R2010 | version::DwgVersion::R2013
+        version::DwgVersion::R2000 | version::DwgVersion::R2010 | version::DwgVersion::R2013
     )
 }
 
@@ -2370,17 +2135,17 @@ fn recover_entity_layer_handle_r2010_plus(
         }
     }
     let mut base_reader_with_size = record.bit_reader();
-    if skip_object_type_prefix(&mut base_reader_with_size, version).is_ok() {
-        if base_reader_with_size.read_rl(Endian::Little).is_ok() {
-            if let Ok(record_handle) = base_reader_with_size.read_h() {
-                let record_base = record_handle.value;
-                if record_base != 0 && !base_handles.contains(&record_base) {
-                    base_handles.push(record_base);
-                    if record_base > 1 {
-                        base_handles.push(record_base - 1);
-                    }
-                    base_handles.push(record_base.saturating_add(1));
+    if skip_object_type_prefix(&mut base_reader_with_size, version).is_ok()
+        && base_reader_with_size.read_rl(Endian::Little).is_ok()
+    {
+        if let Ok(record_handle) = base_reader_with_size.read_h() {
+            let record_base = record_handle.value;
+            if record_base != 0 && !base_handles.contains(&record_base) {
+                base_handles.push(record_base);
+                if record_base > 1 {
+                    base_handles.push(record_base - 1);
                 }
+                base_handles.push(record_base.saturating_add(1));
             }
         }
     }
@@ -2624,7 +2389,7 @@ fn read_handle_reference_chained(
         0x08 => prev_handle.saturating_sub(1),
         0x0A => prev_handle.saturating_add(handle.value),
         0x0C => prev_handle.saturating_sub(handle.value),
-        0x02 | 0x03 | 0x04 | 0x05 => handle.value,
+        0x02..=0x05 => handle.value,
         _ => handle.value,
     };
     *prev_handle = absolute;
@@ -2827,14 +2592,6 @@ fn layer_color_candidate_score(color_index: u16, true_color: Option<u32>, color_
     }
 
     score
-}
-
-fn _unused_true_color_example(color_rgb: u32) -> Option<u32> {
-    if color_rgb == 0 {
-        None
-    } else {
-        Some(color_rgb)
-    }
 }
 
 fn skip_eed(reader: &mut BitReader<'_>) -> crate::core::result::Result<()> {

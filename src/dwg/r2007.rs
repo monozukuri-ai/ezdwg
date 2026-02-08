@@ -330,7 +330,7 @@ fn parse_classes_section(data: &[u8]) -> Result<Vec<ClassEntry>> {
     }
 
     let size = reader.read_rl(Endian::Little)? as usize;
-    let end_bit = reader.read_rl(Endian::Little)? as u32;
+    let end_bit = reader.read_rl(Endian::Little)?;
     let max_class_number = reader.read_bs()?;
     let _zero0 = reader.read_rc()?;
     let _zero1 = reader.read_rc()?;
@@ -1129,27 +1129,27 @@ fn read_instructions(
             length = (opcode & 0x0F) + 0x13;
             offset = read_u8(src, &mut src_idx)? as usize;
             opcode = read_u8(src, &mut src_idx)? as usize;
-            length = (((opcode >> 3) & 0x10) + length) as usize;
-            let offset = (((opcode & 0x78) << 5) + 1 + offset) as usize;
+            length += (opcode >> 3) & 0x10;
+            let offset = ((opcode & 0x78) << 5) + 1 + offset;
             Ok((opcode, offset, length, src_idx))
         }
         1 => {
             length = (opcode & 0x0F) + 0x03;
             offset = read_u8(src, &mut src_idx)? as usize;
             opcode = read_u8(src, &mut src_idx)? as usize;
-            let offset = (((opcode & 0xF8) << 5) + 1 + offset) as usize;
+            let offset = ((opcode & 0xF8) << 5) + 1 + offset;
             Ok((opcode, offset, length, src_idx))
         }
         2 => {
             let mut offset = read_u8(src, &mut src_idx)? as usize;
-            offset = (((read_u8(src, &mut src_idx)? as usize) << 8) & 0xFF00) | offset;
+            offset |= ((read_u8(src, &mut src_idx)? as usize) << 8) & 0xFF00;
             length = opcode & 0x07;
             if (opcode & 0x08) == 0 {
                 opcode = read_u8(src, &mut src_idx)? as usize;
-                length = (opcode & 0xF8) + length;
+                length += opcode & 0xF8;
             } else {
                 offset += 1;
-                length = ((read_u8(src, &mut src_idx)? as usize) << 3) + length;
+                length += (read_u8(src, &mut src_idx)? as usize) << 3;
                 opcode = read_u8(src, &mut src_idx)? as usize;
                 length = (((opcode & 0xF8) << 8) + length) + 0x100;
             }
@@ -1267,7 +1267,7 @@ fn copy_bytes_direct(
 }
 
 fn decode_utf16_string(bytes: &[u8]) -> Result<String> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(DwgError::new(
             ErrorKind::Format,
             "R2007 UTF-16 section name has odd byte length",
@@ -1308,7 +1308,7 @@ fn div_ceil(value: u64, divisor: u64) -> u64 {
     if value == 0 {
         return 0;
     }
-    (value + divisor - 1) / divisor
+    value.div_ceil(divisor)
 }
 
 fn to_usize(value: u64, label: &str) -> Result<usize> {

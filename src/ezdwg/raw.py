@@ -1,4 +1,4 @@
-from ezdwg._core import (
+from ._core import (
     decode_entity_styles,
     decode_layer_colors,
     decode_arc_entities,
