@@ -29,14 +29,23 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install maturin
-      - name: Build extension and run smoke tests
+      - name: Create virtual environment
         run: |
-          python -m maturin develop --release
-          python -m ezdwg --version
-          python -m ezdwg inspect examples/data/line_2000.dwg
-          python -m ezdwg inspect test_dwg/line_2007.dwg
-          python -c "import ezdwg; doc = ezdwg.read('test_dwg/line_2007.dwg'); assert doc.version == 'AC1021'; assert doc.decode_version == 'AC1021'; assert sum(1 for _ in doc.modelspace().query('LINE')) == 1; print(doc.decode_version)"
-          python examples/basic_read.py
+          python -m venv .venv
+          echo "VENV_PY=.venv/bin/python" >> "${GITHUB_ENV}"
+      - name: Build wheel and run smoke tests
+        run: |
+          "${VENV_PY}" -m pip install --upgrade pip
+          "${VENV_PY}" -m pip install maturin
+          "${VENV_PY}" -m maturin build --release --out dist
+          WHEEL="$(ls dist/*.whl | head -n1)"
+          test -n "${WHEEL}"
+          "${VENV_PY}" -m pip install --force-reinstall "${WHEEL}"
+          "${VENV_PY}" -m ezdwg --version
+          "${VENV_PY}" -m ezdwg inspect examples/data/line_2000.dwg
+          "${VENV_PY}" -m ezdwg inspect test_dwg/line_2007.dwg
+          "${VENV_PY}" -c "import ezdwg; doc = ezdwg.read('test_dwg/line_2007.dwg'); assert doc.version == 'AC1021'; assert doc.decode_version == 'AC1021'; assert sum(1 for _ in doc.modelspace().query('LINE')) == 1; print(doc.decode_version)"
+          "${VENV_PY}" examples/basic_read.py
 
   publish:
     name: Publish wheels (${{ matrix.os }})
