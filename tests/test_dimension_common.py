@@ -220,3 +220,45 @@ def test_dimension_entity_merges_extended_variants(monkeypatch) -> None:
         "ALIGNED",
         "LINEAR",
     ]
+
+
+def test_dimension_entity_uses_bulk_decoder_when_available(monkeypatch) -> None:
+    monkeypatch.setattr(document_module, "_entity_style_map", lambda _path: {})
+    monkeypatch.setattr(document_module, "_layer_color_map", lambda _path: {})
+    row = (
+        321,
+        "<>",
+        (1.0, 1.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (2.0, 0.0, 0.0),
+        (1.0, 0.5, 0.0),
+        None,
+        ((0.0, 0.0, 1.0), (1.0, 1.0, 1.0)),
+        (0.0, 0.0, 0.0, 0.0),
+        (0, 2.0, None, None, None, 0.0),
+        (None, None),
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_dimension_entities",
+        lambda _path: [("LINEAR", row)],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_dim_linear_entities",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("legacy decoder should not be called")
+        ),
+    )
+
+    doc = Document(
+        path="dummy.dwg",
+        version="AC1018",
+        decode_path="dummy.dwg",
+        decode_version="AC1018",
+    )
+    layout = Layout(doc=doc, name="MODELSPACE")
+    entities = list(layout.query("DIMENSION"))
+    assert len(entities) == 1
+    assert entities[0].handle == 321
+    assert entities[0].dxf["dimtype"] == "LINEAR"

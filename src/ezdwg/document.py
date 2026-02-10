@@ -96,7 +96,7 @@ class Layout:
         return self.query(types)
 
     def query(self, types: str | Iterable[str] | None = None) -> Iterator[Entity]:
-        type_set = _normalize_types(types)
+        type_set = _normalize_types(types, self.doc.decode_path)
         for dxftype in type_set:
             yield from self._iter_type(dxftype)
 
@@ -889,6 +889,14 @@ class Layout:
 
         if dxftype == "DIMENSION":
             dimension_rows: list[tuple[str, tuple]] = []
+            used_bulk_decoder = False
+
+            try:
+                for dimtype, row in raw.decode_dimension_entities(decode_path):
+                    dimension_rows.append((str(dimtype).upper(), row))
+                used_bulk_decoder = True
+            except Exception:
+                used_bulk_decoder = False
 
             def _append_rows(dimtype: str, decode_fn) -> None:
                 try:
@@ -898,13 +906,14 @@ class Layout:
                 for row in rows:
                     dimension_rows.append((dimtype, row))
 
-            _append_rows("LINEAR", raw.decode_dim_linear_entities)
-            _append_rows("ORDINATE", raw.decode_dim_ordinate_entities)
-            _append_rows("ALIGNED", raw.decode_dim_aligned_entities)
-            _append_rows("ANG3PT", raw.decode_dim_ang3pt_entities)
-            _append_rows("ANG2LN", raw.decode_dim_ang2ln_entities)
-            _append_rows("RADIUS", raw.decode_dim_radius_entities)
-            _append_rows("DIAMETER", raw.decode_dim_diameter_entities)
+            if not used_bulk_decoder:
+                _append_rows("LINEAR", raw.decode_dim_linear_entities)
+                _append_rows("ORDINATE", raw.decode_dim_ordinate_entities)
+                _append_rows("ALIGNED", raw.decode_dim_aligned_entities)
+                _append_rows("ANG3PT", raw.decode_dim_ang3pt_entities)
+                _append_rows("ANG2LN", raw.decode_dim_ang2ln_entities)
+                _append_rows("RADIUS", raw.decode_dim_radius_entities)
+                _append_rows("DIAMETER", raw.decode_dim_diameter_entities)
 
             dimension_rows.sort(key=lambda item: item[1][0])
             for dimtype, row in dimension_rows:
@@ -1086,9 +1095,44 @@ def _build_dimension_common_dxf(
     }
 
 
-def _normalize_types(types: str | Iterable[str] | None) -> list[str]:
+@lru_cache(maxsize=16)
+def _present_supported_types(path: str | None) -> tuple[str, ...]:
+    if not path:
+        return tuple(SUPPORTED_ENTITY_TYPES)
+    try:
+        headers = raw.list_object_headers_with_type(path)
+    except Exception:
+        return tuple(SUPPORTED_ENTITY_TYPES)
+
+    seen: set[str] = set()
+    for row in headers:
+        if not isinstance(row, tuple) or len(row) < 5:
+            continue
+        canonical = _canonical_entity_type_name(row[4])
+        if canonical is not None:
+            seen.add(canonical)
+
+    if not seen:
+        return tuple(SUPPORTED_ENTITY_TYPES)
+    return tuple(dxftype for dxftype in SUPPORTED_ENTITY_TYPES if dxftype in seen)
+
+
+def _canonical_entity_type_name(raw_name: object) -> str | None:
+    name = str(raw_name).strip().upper()
+    if not name:
+        return None
+    if name.startswith("DIM_"):
+        return "DIMENSION"
+    canonical = TYPE_ALIASES.get(name, name)
+    if canonical in SUPPORTED_ENTITY_TYPES:
+        return canonical
+    return None
+
+
+def _normalize_types(types: str | Iterable[str] | None, path: str | None = None) -> list[str]:
+    default_types = list(_present_supported_types(path))
     if types is None:
-        return list(SUPPORTED_ENTITY_TYPES)
+        return default_types
     if isinstance(types, str):
         tokens = re.split(r"[,\s]+", types.strip())
     else:
@@ -1097,18 +1141,19 @@ def _normalize_types(types: str | Iterable[str] | None) -> list[str]:
     normalized = [token.strip().upper() for token in tokens if token and token.strip()]
     normalized = [TYPE_ALIASES.get(token, token) for token in normalized]
     if not normalized:
-        return list(SUPPORTED_ENTITY_TYPES)
+        return default_types
 
     if any(token in {"*", "ALL"} for token in normalized):
-        return list(SUPPORTED_ENTITY_TYPES)
+        return default_types
 
     selected: list[str] = []
     seen = set()
+    candidate_types = default_types if path is not None else list(SUPPORTED_ENTITY_TYPES)
 
     for token in normalized:
         if any(ch in token for ch in "*?[]"):
             matches = [
-                name for name in SUPPORTED_ENTITY_TYPES if fnmatch.fnmatchcase(name, token)
+                name for name in candidate_types if fnmatch.fnmatchcase(name, token)
             ]
             if not matches:
                 continue

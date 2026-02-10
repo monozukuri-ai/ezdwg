@@ -111,6 +111,7 @@ type DimEntityRow = (
     DimStyleRow,
     DimHandlesRow,
 );
+type DimTypedEntityRow = (String, DimEntityRow);
 type InsertEntityRow = (u64, f64, f64, f64, f64, f64, f64, f64);
 type MInsertEntityRow = (u64, f64, f64, f64, f64, f64, f64, f64, u16, u16, f64, f64);
 type Polyline2dEntityRow = (u64, u16, u16, f64, f64, f64, f64);
@@ -2175,6 +2176,115 @@ pub fn decode_dim_radius_entities(path: &str, limit: Option<usize>) -> PyResult<
     )
 }
 
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_dimension_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<DimTypedEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result: Vec<DimTypedEntityRow> = Vec::new();
+
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+
+        let maybe_row = if matches_type_name(header.type_code, 0x15, "DIM_LINEAR", &dynamic_types) {
+            let entity =
+                match decode_dim_linear_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
+                {
+                    Ok(entity) => entity,
+                    Err(err) if best_effort => continue,
+                    Err(err) => return Err(to_py_err(err)),
+                };
+            Some(("LINEAR", dim_entity_row_from_linear_like(&entity)))
+        } else if matches_type_name(header.type_code, 0x14, "DIM_ORDINATE", &dynamic_types) {
+            let entity =
+                match decode_dim_linear_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
+                {
+                    Ok(entity) => entity,
+                    Err(err) if best_effort => continue,
+                    Err(err) => return Err(to_py_err(err)),
+                };
+            Some(("ORDINATE", dim_entity_row_from_linear_like(&entity)))
+        } else if matches_type_name(header.type_code, 0x16, "DIM_ALIGNED", &dynamic_types) {
+            let entity =
+                match decode_dim_linear_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
+                {
+                    Ok(entity) => entity,
+                    Err(err) if best_effort => continue,
+                    Err(err) => return Err(to_py_err(err)),
+                };
+            Some(("ALIGNED", dim_entity_row_from_linear_like(&entity)))
+        } else if matches_type_name(header.type_code, 0x17, "DIM_ANG3PT", &dynamic_types) {
+            let entity =
+                match decode_dim_linear_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
+                {
+                    Ok(entity) => entity,
+                    Err(err) if best_effort => continue,
+                    Err(err) => return Err(to_py_err(err)),
+                };
+            Some(("ANG3PT", dim_entity_row_from_linear_like(&entity)))
+        } else if matches_type_name(header.type_code, 0x18, "DIM_ANG2LN", &dynamic_types) {
+            let entity =
+                match decode_dim_linear_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
+                {
+                    Ok(entity) => entity,
+                    Err(err) if best_effort => continue,
+                    Err(err) => return Err(to_py_err(err)),
+                };
+            Some(("ANG2LN", dim_entity_row_from_linear_like(&entity)))
+        } else if matches_type_name(header.type_code, 0x1A, "DIM_DIAMETER", &dynamic_types) {
+            let entity = match decode_dim_diameter_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            Some(("DIAMETER", dim_entity_row_from_linear_like(&entity)))
+        } else if matches_type_name(header.type_code, 0x19, "DIM_RADIUS", &dynamic_types) {
+            let entity =
+                match decode_dim_radius_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
+                {
+                    Ok(entity) => entity,
+                    Err(err) if best_effort => continue,
+                    Err(err) => return Err(to_py_err(err)),
+                };
+            Some(("RADIUS", dim_entity_row_from_linear_like(&entity)))
+        } else {
+            None
+        };
+
+        if let Some((dimtype, row)) = maybe_row {
+            result.push((dimtype.to_string(), row));
+            if let Some(limit) = limit {
+                if result.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(result)
+}
+
 fn decode_dim_entities_by_type<F>(
     path: &str,
     limit: Option<usize>,
@@ -4058,6 +4168,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_hatch_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_tolerance_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_mline_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_dimension_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_dim_linear_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_dim_ordinate_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_dim_aligned_entities, module)?)?;

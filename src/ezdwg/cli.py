@@ -69,18 +69,19 @@ def _run_inspect(path: str) -> int:
 
     counts: OrderedDict[str, int] = OrderedDict()
     total = 0
-    for dxftype in SUPPORTED_ENTITY_TYPES:
-        count = sum(1 for _ in modelspace.query(dxftype))
-        if count > 0:
-            counts[dxftype] = count
-            total += count
+    for entity in modelspace.query():
+        dxftype = entity.dxftype
+        counts[dxftype] = counts.get(dxftype, 0) + 1
+        total += 1
 
     print(f"file: {file_path}")
     print(f"version: {doc.version}")
     print(f"decode_version: {doc.decode_version}")
     print(f"total_entities: {total}")
-    for dxftype, count in counts.items():
-        print(f"{dxftype}: {count}")
+    for dxftype in SUPPORTED_ENTITY_TYPES:
+        count = counts.get(dxftype, 0)
+        if count > 0:
+            print(f"{dxftype}: {count}")
 
     return 0
 
