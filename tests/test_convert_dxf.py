@@ -80,3 +80,17 @@ def test_to_dxf_strict_raises_on_skipped_entity(monkeypatch, tmp_path: Path) -> 
             types="LINE",
             strict=True,
         )
+
+
+def test_to_dxf_dimension_writes_native_dimension_without_line_fallback(tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    source = ROOT / "examples" / "data" / "mechanical_example-imperial.dwg"
+    output = tmp_path / "mechanical_dim_out.dxf"
+    result = ezdwg.to_dxf(str(source), str(output), types="DIMENSION", dxf_version="R2010")
+
+    assert output.exists()
+    assert result.total_entities > 0
+    assert result.written_entities == result.total_entities
+    assert len(dxf_entities_of_type(output, "DIMENSION")) > 0
+    assert len(dxf_entities_of_type(output, "LINE")) == 0

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -281,7 +282,7 @@ def _write_entity_to_modelspace_unsafe(modelspace: Any, entity: Entity) -> bool:
         return True
 
     if dxftype == "DIMENSION":
-        return _write_dimension_fallback(modelspace, dxf, dxfattribs)
+        return _write_dimension_native(modelspace, dxf, dxfattribs)
 
     return False
 
@@ -387,22 +388,107 @@ def _write_hatch(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str, Any
     return path_written
 
 
-def _write_dimension_fallback(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str, Any]) -> bool:
-    written = False
-    p1 = dxf.get("defpoint2")
-    p2 = dxf.get("defpoint3")
-    if p1 is not None and p2 is not None:
-        modelspace.add_line(_point3(p1), _point3(p2), dxfattribs=dxfattribs)
-        written = True
+def _write_dimension_native(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str, Any]) -> bool:
+    dimtype = str(dxf.get("dimtype") or "").upper()
+    text = _dimension_text(dxf.get("text"))
+    text_mid = _point2_or_none(dxf.get("text_midpoint"))
 
-    text = str(dxf.get("text", "") or "")
+    try:
+        if dimtype == "LINEAR":
+            dim = modelspace.add_linear_dim(
+                base=_point2(dxf.get("defpoint")),
+                p1=_point2(dxf.get("defpoint2")),
+                p2=_point2(dxf.get("defpoint3")),
+                location=text_mid,
+                text=text,
+                angle=float(dxf.get("angle", 0.0)),
+                text_rotation=_float_or_none(dxf.get("text_rotation")),
+                dxfattribs=dxfattribs,
+            )
+            dim.render()
+            return True
+
+        if dimtype == "ALIGNED":
+            p1 = _point2(dxf.get("defpoint2"))
+            p2 = _point2(dxf.get("defpoint3"))
+            base = _point2(dxf.get("defpoint"))
+            distance = _signed_line_distance_2d(base, p1, p2)
+            dim = modelspace.add_aligned_dim(
+                p1=p1,
+                p2=p2,
+                distance=distance,
+                text=text,
+                dxfattribs=dxfattribs,
+            )
+            if text_mid is not None:
+                dim.set_location(text_mid, leader=False, relative=False)
+            dim.render()
+            return True
+
+        if dimtype == "RADIUS":
+            center = _point2(dxf.get("defpoint2"))
+            mpoint = _point2_or_none(dxf.get("defpoint3"))
+            dim = modelspace.add_radius_dim(
+                center=center,
+                mpoint=mpoint,
+                text=text,
+                dxfattribs=dxfattribs,
+            )
+            if text_mid is not None:
+                dim.set_location(text_mid, leader=False, relative=False)
+            dim.render()
+            return True
+
+        if dimtype == "DIAMETER":
+            center = _point2(dxf.get("defpoint2"))
+            mpoint = _point2_or_none(dxf.get("defpoint3"))
+            dim = modelspace.add_diameter_dim(
+                center=center,
+                mpoint=mpoint,
+                text=text,
+                dxfattribs=dxfattribs,
+            )
+            if text_mid is not None:
+                dim.set_location(text_mid, leader=False, relative=False)
+            dim.render()
+            return True
+
+        if dimtype == "ORDINATE":
+            feature = _point2(dxf.get("defpoint2"))
+            offset = _point2(dxf.get("defpoint3"))
+            origin = _point2_or_none(dxf.get("defpoint")) or (0.0, 0.0)
+            dim = modelspace.add_ordinate_dim(
+                feature_location=feature,
+                offset=offset,
+                dtype=_ordinate_dim_type(feature, offset),
+                origin=origin,
+                rotation=float(dxf.get("angle", 0.0)),
+                text=text,
+                dxfattribs=dxfattribs,
+            )
+            dim.render()
+            return True
+    except Exception:
+        # Keep conversion robust and avoid generating synthetic geometry lines.
+        pass
+
+    return _write_dimension_text_fallback(modelspace, dxf, dxfattribs)
+
+
+def _write_dimension_text_fallback(
+    modelspace: Any,
+    dxf: dict[str, Any],
+    dxfattribs: dict[str, Any],
+) -> bool:
     text_mid = dxf.get("text_midpoint")
-    if text and text_mid is not None:
-        text_entity = modelspace.add_text(text, dxfattribs=dxfattribs)
-        text_entity.dxf.insert = _point3(text_mid)
-        written = True
-
-    return written
+    if text_mid is None:
+        return False
+    text = _dimension_text(dxf.get("text"))
+    if text in {"", "<>"}:
+        return False
+    text_entity = modelspace.add_text(text, dxfattribs=dxfattribs)
+    text_entity.dxf.insert = _point3(text_mid)
+    return True
 
 
 def _entity_dxfattribs(dxf: dict[str, Any]) -> dict[str, Any]:
@@ -460,3 +546,60 @@ def _point3(value: Any) -> tuple[float, float, float]:
         if len(value) >= 2:
             return (float(value[0]), float(value[1]), 0.0)
     raise ValueError(f"invalid point value: {value!r}")
+
+
+def _point2(value: Any) -> tuple[float, float]:
+    if value is None:
+        raise ValueError("invalid point value: None")
+    if isinstance(value, (list, tuple)):
+        if len(value) >= 2:
+            return (float(value[0]), float(value[1]))
+    raise ValueError(f"invalid point value: {value!r}")
+
+
+def _point2_or_none(value: Any) -> tuple[float, float] | None:
+    if value is None:
+        return None
+    try:
+        return _point2(value)
+    except Exception:
+        return None
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _dimension_text(value: Any) -> str:
+    text = str(value or "")
+    if text.strip() == "":
+        return "<>"
+    return text
+
+
+def _signed_line_distance_2d(
+    point: tuple[float, float],
+    line_start: tuple[float, float],
+    line_end: tuple[float, float],
+) -> float:
+    dx = line_end[0] - line_start[0]
+    dy = line_end[1] - line_start[1]
+    length = math.hypot(dx, dy)
+    if length <= 1.0e-12:
+        return 0.0
+    cross = dx * (point[1] - line_start[1]) - dy * (point[0] - line_start[0])
+    return cross / length
+
+
+def _ordinate_dim_type(
+    feature: tuple[float, float],
+    offset: tuple[float, float],
+) -> int:
+    dx = abs(offset[0] - feature[0])
+    dy = abs(offset[1] - feature[1])
+    return 0 if dx >= dy else 1
