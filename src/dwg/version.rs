@@ -8,6 +8,7 @@ pub enum DwgVersion {
     R2007,
     R2010,
     R2013,
+    R2018,
     Unknown(String),
 }
 
@@ -19,6 +20,7 @@ impl DwgVersion {
             Self::R2007 => "AC1021",
             Self::R2010 => "AC1024",
             Self::R2013 => "AC1027",
+            Self::R2018 => "AC1032",
             Self::Unknown(value) => value.as_str(),
         }
     }
@@ -38,6 +40,7 @@ pub fn detect_version(bytes: &[u8]) -> Result<DwgVersion> {
         "AC1021" => DwgVersion::R2007,
         "AC1024" => DwgVersion::R2010,
         "AC1027" => DwgVersion::R2013,
+        "AC1032" => DwgVersion::R2018,
         other => DwgVersion::Unknown(other.to_string()),
     };
     Ok(version)
@@ -54,5 +57,6 @@ mod tests {
         assert_eq!(detect_version(b"AC1021xxxx").unwrap(), DwgVersion::R2007);
         assert_eq!(detect_version(b"AC1024xxxx").unwrap(), DwgVersion::R2010);
         assert_eq!(detect_version(b"AC1027xxxx").unwrap(), DwgVersion::R2013);
+        assert_eq!(detect_version(b"AC1032xxxx").unwrap(), DwgVersion::R2018);
     }
 }

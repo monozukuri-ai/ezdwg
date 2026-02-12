@@ -27,6 +27,7 @@ type LineEntityRow = (u64, f64, f64, f64, f64, f64, f64);
 type PointEntityRow = (u64, f64, f64, f64, f64);
 type ArcEntityRow = (u64, f64, f64, f64, f64, f64, f64);
 type CircleEntityRow = (u64, f64, f64, f64, f64);
+type LineArcCircleRows = (Vec<LineEntityRow>, Vec<ArcEntityRow>, Vec<CircleEntityRow>);
 type EllipseEntityRow = (u64, Point3, Point3, Point3, f64, f64, f64);
 type SplineFlagsRow = (u32, u32, bool, bool, bool);
 type SplineToleranceRow = (Option<f64>, Option<f64>, Option<f64>);
@@ -1526,6 +1527,111 @@ pub fn decode_circle_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
         }
     }
     Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_line_arc_circle_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<LineArcCircleRows> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut lines: Vec<LineEntityRow> = Vec::new();
+    let mut arcs: Vec<ArcEntityRow> = Vec::new();
+    let mut circles: Vec<CircleEntityRow> = Vec::new();
+    let mut total = 0usize;
+
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        let is_line = matches_type_name(header.type_code, 0x13, "LINE", &dynamic_types);
+        let is_arc = matches_type_name(header.type_code, 0x11, "ARC", &dynamic_types);
+        let is_circle = matches_type_name(header.type_code, 0x12, "CIRCLE", &dynamic_types);
+        if !(is_line || is_arc || is_circle) {
+            continue;
+        }
+
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+
+        if is_line {
+            let entity = match decode_line_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            lines.push((
+                entity.handle,
+                entity.start.0,
+                entity.start.1,
+                entity.start.2,
+                entity.end.0,
+                entity.end.1,
+                entity.end.2,
+            ));
+            total += 1;
+        } else if is_arc {
+            let entity =
+                match decode_arc_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
+                {
+                    Ok(entity) => entity,
+                    Err(err) if best_effort => continue,
+                    Err(err) => return Err(to_py_err(err)),
+                };
+            arcs.push((
+                entity.handle,
+                entity.center.0,
+                entity.center.1,
+                entity.center.2,
+                entity.radius,
+                entity.angle_start,
+                entity.angle_end,
+            ));
+            total += 1;
+        } else if is_circle {
+            let entity = match decode_circle_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            circles.push((
+                entity.handle,
+                entity.center.0,
+                entity.center.1,
+                entity.center.2,
+                entity.radius,
+            ));
+            total += 1;
+        }
+
+        if let Some(limit) = limit {
+            if total >= limit {
+                break;
+            }
+        }
+    }
+
+    Ok((lines, arcs, circles))
 }
 
 #[pyfunction(signature = (path, limit=None))]
@@ -4158,6 +4264,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_3dface_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_arc_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_circle_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_line_arc_circle_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_ellipse_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_spline_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_text_entities, module)?)?;
@@ -4216,7 +4323,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 fn is_best_effort_compat_version(decoder: &decoder::Decoder<'_>) -> bool {
     matches!(
         decoder.version(),
-        version::DwgVersion::R2000 | version::DwgVersion::R2010 | version::DwgVersion::R2013
+        version::DwgVersion::R2000 | version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
     )
 }
 
@@ -4231,7 +4338,7 @@ fn decode_line_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_line_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_line_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4251,7 +4358,7 @@ fn decode_point_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_point_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_point_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4271,7 +4378,7 @@ fn decode_arc_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_arc_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_arc_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4291,7 +4398,7 @@ fn decode_circle_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_circle_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_circle_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4311,7 +4418,7 @@ fn decode_ellipse_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_ellipse_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_ellipse_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4331,7 +4438,7 @@ fn decode_spline_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_spline_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_spline_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4351,7 +4458,7 @@ fn decode_text_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_text_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_text_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4371,7 +4478,7 @@ fn decode_attrib_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_attrib_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_attrib_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4391,7 +4498,7 @@ fn decode_attdef_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_attdef_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_attdef_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4411,7 +4518,7 @@ fn decode_mtext_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_mtext_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_mtext_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4432,7 +4539,7 @@ fn decode_leader_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_leader_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_leader_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4452,7 +4559,7 @@ fn decode_hatch_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_hatch_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_hatch_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4473,7 +4580,7 @@ fn decode_tolerance_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_tolerance_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_tolerance_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4493,7 +4600,7 @@ fn decode_mline_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_mline_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_mline_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4513,7 +4620,7 @@ fn decode_dim_linear_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_dim_linear_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_dim_linear_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4533,7 +4640,7 @@ fn decode_dim_radius_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_dim_radius_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_dim_radius_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4553,7 +4660,7 @@ fn decode_dim_diameter_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_dim_diameter_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_dim_diameter_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4573,7 +4680,7 @@ fn decode_lwpolyline_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_lwpolyline_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_lwpolyline_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4593,7 +4700,7 @@ fn decode_polyline_3d_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_polyline_3d_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_polyline_3d_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4613,7 +4720,7 @@ fn decode_vertex_3d_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_vertex_3d_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_vertex_3d_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4633,7 +4740,7 @@ fn decode_polyline_mesh_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_polyline_mesh_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_polyline_mesh_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4653,7 +4760,7 @@ fn decode_polyline_pface_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_polyline_pface_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_polyline_pface_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4673,7 +4780,7 @@ fn decode_vertex_pface_face_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_vertex_pface_face_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_vertex_pface_face_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4693,7 +4800,7 @@ fn decode_3dface_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_3dface_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_3dface_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4713,7 +4820,7 @@ fn decode_solid_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_solid_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_solid_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4733,7 +4840,7 @@ fn decode_trace_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_trace_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_trace_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4753,7 +4860,7 @@ fn decode_shape_for_version(
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_shape_r2010(reader, object_data_end_bit, object_handle)
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_shape_r2013(reader, object_data_end_bit, object_handle)
         }
@@ -4822,7 +4929,7 @@ fn skip_object_type_prefix(
     version: &version::DwgVersion,
 ) -> crate::core::result::Result<u16> {
     match version {
-        version::DwgVersion::R2010 | version::DwgVersion::R2013 => {
+        version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let _handle_stream_size_bits = reader.read_umc()?;
             let type_code = reader.read_ot_r2010()?;
             if type_code == 0 {
@@ -4852,7 +4959,7 @@ fn parse_object_header_for_version(
     version: &version::DwgVersion,
 ) -> crate::core::result::Result<ApiObjectHeader> {
     match version {
-        version::DwgVersion::R2010 | version::DwgVersion::R2013 => {
+        version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             let header = objects::object_header_r2010::parse_from_record(record)?;
             Ok(ApiObjectHeader {
                 data_size: header.data_size,
@@ -4929,7 +5036,7 @@ fn recover_entity_layer_handle_r2010_plus(
 ) -> u64 {
     if !matches!(
         version,
-        version::DwgVersion::R2010 | version::DwgVersion::R2013
+        version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
     ) {
         return parsed_layer_handle;
     }
@@ -5166,7 +5273,7 @@ fn parse_expected_entity_layer_ref_index(
             entities::common::parse_common_entity_header_r2010(&mut reader, object_data_end_bit)
                 .ok()?
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             entities::common::parse_common_entity_header_r2013(&mut reader, object_data_end_bit)
                 .ok()?
         }
@@ -5223,7 +5330,7 @@ fn parse_common_entity_layer_handle_from_common_header(
             entities::common::parse_common_entity_header_r2010(&mut reader, object_data_end_bit)
                 .ok()?
         }
-        version::DwgVersion::R2013 => {
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
             entities::common::parse_common_entity_header_r2013(&mut reader, object_data_end_bit)
                 .ok()?
         }
@@ -5269,7 +5376,7 @@ fn decode_layer_color_record(
     // Older versions keep ObjSize (RL) before handle.
     if !matches!(
         version,
-        version::DwgVersion::R2010 | version::DwgVersion::R2013
+        version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
     ) {
         let _obj_size = reader.read_rl(Endian::Little)?;
     }
@@ -5278,14 +5385,14 @@ fn decode_layer_color_record(
 
     let _num_reactors = reader.read_bl()?;
     let _xdic_missing_flag = reader.read_b()?;
-    if matches!(version, version::DwgVersion::R2013) {
+    if matches!(version, version::DwgVersion::R2013 | version::DwgVersion::R2018) {
         let _has_ds_binary_data = reader.read_b()?;
     }
     // R2010+ stores entry name in string stream. The data stream directly
     // continues with layer state flags and color data.
     if !matches!(
         version,
-        version::DwgVersion::R2010 | version::DwgVersion::R2013
+        version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
     ) {
         let _entry_name = reader.read_tv()?;
     }

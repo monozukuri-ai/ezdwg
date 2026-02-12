@@ -10,7 +10,7 @@ from typing import Iterable, Iterator
 from . import raw
 from .entity import Entity
 
-SUPPORTED_VERSIONS = {"AC1015", "AC1018", "AC1021", "AC1024", "AC1027"}
+SUPPORTED_VERSIONS = {"AC1015", "AC1018", "AC1021", "AC1024", "AC1027", "AC1032"}
 SUPPORTED_ENTITY_TYPES = (
     "LINE",
     "LWPOLYLINE",
@@ -47,6 +47,8 @@ TYPE_ALIASES = {
     "DIM_ANG3PT": "DIMENSION",
     "DIM_ANG2LN": "DIMENSION",
 }
+
+_BULK_PRIMITIVE_TYPES = {"LINE", "ARC", "CIRCLE"}
 
 
 def read(path: str) -> "Document":
@@ -97,8 +99,11 @@ class Layout:
 
     def query(self, types: str | Iterable[str] | None = None) -> Iterator[Entity]:
         type_set = _normalize_types(types, self.doc.decode_path)
+        bulk_rows = None
+        if sum(1 for dxftype in type_set if dxftype in _BULK_PRIMITIVE_TYPES) >= 2:
+            bulk_rows = _line_arc_circle_rows(self.doc.decode_path)
         for dxftype in type_set:
-            yield from self._iter_type(dxftype)
+            yield from self._iter_type(dxftype, bulk_rows=bulk_rows)
 
     def plot(self, *args, **kwargs):
         from .render import plot
@@ -110,7 +115,17 @@ class Layout:
 
         return to_dxf(self, output_path, **kwargs)
 
-    def _iter_type(self, dxftype: str) -> Iterator[Entity]:
+    def _iter_type(
+        self,
+        dxftype: str,
+        *,
+        bulk_rows: tuple[
+            list[tuple[int, float, float, float, float, float, float]],
+            list[tuple[int, float, float, float, float, float, float]],
+            list[tuple[int, float, float, float, float]],
+        ]
+        | None = None,
+    ) -> Iterator[Entity]:
         decode_path = self.doc.decode_path
         entity_style_map = _entity_style_map(decode_path)
         layer_color_map = _layer_color_map(decode_path)
@@ -118,7 +133,10 @@ class Layout:
             self.doc.decode_version, entity_style_map, layer_color_map
         )
         if dxftype == "LINE":
-            line_rows = list(raw.decode_line_entities(decode_path))
+            if bulk_rows is not None:
+                line_rows = bulk_rows[0]
+            else:
+                line_rows = list(raw.decode_line_entities(decode_path))
             line_supplementary_handles = _line_supplementary_handles(
                 line_rows, entity_style_map, layer_color_overrides
             )
@@ -145,9 +163,8 @@ class Layout:
             return
 
         if dxftype == "ARC":
-            for handle, cx, cy, cz, radius, start_angle, end_angle in raw.decode_arc_entities(
-                decode_path
-            ):
+            arc_rows = bulk_rows[1] if bulk_rows is not None else raw.decode_arc_entities(decode_path)
+            for handle, cx, cy, cz, radius, start_angle, end_angle in arc_rows:
                 start_deg = math.degrees(start_angle)
                 end_deg = math.degrees(end_angle)
                 yield Entity(
@@ -413,7 +430,10 @@ class Layout:
             return
 
         if dxftype == "CIRCLE":
-            circle_rows = list(raw.decode_circle_entities(decode_path))
+            if bulk_rows is not None:
+                circle_rows = bulk_rows[2]
+            else:
+                circle_rows = list(raw.decode_circle_entities(decode_path))
             circle_supplementary_handles = _circle_supplementary_handles(
                 circle_rows, entity_style_map, layer_color_overrides
             )
@@ -1172,6 +1192,25 @@ def _normalize_types(types: str | Iterable[str] | None, path: str | None = None)
 
 
 @lru_cache(maxsize=16)
+def _line_arc_circle_rows(
+    path: str,
+) -> tuple[
+    list[tuple[int, float, float, float, float, float, float]],
+    list[tuple[int, float, float, float, float, float, float]],
+    list[tuple[int, float, float, float, float]],
+]:
+    try:
+        line_rows, arc_rows, circle_rows = raw.decode_line_arc_circle_entities(path)
+        return list(line_rows), list(arc_rows), list(circle_rows)
+    except Exception:
+        return (
+            list(raw.decode_line_entities(path)),
+            list(raw.decode_arc_entities(path)),
+            list(raw.decode_circle_entities(path)),
+        )
+
+
+@lru_cache(maxsize=16)
 def _entity_style_map(path: str) -> dict[int, tuple[int | None, int | None, int]]:
     try:
         return {
@@ -1198,7 +1237,7 @@ def _layer_color_overrides(
     entity_style_map: dict[int, tuple[int | None, int | None, int]],
     layer_color_map: dict[int, tuple[int, int | None]],
 ) -> dict[int, tuple[int, int | None]]:
-    if version not in {"AC1024", "AC1027"}:
+    if version not in {"AC1024", "AC1027", "AC1032"}:
         return {}
 
     usage: dict[int, int] = {}

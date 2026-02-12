@@ -48,7 +48,7 @@ def test_read_native_versions(relative_path: str, expected_version: str) -> None
     assert doc.decode_path == str(path)
 
 
-@pytest.mark.parametrize("source_version", ["AC1021", "AC1024", "AC1027"])
+@pytest.mark.parametrize("source_version", ["AC1021", "AC1024", "AC1027", "AC1032"])
 def test_read_native_versions_do_not_require_conversion(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -82,3 +82,41 @@ def test_read_rejects_unknown_version(
 
     with pytest.raises(ValueError, match="unsupported DWG version: AC9999"):
         document_module.read(str(source_path))
+
+
+def test_detect_version_accepts_ac1032_header(tmp_path: Path) -> None:
+    path = tmp_path / "ac1032_header.dwg"
+    path.write_bytes(b"AC1032dummy")
+
+    assert ezdwg.raw.detect_version(str(path)) == "AC1032"
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "expected_version"),
+    [
+        ("test_dwg/acadsharp/sample_AC1032.dwg", "AC1032"),
+        ("test_dwg/acadsharp/BLOCKPOINTPARAMETER.dwg", "AC1032"),
+        ("test_dwg/acadsharp/sample_AC1027.dwg", "AC1027"),
+    ],
+)
+def test_detect_version_from_acadsharp_samples(
+    relative_path: str,
+    expected_version: str,
+) -> None:
+    path = ROOT / relative_path
+    assert path.exists(), f"missing sample: {path}"
+    assert ezdwg.raw.detect_version(str(path)) == expected_version
+
+
+def test_read_ac1032_sample_smoke() -> None:
+    path = ROOT / "test_dwg/acadsharp/sample_AC1032.dwg"
+    assert path.exists(), f"missing sample: {path}"
+
+    doc = ezdwg.read(str(path))
+
+    assert doc.version == "AC1032"
+    assert doc.decode_version == "AC1032"
+    assert doc.decode_path == str(path)
+
+    rows = ezdwg.raw.list_object_headers_with_type(str(path), limit=20)
+    assert len(rows) == 20
