@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.parametrize(
     ("relative_path", "expected_version"),
     [
+        ("test_dwg/line_R14.dwg", "AC1014"),
         ("test_dwg/line_2000.dwg", "AC1015"),
         ("test_dwg/line_2004.dwg", "AC1018"),
         ("test_dwg/line_2007.dwg", "AC1021"),
@@ -30,6 +31,7 @@ def test_detect_version_from_samples(relative_path: str, expected_version: str) 
 @pytest.mark.parametrize(
     ("relative_path", "expected_version"),
     [
+        ("test_dwg/line_R14.dwg", "AC1014"),
         ("test_dwg/line_2000.dwg", "AC1015"),
         ("test_dwg/line_2004.dwg", "AC1018"),
         ("test_dwg/line_2007.dwg", "AC1021"),
@@ -48,7 +50,7 @@ def test_read_native_versions(relative_path: str, expected_version: str) -> None
     assert doc.decode_path == str(path)
 
 
-@pytest.mark.parametrize("source_version", ["AC1021", "AC1024", "AC1027", "AC1032"])
+@pytest.mark.parametrize("source_version", ["AC1014", "AC1021", "AC1024", "AC1027", "AC1032"])
 def test_read_native_versions_do_not_require_conversion(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -116,6 +118,20 @@ def test_read_ac1032_sample_smoke() -> None:
 
     assert doc.version == "AC1032"
     assert doc.decode_version == "AC1032"
+    assert doc.decode_path == str(path)
+
+    rows = ezdwg.raw.list_object_headers_with_type(str(path), limit=20)
+    assert len(rows) == 20
+
+
+def test_read_ac1014_sample_smoke() -> None:
+    path = ROOT / "test_dwg/line_R14.dwg"
+    assert path.exists(), f"missing sample: {path}"
+
+    doc = ezdwg.read(str(path))
+
+    assert doc.version == "AC1014"
+    assert doc.decode_version == "AC1014"
     assert doc.decode_path == str(path)
 
     rows = ezdwg.raw.list_object_headers_with_type(str(path), limit=20)

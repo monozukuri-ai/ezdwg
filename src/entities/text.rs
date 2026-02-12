@@ -2,9 +2,10 @@ use crate::bit::{BitReader, Endian};
 use crate::core::error::ErrorKind;
 use crate::core::result::Result;
 use crate::entities::common::{
-    parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r2007,
-    parse_common_entity_header_r2010, parse_common_entity_header_r2013,
-    parse_common_entity_layer_handle, read_handle_reference, CommonEntityHeader,
+    parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r14,
+    parse_common_entity_header_r2007, parse_common_entity_header_r2010,
+    parse_common_entity_header_r2013, parse_common_entity_layer_handle, read_handle_reference,
+    CommonEntityHeader,
 };
 
 #[derive(Debug, Clone)]
@@ -31,6 +32,14 @@ pub struct TextEntity {
 pub fn decode_text(reader: &mut BitReader<'_>) -> Result<TextEntity> {
     let header = parse_common_entity_header(reader)?;
     decode_text_with_header(reader, header, false)
+}
+
+pub fn decode_text_r14(reader: &mut BitReader<'_>, object_handle: u64) -> Result<TextEntity> {
+    let mut header = parse_common_entity_header_r14(reader)?;
+    if header.handle == 0 {
+        header.handle = object_handle;
+    }
+    decode_text_with_header_r14(reader, header, true)
 }
 
 pub fn decode_text_r2007(reader: &mut BitReader<'_>) -> Result<TextEntity> {
@@ -125,27 +134,8 @@ fn decode_text_with_header(
         0
     };
 
-    // Handles are stored in the handle stream at obj_size bit offset.
-    reader.set_bit_pos(header.obj_size);
-    let handles_pos = reader.get_pos();
-    let (layer_handle, style_handle) = match parse_common_entity_handles(reader, &header) {
-        Ok(common_handles) => (
-            common_handles.layer,
-            read_handle_reference(reader, header.handle).ok(),
-        ),
-        Err(err)
-            if allow_handle_decode_failure
-                && matches!(
-                    err.kind,
-                    ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
-                ) =>
-        {
-            reader.set_pos(handles_pos.0, handles_pos.1);
-            let layer = parse_common_entity_layer_handle(reader, &header).unwrap_or(0);
-            (layer, None)
-        }
-        Err(err) => return Err(err),
-    };
+    let (layer_handle, style_handle) =
+        decode_text_handles(reader, &header, allow_handle_decode_failure)?;
 
     Ok(TextEntity {
         handle: header.handle,
@@ -166,4 +156,77 @@ fn decode_text_with_header(
         vertical_alignment,
         style_handle,
     })
+}
+
+fn decode_text_with_header_r14(
+    reader: &mut BitReader<'_>,
+    header: CommonEntityHeader,
+    allow_handle_decode_failure: bool,
+) -> Result<TextEntity> {
+    let elevation = reader.read_bd()?;
+    let insertion_x = reader.read_rd(Endian::Little)?;
+    let insertion_y = reader.read_rd(Endian::Little)?;
+    let align_x = reader.read_rd(Endian::Little)?;
+    let align_y = reader.read_rd(Endian::Little)?;
+    let extrusion = reader.read_3bd()?;
+    let thickness = reader.read_bd()?;
+    let oblique_angle = reader.read_bd()?;
+    let rotation = reader.read_bd()?;
+    let height = reader.read_bd()?;
+    let width_factor = reader.read_bd()?;
+    let text = reader.read_tv()?;
+    let generation = reader.read_bs()?;
+    let horizontal_alignment = reader.read_bs()?;
+    let vertical_alignment = reader.read_bs()?;
+
+    let (layer_handle, style_handle) =
+        decode_text_handles(reader, &header, allow_handle_decode_failure)?;
+
+    Ok(TextEntity {
+        handle: header.handle,
+        color_index: header.color.index,
+        true_color: header.color.true_color,
+        layer_handle,
+        text,
+        insertion: (insertion_x, insertion_y, elevation),
+        alignment: Some((align_x, align_y, elevation)),
+        extrusion,
+        thickness,
+        oblique_angle,
+        height,
+        rotation,
+        width_factor,
+        generation,
+        horizontal_alignment,
+        vertical_alignment,
+        style_handle,
+    })
+}
+
+fn decode_text_handles(
+    reader: &mut BitReader<'_>,
+    header: &CommonEntityHeader,
+    allow_handle_decode_failure: bool,
+) -> Result<(u64, Option<u64>)> {
+    // Handles are stored in the handle stream at obj_size bit offset.
+    reader.set_bit_pos(header.obj_size);
+    let handles_pos = reader.get_pos();
+    match parse_common_entity_handles(reader, header) {
+        Ok(common_handles) => Ok((
+            common_handles.layer,
+            read_handle_reference(reader, header.handle).ok(),
+        )),
+        Err(err)
+            if allow_handle_decode_failure
+                && matches!(
+                    err.kind,
+                    ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
+                ) =>
+        {
+            reader.set_pos(handles_pos.0, handles_pos.1);
+            let layer = parse_common_entity_layer_handle(reader, header).unwrap_or(0);
+            Ok((layer, None))
+        }
+        Err(err) => Err(err),
+    }
 }

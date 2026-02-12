@@ -3,6 +3,7 @@ use crate::core::result::Result;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DwgVersion {
+    R14,
     R2000,
     R2004,
     R2007,
@@ -15,6 +16,7 @@ pub enum DwgVersion {
 impl DwgVersion {
     pub fn as_str(&self) -> &str {
         match self {
+            Self::R14 => "AC1014",
             Self::R2000 => "AC1015",
             Self::R2004 => "AC1018",
             Self::R2007 => "AC1021",
@@ -35,6 +37,7 @@ pub fn detect_version(bytes: &[u8]) -> Result<DwgVersion> {
     }
     let tag = std::str::from_utf8(&bytes[..6]).unwrap_or("");
     let version = match tag {
+        "AC1014" => DwgVersion::R14,
         "AC1015" => DwgVersion::R2000,
         "AC1018" => DwgVersion::R2004,
         "AC1021" => DwgVersion::R2007,
@@ -52,6 +55,7 @@ mod tests {
 
     #[test]
     fn detects_known_versions() {
+        assert_eq!(detect_version(b"AC1014xxxx").unwrap(), DwgVersion::R14);
         assert_eq!(detect_version(b"AC1015xxxx").unwrap(), DwgVersion::R2000);
         assert_eq!(detect_version(b"AC1018xxxx").unwrap(), DwgVersion::R2004);
         assert_eq!(detect_version(b"AC1021xxxx").unwrap(), DwgVersion::R2007);

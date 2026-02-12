@@ -10,7 +10,7 @@ from typing import Iterable, Iterator
 from . import raw
 from .entity import Entity
 
-SUPPORTED_VERSIONS = {"AC1015", "AC1018", "AC1021", "AC1024", "AC1027", "AC1032"}
+SUPPORTED_VERSIONS = {"AC1014", "AC1015", "AC1018", "AC1021", "AC1024", "AC1027", "AC1032"}
 SUPPORTED_ENTITY_TYPES = (
     "LINE",
     "LWPOLYLINE",

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Sequence
 
 from .convert import to_dxf
 from .document import SUPPORTED_ENTITY_TYPES, read
+from . import raw
 
 
 def _package_version() -> str:
@@ -82,6 +83,27 @@ def _run_inspect(path: str) -> int:
         count = counts.get(dxftype, 0)
         if count > 0:
             print(f"{dxftype}: {count}")
+
+    try:
+        header_rows = raw.list_object_headers_with_type(str(file_path))
+    except Exception:
+        header_rows = []
+    if header_rows:
+        raw_entity_counts: Counter[str] = Counter(
+            type_name
+            for _, _, _, _, type_name, type_class in header_rows
+            if type_class == "E"
+        )
+        if raw_entity_counts:
+            print(f"raw_entity_headers: {sum(raw_entity_counts.values())}")
+            for dxftype in SUPPORTED_ENTITY_TYPES:
+                gap = raw_entity_counts.get(dxftype, 0) - counts.get(dxftype, 0)
+                if gap > 0:
+                    print(f"decode_gap[{dxftype}]: {gap}")
+            for dxftype, count in sorted(raw_entity_counts.items()):
+                if dxftype in SUPPORTED_ENTITY_TYPES:
+                    continue
+                print(f"raw_only[{dxftype}]: {count}")
 
     return 0
 

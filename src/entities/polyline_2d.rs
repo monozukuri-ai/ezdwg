@@ -1,7 +1,8 @@
 use crate::bit::BitReader;
 use crate::core::result::Result;
 use crate::entities::common::{
-    parse_common_entity_handles, parse_common_entity_header, read_handle_reference,
+    parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r14,
+    read_handle_reference, CommonEntityHeader,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -78,7 +79,24 @@ pub struct Polyline2dEntity {
 
 pub fn decode_polyline_2d(reader: &mut BitReader<'_>) -> Result<Polyline2dEntity> {
     let header = parse_common_entity_header(reader)?;
+    decode_polyline_2d_with_header(reader, header)
+}
 
+pub fn decode_polyline_2d_r14(
+    reader: &mut BitReader<'_>,
+    object_handle: u64,
+) -> Result<Polyline2dEntity> {
+    let mut header = parse_common_entity_header_r14(reader)?;
+    if header.handle == 0 {
+        header.handle = object_handle;
+    }
+    decode_polyline_2d_with_header(reader, header)
+}
+
+fn decode_polyline_2d_with_header(
+    reader: &mut BitReader<'_>,
+    header: CommonEntityHeader,
+) -> Result<Polyline2dEntity> {
     let flags = reader.read_bs()?;
     let curve_type = reader.read_bs()?;
     let flags_info = PolylineFlagsInfo::from_flags(flags);
@@ -89,6 +107,8 @@ pub fn decode_polyline_2d(reader: &mut BitReader<'_>) -> Result<Polyline2dEntity
     let elevation = reader.read_bd()?;
     let _extrusion = reader.read_be()?;
     let owned_obj_count = reader.read_bl()? as usize;
+    // Handles are stored in the handle stream at obj_size bit offset.
+    reader.set_bit_pos(header.obj_size);
     let _common_handles = parse_common_entity_handles(reader, &header)?;
 
     let mut owned_handles = Vec::with_capacity(owned_obj_count);

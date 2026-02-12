@@ -8,6 +8,7 @@ import ezdwg
 import ezdwg.cli as cli_module
 import ezdwg.convert as convert_module
 from tests._dxf_helpers import dxf_entities_of_type, group_float
+from tests._dxf_helpers import dxf_lwpolyline_points
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,6 +67,61 @@ def test_cli_convert_writes_lwpolyline(tmp_path: Path, capsys) -> None:
     assert code == 0
     assert "written_entities: 1" in captured.out
     assert len(dxf_entities_of_type(output, "LWPOLYLINE")) == 1
+
+
+def test_to_dxf_writes_r14_lwpolyline_vertices(tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    output = tmp_path / "polyline_r14_out.dxf"
+    result = ezdwg.to_dxf(
+        str(SAMPLES / "polyline2d_line_R14.dwg"),
+        str(output),
+        types="LWPOLYLINE",
+        dxf_version="R2010",
+    )
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+    entities = dxf_entities_of_type(output, "LWPOLYLINE")
+    assert len(entities) == 1
+
+    points = dxf_lwpolyline_points(entities[0])
+    assert len(points) == 3
+    assert abs(points[0][0] - 50.0) < 1.0e-6
+    assert abs(points[0][1] - 50.0) < 1.0e-6
+    assert abs(points[1][0] - 100.0) < 1.0e-6
+    assert abs(points[1][1] - 100.0) < 1.0e-6
+    assert abs(points[2][0] - 150.0) < 1.0e-6
+    assert abs(points[2][1] - 50.0) < 1.0e-6
+
+
+def test_to_dxf_writes_r14_ellipse(tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    output = tmp_path / "ellipse_r14_out.dxf"
+    result = ezdwg.to_dxf(
+        str(SAMPLES / "ellipse_R14.dwg"),
+        str(output),
+        types="ELLIPSE",
+        dxf_version="R2010",
+    )
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+    entities = dxf_entities_of_type(output, "ELLIPSE")
+    assert len(entities) == 1
+    ellipse = entities[0]
+    assert abs(group_float(ellipse, "10") - 100.0) < 1.0e-6
+    assert abs(group_float(ellipse, "20") - 100.0) < 1.0e-6
+    assert abs(group_float(ellipse, "30")) < 1.0e-6
+    assert abs(group_float(ellipse, "11") + 50.0) < 1.0e-6
+    assert abs(group_float(ellipse, "21") + 50.0) < 1.0e-6
+    assert abs(group_float(ellipse, "31")) < 1.0e-6
+    assert abs(group_float(ellipse, "40") - 0.4242640687119286) < 1.0e-9
+    assert abs(group_float(ellipse, "41")) < 1.0e-6
+    assert abs(group_float(ellipse, "42") - (2.0 * 3.141592653589793)) < 1.0e-6
 
 
 def test_to_dxf_strict_raises_on_skipped_entity(monkeypatch, tmp_path: Path) -> None:

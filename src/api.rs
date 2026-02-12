@@ -1364,7 +1364,18 @@ pub fn decode_point_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<P
         let entity =
             match decode_point_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
                 Ok(entity) => entity,
-                Err(err) if best_effort => continue,
+                Err(err) if best_effort => {
+                    if std::env::var("EZDWG_DEBUG_POINT_DECODE")
+                        .ok()
+                        .is_some_and(|value| value != "0")
+                    {
+                        eprintln!(
+                            "[point-decode] handle={} type=0x{:X} offset={} error={}",
+                            obj.handle.0, header.type_code, obj.offset, err
+                        );
+                    }
+                    continue;
+                }
                 Err(err) => return Err(to_py_err(err)),
             };
         result.push((
@@ -2309,49 +2320,64 @@ pub fn decode_dimension_entities(
         }
 
         let maybe_row = if matches_type_name(header.type_code, 0x15, "DIM_LINEAR", &dynamic_types) {
-            let entity =
-                match decode_dim_linear_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
-                {
-                    Ok(entity) => entity,
-                    Err(err) if best_effort => continue,
-                    Err(err) => return Err(to_py_err(err)),
-                };
+            let entity = match decode_dim_linear_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
             Some(("LINEAR", dim_entity_row_from_linear_like(&entity)))
         } else if matches_type_name(header.type_code, 0x14, "DIM_ORDINATE", &dynamic_types) {
-            let entity =
-                match decode_dim_linear_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
-                {
-                    Ok(entity) => entity,
-                    Err(err) if best_effort => continue,
-                    Err(err) => return Err(to_py_err(err)),
-                };
+            let entity = match decode_dim_linear_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
             Some(("ORDINATE", dim_entity_row_from_linear_like(&entity)))
         } else if matches_type_name(header.type_code, 0x16, "DIM_ALIGNED", &dynamic_types) {
-            let entity =
-                match decode_dim_linear_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
-                {
-                    Ok(entity) => entity,
-                    Err(err) if best_effort => continue,
-                    Err(err) => return Err(to_py_err(err)),
-                };
+            let entity = match decode_dim_linear_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
             Some(("ALIGNED", dim_entity_row_from_linear_like(&entity)))
         } else if matches_type_name(header.type_code, 0x17, "DIM_ANG3PT", &dynamic_types) {
-            let entity =
-                match decode_dim_linear_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
-                {
-                    Ok(entity) => entity,
-                    Err(err) if best_effort => continue,
-                    Err(err) => return Err(to_py_err(err)),
-                };
+            let entity = match decode_dim_linear_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
             Some(("ANG3PT", dim_entity_row_from_linear_like(&entity)))
         } else if matches_type_name(header.type_code, 0x18, "DIM_ANG2LN", &dynamic_types) {
-            let entity =
-                match decode_dim_linear_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
-                {
-                    Ok(entity) => entity,
-                    Err(err) if best_effort => continue,
-                    Err(err) => return Err(to_py_err(err)),
-                };
+            let entity = match decode_dim_linear_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
             Some(("ANG2LN", dim_entity_row_from_linear_like(&entity)))
         } else if matches_type_name(header.type_code, 0x1A, "DIM_DIAMETER", &dynamic_types) {
             let entity = match decode_dim_diameter_for_version(
@@ -2366,13 +2392,16 @@ pub fn decode_dimension_entities(
             };
             Some(("DIAMETER", dim_entity_row_from_linear_like(&entity)))
         } else if matches_type_name(header.type_code, 0x19, "DIM_RADIUS", &dynamic_types) {
-            let entity =
-                match decode_dim_radius_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
-                {
-                    Ok(entity) => entity,
-                    Err(err) if best_effort => continue,
-                    Err(err) => return Err(to_py_err(err)),
-                };
+            let entity = match decode_dim_radius_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
             Some(("RADIUS", dim_entity_row_from_linear_like(&entity)))
         } else {
             None
@@ -2581,13 +2610,46 @@ pub fn decode_polyline_2d_entities(
         let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
         let header =
             parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
-        if !matches_type_name(header.type_code, 0x0F, "POLYLINE_2D", &dynamic_types) {
+        let declared_match =
+            matches_type_name(header.type_code, 0x0F, "POLYLINE_2D", &dynamic_types);
+        if !declared_match
+            && !is_r14_polyline_2d_speculative_type(decoder.version(), header.type_code)
+        {
             continue;
         }
         let mut reader = record.bit_reader();
         let _type_code =
             skip_object_type_prefix(&mut reader, decoder.version()).map_err(to_py_err)?;
-        let entity = entities::decode_polyline_2d(&mut reader).map_err(to_py_err)?;
+        let entity = if declared_match {
+            decode_polyline_2d_for_version(&mut reader, decoder.version(), obj.handle.0)
+                .map_err(to_py_err)?
+        } else {
+            match decode_polyline_2d_for_version(&mut reader, decoder.version(), obj.handle.0) {
+                Ok(entity) => entity,
+                Err(_) => continue,
+            }
+        };
+        if !declared_match
+            && std::env::var("EZDWG_DEBUG_R14_POLY2D")
+                .ok()
+                .is_some_and(|value| value != "0")
+        {
+            eprintln!(
+                "[r14-poly2d] handle={} type=0x{:X} flags={} curve_type={} owned={} width=({:.6},{:.6}) thickness={:.6} elevation={:.6}",
+                obj.handle.0,
+                header.type_code,
+                entity.flags,
+                entity.curve_type,
+                entity.owned_handles.len(),
+                entity.width_start,
+                entity.width_end,
+                entity.thickness,
+                entity.elevation,
+            );
+        }
+        if !declared_match && !is_plausible_polyline_2d_entity(&entity) {
+            continue;
+        }
         result.push((
             entity.handle,
             entity.flags,
@@ -2620,13 +2682,46 @@ pub fn decode_polyline_2d_entities_interpreted(
         let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
         let header =
             parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
-        if !matches_type_name(header.type_code, 0x0F, "POLYLINE_2D", &dynamic_types) {
+        let declared_match =
+            matches_type_name(header.type_code, 0x0F, "POLYLINE_2D", &dynamic_types);
+        if !declared_match
+            && !is_r14_polyline_2d_speculative_type(decoder.version(), header.type_code)
+        {
             continue;
         }
         let mut reader = record.bit_reader();
         let _type_code =
             skip_object_type_prefix(&mut reader, decoder.version()).map_err(to_py_err)?;
-        let entity = entities::decode_polyline_2d(&mut reader).map_err(to_py_err)?;
+        let entity = if declared_match {
+            decode_polyline_2d_for_version(&mut reader, decoder.version(), obj.handle.0)
+                .map_err(to_py_err)?
+        } else {
+            match decode_polyline_2d_for_version(&mut reader, decoder.version(), obj.handle.0) {
+                Ok(entity) => entity,
+                Err(_) => continue,
+            }
+        };
+        if !declared_match
+            && std::env::var("EZDWG_DEBUG_R14_POLY2D")
+                .ok()
+                .is_some_and(|value| value != "0")
+        {
+            eprintln!(
+                "[r14-poly2d] handle={} type=0x{:X} flags={} curve_type={} owned={} width=({:.6},{:.6}) thickness={:.6} elevation={:.6}",
+                obj.handle.0,
+                header.type_code,
+                entity.flags,
+                entity.curve_type,
+                entity.owned_handles.len(),
+                entity.width_start,
+                entity.width_end,
+                entity.thickness,
+                entity.elevation,
+            );
+        }
+        if !declared_match && !is_plausible_polyline_2d_entity(&entity) {
+            continue;
+        }
         let info = entity.flags_info;
         let curve_label = entity.curve_type_info.label().to_string();
         result.push((
@@ -2685,7 +2780,18 @@ pub fn decode_lwpolyline_entities(
             obj.handle.0,
         ) {
             Ok(entity) => entity,
-            Err(err) if best_effort => continue,
+            Err(err) if best_effort => {
+                if std::env::var("EZDWG_DEBUG_LWPOLYLINE")
+                    .ok()
+                    .is_some_and(|value| value != "0")
+                {
+                    eprintln!(
+                        "[lwpolyline] skip handle={} type=0x{:X} err={}",
+                        obj.handle.0, header.type_code, err
+                    );
+                }
+                continue;
+            }
             Err(err) => return Err(to_py_err(err)),
         };
         result.push((
@@ -4108,7 +4214,11 @@ fn decode_polyline_2d_vertex_rows(
         let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
         let header =
             parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
-        if !matches_type_name(header.type_code, 0x0F, "POLYLINE_2D", &dynamic_types) {
+        let declared_match =
+            matches_type_name(header.type_code, 0x0F, "POLYLINE_2D", &dynamic_types);
+        if !declared_match
+            && !is_r14_polyline_2d_speculative_type(decoder.version(), header.type_code)
+        {
             i += 1;
             continue;
         }
@@ -4116,7 +4226,40 @@ fn decode_polyline_2d_vertex_rows(
         let mut reader = record.bit_reader();
         let _type_code =
             skip_object_type_prefix(&mut reader, decoder.version()).map_err(to_py_err)?;
-        let poly = entities::decode_polyline_2d(&mut reader).map_err(to_py_err)?;
+        let poly = if declared_match {
+            decode_polyline_2d_for_version(&mut reader, decoder.version(), obj.handle.0)
+                .map_err(to_py_err)?
+        } else {
+            match decode_polyline_2d_for_version(&mut reader, decoder.version(), obj.handle.0) {
+                Ok(entity) => entity,
+                Err(_) => {
+                    i += 1;
+                    continue;
+                }
+            }
+        };
+        if !declared_match
+            && std::env::var("EZDWG_DEBUG_R14_POLY2D")
+                .ok()
+                .is_some_and(|value| value != "0")
+        {
+            eprintln!(
+                "[r14-poly2d] handle={} type=0x{:X} flags={} curve_type={} owned={} width=({:.6},{:.6}) thickness={:.6} elevation={:.6}",
+                obj.handle.0,
+                header.type_code,
+                poly.flags,
+                poly.curve_type,
+                poly.owned_handles.len(),
+                poly.width_start,
+                poly.width_end,
+                poly.thickness,
+                poly.elevation,
+            );
+        }
+        if !declared_match && !is_plausible_polyline_2d_entity(&poly) {
+            i += 1;
+            continue;
+        }
         let (vertices, next_i) =
             collect_polyline_vertices(&decoder, &sorted, &dynamic_types, &vertex_map, &poly, i)?;
         i = next_i;
@@ -4323,7 +4466,11 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 fn is_best_effort_compat_version(decoder: &decoder::Decoder<'_>) -> bool {
     matches!(
         decoder.version(),
-        version::DwgVersion::R2000 | version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
+        version::DwgVersion::R14
+            | version::DwgVersion::R2000
+            | version::DwgVersion::R2010
+            | version::DwgVersion::R2013
+            | version::DwgVersion::R2018
     )
 }
 
@@ -4334,6 +4481,7 @@ fn decode_line_for_version(
     object_handle: u64,
 ) -> crate::core::result::Result<entities::LineEntity> {
     match version {
+        version::DwgVersion::R14 => entities::decode_line_r14(reader, object_handle),
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_line_r2010(reader, object_data_end_bit, object_handle)
@@ -4354,6 +4502,7 @@ fn decode_point_for_version(
     object_handle: u64,
 ) -> crate::core::result::Result<entities::PointEntity> {
     match version {
+        version::DwgVersion::R14 => entities::decode_point_r14(reader, object_handle),
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_point_r2010(reader, object_data_end_bit, object_handle)
@@ -4374,6 +4523,7 @@ fn decode_arc_for_version(
     object_handle: u64,
 ) -> crate::core::result::Result<entities::ArcEntity> {
     match version {
+        version::DwgVersion::R14 => entities::decode_arc_r14(reader, object_handle),
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_arc_r2010(reader, object_data_end_bit, object_handle)
@@ -4394,6 +4544,7 @@ fn decode_circle_for_version(
     object_handle: u64,
 ) -> crate::core::result::Result<entities::CircleEntity> {
     match version {
+        version::DwgVersion::R14 => entities::decode_circle_r14(reader, object_handle),
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_circle_r2010(reader, object_data_end_bit, object_handle)
@@ -4414,6 +4565,7 @@ fn decode_ellipse_for_version(
     object_handle: u64,
 ) -> crate::core::result::Result<entities::EllipseEntity> {
     match version {
+        version::DwgVersion::R14 => entities::decode_ellipse_r14(reader, object_handle),
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_ellipse_r2010(reader, object_data_end_bit, object_handle)
@@ -4454,6 +4606,7 @@ fn decode_text_for_version(
     object_handle: u64,
 ) -> crate::core::result::Result<entities::TextEntity> {
     match version {
+        version::DwgVersion::R14 => entities::decode_text_r14(reader, object_handle),
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_text_r2010(reader, object_data_end_bit, object_handle)
@@ -4676,6 +4829,9 @@ fn decode_lwpolyline_for_version(
     object_handle: u64,
 ) -> crate::core::result::Result<entities::LwPolylineEntity> {
     match version {
+        version::DwgVersion::R14 => {
+            entities::decode_lwpolyline_r14(reader, object_handle, header.type_code)
+        }
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_lwpolyline_r2010(reader, object_data_end_bit, object_handle)
@@ -4687,6 +4843,49 @@ fn decode_lwpolyline_for_version(
         version::DwgVersion::R2007 => entities::decode_lwpolyline_r2007(reader),
         _ => entities::decode_lwpolyline(reader),
     }
+}
+
+fn decode_polyline_2d_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::Polyline2dEntity> {
+    match version {
+        version::DwgVersion::R14 => entities::decode_polyline_2d_r14(reader, object_handle),
+        _ => entities::decode_polyline_2d(reader),
+    }
+}
+
+fn is_r14_polyline_2d_speculative_type(version: &version::DwgVersion, type_code: u16) -> bool {
+    matches!(version, version::DwgVersion::R14) && type_code >= 0x01F4
+}
+
+fn is_plausible_polyline_2d_entity(entity: &entities::Polyline2dEntity) -> bool {
+    if entity.handle == 0 {
+        return false;
+    }
+    if !matches!(entity.curve_type, 0 | 5 | 6 | 8) {
+        return false;
+    }
+    if !entity.width_start.is_finite()
+        || !entity.width_end.is_finite()
+        || !entity.thickness.is_finite()
+        || !entity.elevation.is_finite()
+    {
+        return false;
+    }
+    if entity.width_start.abs() > 1.0e9
+        || entity.width_end.abs() > 1.0e9
+        || entity.thickness.abs() > 1.0e9
+        || entity.elevation.abs() > 1.0e9
+    {
+        return false;
+    }
+    if entity.flags > 0x03FF {
+        return false;
+    }
+    let owned_len = entity.owned_handles.len();
+    owned_len > 0 && owned_len <= 4096
 }
 
 fn decode_polyline_3d_for_version(
@@ -5385,7 +5584,10 @@ fn decode_layer_color_record(
 
     let _num_reactors = reader.read_bl()?;
     let _xdic_missing_flag = reader.read_b()?;
-    if matches!(version, version::DwgVersion::R2013 | version::DwgVersion::R2018) {
+    if matches!(
+        version,
+        version::DwgVersion::R2013 | version::DwgVersion::R2018
+    ) {
         let _has_ds_binary_data = reader.read_b()?;
     }
     // R2010+ stores entry name in string stream. The data stream directly

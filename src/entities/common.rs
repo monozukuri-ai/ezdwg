@@ -23,6 +23,7 @@ pub struct CommonEntityHeader {
     pub has_full_visual_style: bool,
     pub has_face_visual_style: bool,
     pub has_edge_visual_style: bool,
+    pub has_legacy_entity_links: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +39,25 @@ pub struct CommonEntityHandles {
 
 pub fn parse_common_entity_header(reader: &mut BitReader<'_>) -> Result<CommonEntityHeader> {
     parse_common_entity_header_impl(reader, false, false, false, None)
+}
+
+pub fn parse_common_entity_header_r14(reader: &mut BitReader<'_>) -> Result<CommonEntityHeader> {
+    let start = reader.get_pos();
+    match parse_common_entity_header_r14_impl(reader, false) {
+        Ok(header) => Ok(header),
+        Err(err)
+            if matches!(
+                err.kind,
+                crate::core::error::ErrorKind::Format
+                    | crate::core::error::ErrorKind::Decode
+                    | crate::core::error::ErrorKind::Io
+            ) =>
+        {
+            reader.set_pos(start.0, start.1);
+            parse_common_entity_header_r14_impl(reader, true)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 pub fn parse_common_entity_header_r2007(reader: &mut BitReader<'_>) -> Result<CommonEntityHeader> {
@@ -161,7 +181,98 @@ fn parse_common_entity_header_impl(
         has_full_visual_style,
         has_face_visual_style,
         has_edge_visual_style,
+        has_legacy_entity_links: false,
     })
+}
+
+fn parse_common_entity_header_r14_impl(
+    reader: &mut BitReader<'_>,
+    with_ds_binary_flag: bool,
+) -> Result<CommonEntityHeader> {
+    let handle = reader.read_h()?.value;
+    skip_eed(reader)?;
+
+    let graphic_present_flag = reader.read_b()?;
+    if graphic_present_flag == 1 {
+        let graphic_size = reader.read_rl(Endian::Little)? as usize;
+        let _ = reader.read_rcs(graphic_size)?;
+    }
+
+    let obj_size = reader.read_rl(Endian::Little)?;
+    let entity_mode = reader.read_bb()?;
+    let num_of_reactors = reader.read_bl()?;
+    let xdic_missing_flag = reader.read_b()?;
+    let has_ds_binary_data = if with_ds_binary_flag {
+        reader.read_b()? != 0
+    } else {
+        false
+    };
+
+    let is_bylayer_ltype = reader.read_b()? != 0;
+    let no_links = reader.read_b()?;
+    let color = read_common_entity_color_cmc(reader)?;
+    let _ltype_scale = reader.read_bd()?;
+    let _invisibility = reader.read_bs()?;
+    let _line_weight = reader.read_rc()?;
+
+    let ltype_flags = if is_bylayer_ltype { 0 } else { 3 };
+
+    Ok(CommonEntityHeader {
+        obj_size,
+        handle,
+        color,
+        entity_mode,
+        num_of_reactors,
+        xdic_missing_flag,
+        has_ds_binary_data,
+        ltype_flags,
+        plotstyle_flags: 0,
+        material_flags: 0,
+        has_full_visual_style: false,
+        has_face_visual_style: false,
+        has_edge_visual_style: false,
+        has_legacy_entity_links: no_links == 0,
+    })
+}
+
+fn read_common_entity_color_cmc(reader: &mut BitReader<'_>) -> Result<CommonEntityColor> {
+    let color_index = reader.read_bs()?;
+    let color_rgb = reader.read_bl()?;
+    let color_byte = reader.read_rc()?;
+    if (color_byte & 0x01) != 0 {
+        let _color_name = reader.read_tv()?;
+    }
+    if (color_byte & 0x02) != 0 {
+        let _book_name = reader.read_tv()?;
+    }
+
+    let true_color = if color_rgb == 0 || (color_rgb >> 24) == 0 {
+        None
+    } else {
+        let rgb = color_rgb & 0x00FF_FFFF;
+        if rgb == 0 {
+            None
+        } else {
+            Some(rgb)
+        }
+    };
+
+    Ok(CommonEntityColor {
+        index: Some(color_index),
+        true_color,
+    })
+}
+
+fn skip_eed(reader: &mut BitReader<'_>) -> Result<()> {
+    let mut ext_size = reader.read_bs()?;
+    while ext_size > 0 {
+        let _app_handle = reader.read_h()?;
+        for _ in 0..ext_size {
+            let _ = reader.read_rc()?;
+        }
+        ext_size = reader.read_bs()?;
+    }
+    Ok(())
 }
 
 pub fn parse_common_entity_handles(
@@ -184,6 +295,11 @@ pub fn parse_common_entity_handles(
     } else {
         None
     };
+
+    if header.has_legacy_entity_links {
+        let _previous = read_handle_reference(reader, header.handle)?;
+        let _next = read_handle_reference(reader, header.handle)?;
+    }
 
     let layer = read_handle_reference(reader, header.handle)?;
 
@@ -240,6 +356,11 @@ pub fn parse_common_entity_layer_handle(
 
     if header.xdic_missing_flag == 0 {
         let _xdic_obj = read_handle_reference(reader, header.handle)?;
+    }
+
+    if header.has_legacy_entity_links {
+        let _previous = read_handle_reference(reader, header.handle)?;
+        let _next = read_handle_reference(reader, header.handle)?;
     }
 
     read_handle_reference(reader, header.handle)

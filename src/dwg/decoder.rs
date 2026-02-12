@@ -32,7 +32,8 @@ impl<'a> Decoder<'a> {
 
     pub fn ensure_supported(&self) -> Result<()> {
         match self.version {
-            DwgVersion::R2000
+            DwgVersion::R14
+            | DwgVersion::R2000
             | DwgVersion::R2004
             | DwgVersion::R2007
             | DwgVersion::R2010
@@ -47,7 +48,9 @@ impl<'a> Decoder<'a> {
 
     pub fn section_directory(&self) -> Result<SectionDirectory> {
         match self.version {
-            DwgVersion::R2000 => r2000::parse_section_directory(self.bytes, &self.config),
+            DwgVersion::R14 | DwgVersion::R2000 => {
+                r2000::parse_section_directory(self.bytes, &self.config)
+            }
             DwgVersion::R2004 | DwgVersion::R2010 | DwgVersion::R2013 | DwgVersion::R2018 => {
                 r2004::parse_section_directory(self.bytes, &self.config)
             }
@@ -65,7 +68,7 @@ impl<'a> Decoder<'a> {
         index: usize,
     ) -> Result<SectionSlice<'a>> {
         match self.version {
-            DwgVersion::R2000 => {
+            DwgVersion::R14 | DwgVersion::R2000 => {
                 r2000::load_section_by_index(self.bytes, directory, index, &self.config)
             }
             DwgVersion::R2004 | DwgVersion::R2010 | DwgVersion::R2013 | DwgVersion::R2018 => {
@@ -83,7 +86,9 @@ impl<'a> Decoder<'a> {
 
     pub fn build_object_index(&self) -> Result<ObjectIndex> {
         match self.version {
-            DwgVersion::R2000 => r2000::build_object_index(self.bytes, &self.config),
+            DwgVersion::R14 | DwgVersion::R2000 => {
+                r2000::build_object_index(self.bytes, &self.config)
+            }
             DwgVersion::R2004 | DwgVersion::R2010 | DwgVersion::R2013 | DwgVersion::R2018 => {
                 r2004::build_object_index(self.bytes, &self.config)
             }
@@ -97,7 +102,7 @@ impl<'a> Decoder<'a> {
 
     pub fn parse_object_record(&self, offset: u32) -> Result<ObjectRecord<'a>> {
         match self.version {
-            DwgVersion::R2000 => r2000::parse_object_record(self.bytes, offset),
+            DwgVersion::R14 | DwgVersion::R2000 => r2000::parse_object_record(self.bytes, offset),
             DwgVersion::R2004 | DwgVersion::R2010 | DwgVersion::R2013 | DwgVersion::R2018 => {
                 r2004::parse_object_record(self.bytes, offset, &self.config)
             }
@@ -111,7 +116,12 @@ impl<'a> Decoder<'a> {
 
     pub fn dynamic_type_map(&self) -> Result<HashMap<u16, String>> {
         match self.version {
-            DwgVersion::R2000 => Ok(HashMap::new()),
+            DwgVersion::R14 | DwgVersion::R2000 => {
+                match r2000::load_dynamic_type_map(self.bytes, &self.config) {
+                    Ok(map) => Ok(map),
+                    Err(_err) => Ok(HashMap::new()),
+                }
+            }
             DwgVersion::R2004 => r2004::load_dynamic_type_map(self.bytes, &self.config),
             DwgVersion::R2010 => Ok(HashMap::new()),
             DwgVersion::R2007 => r2007::load_dynamic_type_map(self.bytes, &self.config),
