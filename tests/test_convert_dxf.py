@@ -124,6 +124,38 @@ def test_to_dxf_writes_r14_ellipse(tmp_path: Path) -> None:
     assert abs(group_float(ellipse, "42") - (2.0 * 3.141592653589793)) < 1.0e-6
 
 
+def test_to_dxf_writes_insert_as_point_fallback(tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    output = tmp_path / "insert_out.dxf"
+    result = ezdwg.to_dxf(
+        str(SAMPLES / "insert_2004.dwg"),
+        str(output),
+        types="INSERT",
+        dxf_version="R2010",
+    )
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+    inserts = dxf_entities_of_type(output, "INSERT")
+    assert len(inserts) == 1
+    assert len(dxf_entities_of_type(output, "POINT")) == 0
+    assert abs(group_float(inserts[0], "10") - 100.0) < 1.0e-6
+    assert abs(group_float(inserts[0], "20") - 50.0) < 1.0e-6
+    assert abs(group_float(inserts[0], "30")) < 1.0e-6
+    assert abs(group_float(inserts[0], "41") - 2.0) < 1.0e-6
+    assert abs(group_float(inserts[0], "42") - 1.5) < 1.0e-6
+    assert abs(group_float(inserts[0], "50") - 15.0) < 1.0e-6
+
+
+def test_read_insert_exposes_block_name() -> None:
+    doc = ezdwg.read(str(SAMPLES / "insert_2004.dwg"))
+    entities = list(doc.modelspace().query("INSERT"))
+    assert len(entities) == 1
+    assert entities[0].dxf.get("name") == "BLK1"
+
+
 def test_to_dxf_strict_raises_on_skipped_entity(monkeypatch, tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 

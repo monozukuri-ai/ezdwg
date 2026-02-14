@@ -120,3 +120,37 @@ def test_query_minsert_maps_array_parameters(monkeypatch) -> None:
     assert dxf["row_count"] == 5
     assert dxf["column_spacing"] == 6.5
     assert dxf["row_spacing"] == 7.5
+
+
+def test_query_insert_maps_transform_parameters(monkeypatch) -> None:
+    _patch_empty_color_maps(monkeypatch)
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_insert_entities",
+        lambda _path: [
+            (
+                0x404,
+                100.0,
+                50.0,
+                0.0,
+                2.0,
+                1.5,
+                1.0,
+                math.pi / 6.0,
+                "BLOCK_A",
+            )
+        ],
+    )
+
+    doc = document_module.Document(path="dummy_insert.dwg", version="AC1018")
+    entities = list(doc.modelspace().query("INSERT"))
+
+    assert len(entities) == 1
+    dxf = entities[0].dxf
+    assert entities[0].dxftype == "INSERT"
+    assert dxf["insert"] == (100.0, 50.0, 0.0)
+    assert dxf["xscale"] == 2.0
+    assert dxf["yscale"] == 1.5
+    assert dxf["zscale"] == 1.0
+    assert abs(dxf["rotation"] - 30.0) < 1.0e-9
+    assert dxf["name"] == "BLOCK_A"

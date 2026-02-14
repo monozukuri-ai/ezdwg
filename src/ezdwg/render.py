@@ -231,6 +231,8 @@ def plot_layout(
                 closed=bool(entity.dxf.get("closed", False)),
                 arc_segments=arc_segments,
             )
+        elif dxftype == "INSERT":
+            _draw_point(ax, entity.dxf.get("insert", (0.0, 0.0, 0.0)), line_width, color=color)
         elif dxftype == "MINSERT":
             _draw_point(ax, entity.dxf.get("insert", (0.0, 0.0, 0.0)), line_width, color=color)
         elif dxftype == "DIMENSION":

@@ -65,7 +65,9 @@ pub use hatch::{
     decode_hatch, decode_hatch_r2004, decode_hatch_r2007, decode_hatch_r2010, decode_hatch_r2013,
     HatchEntity, HatchPath,
 };
-pub use insert::{decode_insert, InsertEntity};
+pub use insert::{
+    decode_insert, decode_insert_r2007, decode_insert_r2010, decode_insert_r2013, InsertEntity,
+};
 pub use leader::{
     decode_leader, decode_leader_r2007, decode_leader_r2010, decode_leader_r2013, LeaderEntity,
 };

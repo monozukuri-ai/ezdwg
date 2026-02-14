@@ -281,6 +281,24 @@ def _write_entity_to_modelspace_unsafe(modelspace: Any, entity: Entity) -> bool:
         modelspace.add_point(_point3(dxf.get("insert")), dxfattribs=dxfattribs)
         return True
 
+    if dxftype == "INSERT":
+        name = dxf.get("name")
+        if isinstance(name, str) and name:
+            insert = _point3(dxf.get("insert"))
+            try:
+                ref = modelspace.add_blockref(name, insert, dxfattribs=dxfattribs)
+                ref.dxf.xscale = float(dxf.get("xscale", 1.0))
+                ref.dxf.yscale = float(dxf.get("yscale", 1.0))
+                ref.dxf.zscale = float(dxf.get("zscale", 1.0))
+                ref.dxf.rotation = float(dxf.get("rotation", 0.0))
+                return True
+            except Exception:
+                # Block definitions are not exported yet. Keep insert location visible.
+                pass
+        # Block name is absent or unresolved block definition is unavailable.
+        modelspace.add_point(_point3(dxf.get("insert")), dxfattribs=dxfattribs)
+        return True
+
     if dxftype == "DIMENSION":
         return _write_dimension_native(modelspace, dxf, dxfattribs)
 

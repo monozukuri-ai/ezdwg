@@ -229,6 +229,23 @@ def test_plot_layout_minsert_uses_point_drawer(monkeypatch) -> None:
     assert captured == [(3.0, 4.0, 0.0)]
 
 
+def test_plot_layout_insert_uses_point_drawer(monkeypatch) -> None:
+    captured: list[tuple[float, float, float]] = []
+    monkeypatch.setattr(render_module, "_require_matplotlib", lambda: object())
+    monkeypatch.setattr(
+        render_module,
+        "_draw_point",
+        lambda _ax, location, _line_width, color=None: captured.append(location),
+    )
+
+    layout = _FakeLayout([SimpleNamespace(dxftype="INSERT", dxf={"insert": (5.0, 6.0, 0.0)})])
+    ax = _FakeAx()
+
+    render_module.plot_layout(layout, ax=ax, show=False, auto_fit=False, equal=False)
+
+    assert captured == [(5.0, 6.0, 0.0)]
+
+
 def test_plot_layout_spline_uses_polyline_drawer(monkeypatch) -> None:
     captured: list[tuple[list, bool]] = []
     monkeypatch.setattr(render_module, "_require_matplotlib", lambda: object())

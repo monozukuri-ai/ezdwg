@@ -34,6 +34,7 @@ SUPPORTED_ENTITY_TYPES = (
     "HATCH",
     "TOLERANCE",
     "MLINE",
+    "INSERT",
     "MINSERT",
     "DIMENSION",
 )
@@ -907,6 +908,36 @@ class Layout:
                 )
             return
 
+        if dxftype == "INSERT":
+            for row in raw.decode_insert_entities(decode_path):
+                if len(row) == 8:
+                    handle, px, py, pz, sx, sy, sz, rotation = row
+                    name = None
+                else:
+                    handle, px, py, pz, sx, sy, sz, rotation, name = row
+                dxf = {
+                    "insert": (px, py, pz),
+                    "xscale": sx,
+                    "yscale": sy,
+                    "zscale": sz,
+                    "rotation": math.degrees(rotation),
+                }
+                if isinstance(name, str) and name:
+                    dxf["name"] = name
+                yield Entity(
+                    dxftype="INSERT",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        dxf,
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="INSERT",
+                    ),
+                )
+            return
+
         if dxftype == "DIMENSION":
             dimension_rows: list[tuple[str, tuple]] = []
             used_bulk_decoder = False
@@ -1004,7 +1035,7 @@ class Layout:
 
         raise ValueError(
             f"unsupported entity type: {dxftype}. "
-            "Supported types: LINE, LWPOLYLINE, POLYLINE_3D, POLYLINE_MESH, POLYLINE_PFACE, 3DFACE, SOLID, TRACE, SHAPE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, TOLERANCE, MLINE, MINSERT, DIMENSION"
+            "Supported types: LINE, LWPOLYLINE, POLYLINE_3D, POLYLINE_MESH, POLYLINE_PFACE, 3DFACE, SOLID, TRACE, SHAPE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, TOLERANCE, MLINE, INSERT, MINSERT, DIMENSION"
         )
 
 
