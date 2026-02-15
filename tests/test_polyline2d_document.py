@@ -8,6 +8,7 @@ def _patch_empty_color_maps(monkeypatch) -> None:
     monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
     document_module._entity_style_map.cache_clear()
     document_module._layer_color_map.cache_clear()
+    document_module._polyline_sequence_relationships.cache_clear()
 
 
 def test_query_polyline_2d_maps_vertex_data(monkeypatch) -> None:
@@ -28,8 +29,13 @@ def test_query_polyline_2d_maps_vertex_data(monkeypatch) -> None:
             )
         ],
     )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_polyline_sequence_members",
+        lambda _path: [(0x2D01, "POLYLINE_2D", [0x3101, 0x3102, 0x3103], [], 0x31FF)],
+    )
 
-    doc = document_module.Document(path="dummy_polyline2d.dwg", version="AC1018")
+    doc = document_module.Document(path="dummy_polyline2d_doc.dwg", version="AC1018")
     entities = list(doc.modelspace().query("POLYLINE_2D"))
 
     assert len(entities) == 1
@@ -47,6 +53,8 @@ def test_query_polyline_2d_maps_vertex_data(monkeypatch) -> None:
     assert entity.dxf["bulges"] == [0.0, 0.5, 0.0]
     assert entity.dxf["widths"] == [(0.1, 0.2), (0.2, 0.3), (0.3, 0.4)]
     assert entity.dxf["vertex_flags"] == [0, 0, 0]
+    assert entity.dxf["vertex_handles"] == [0x3101, 0x3102, 0x3103]
+    assert entity.dxf["seqend_handle"] == 0x31FF
 
 
 def test_query_polyline_2d_maps_interpreted_flags_and_interpolated_points(monkeypatch) -> None:

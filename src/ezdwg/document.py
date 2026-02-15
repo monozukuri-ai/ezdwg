@@ -15,9 +15,15 @@ SUPPORTED_ENTITY_TYPES = (
     "LINE",
     "LWPOLYLINE",
     "POLYLINE_2D",
+    "VERTEX_2D",
     "POLYLINE_3D",
+    "VERTEX_3D",
     "POLYLINE_MESH",
+    "VERTEX_MESH",
     "POLYLINE_PFACE",
+    "VERTEX_PFACE",
+    "VERTEX_PFACE_FACE",
+    "SEQEND",
     "3DFACE",
     "SOLID",
     "TRACE",
@@ -35,6 +41,8 @@ SUPPORTED_ENTITY_TYPES = (
     "HATCH",
     "TOLERANCE",
     "MLINE",
+    "BLOCK",
+    "ENDBLK",
     "INSERT",
     "MINSERT",
     "DIMENSION",
@@ -51,6 +59,16 @@ TYPE_ALIASES = {
 }
 
 _BULK_PRIMITIVE_TYPES = {"LINE", "ARC", "CIRCLE"}
+_EXPLICIT_ONLY_ENTITY_TYPES = {
+    "BLOCK",
+    "ENDBLK",
+    "SEQEND",
+    "VERTEX_2D",
+    "VERTEX_3D",
+    "VERTEX_MESH",
+    "VERTEX_PFACE",
+    "VERTEX_PFACE_FACE",
+}
 _POLYLINE_2D_INTERPOLATION_SEGMENTS = 8
 _POLYLINE_2D_SPLINE_CURVE_TYPES = {"QuadraticBSpline", "CubicBSpline", "Bezier"}
 
@@ -239,6 +257,7 @@ class Layout:
             interpolated_points_map = _polyline_2d_interpolated_points_map(
                 decode_path, interpreted_map
             )
+            polyline_sequence_map, _, _ = _polyline_sequence_relationships(decode_path)
             for handle, flags, vertices in raw.decode_polyline_2d_with_vertex_data(decode_path):
                 points = []
                 bulges = []
@@ -316,6 +335,7 @@ class Layout:
                 )
                 interpolated_points = list(interpolated_points_map.get(int(handle), []))
                 interpolation_applied = bool(interpolated_points)
+                sequence_info = polyline_sequence_map.get(int(handle), {})
 
                 yield Entity(
                     dxftype="POLYLINE_2D",
@@ -342,6 +362,8 @@ class Layout:
                             "should_interpolate": should_interpolate,
                             "interpolation_applied": interpolation_applied,
                             "interpolated_points": interpolated_points,
+                            "vertex_handles": list(sequence_info.get("vertex_handles", [])),
+                            "seqend_handle": sequence_info.get("seqend_handle"),
                         },
                         entity_style_map,
                         layer_color_map,
@@ -351,10 +373,49 @@ class Layout:
                 )
             return
 
+        if dxftype == "VERTEX_2D":
+            _, vertex_owner_map, _ = _polyline_sequence_relationships(decode_path)
+            for (
+                handle,
+                flags,
+                x,
+                y,
+                z,
+                start_width,
+                end_width,
+                bulge,
+                tangent_dir,
+            ) in raw.decode_vertex_2d_entities(decode_path):
+                owner_handle, owner_type = vertex_owner_map.get(int(handle), (None, None))
+                yield Entity(
+                    dxftype="VERTEX_2D",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "position": (x, y, z),
+                            "flags": int(flags),
+                            "start_width": float(start_width),
+                            "end_width": float(end_width),
+                            "bulge": float(bulge),
+                            "tangent_dir": float(tangent_dir),
+                            "owner_handle": owner_handle,
+                            "owner_type": owner_type,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="VERTEX_2D",
+                    ),
+                )
+            return
+
         if dxftype == "POLYLINE_3D":
+            polyline_sequence_map, _, _ = _polyline_sequence_relationships(decode_path)
             for handle, flags_70_bits, closed, points in raw.decode_polyline_3d_with_vertices(
                 decode_path
             ):
+                sequence_info = polyline_sequence_map.get(int(handle), {})
                 yield Entity(
                     dxftype="POLYLINE_3D",
                     handle=handle,
@@ -364,6 +425,8 @@ class Layout:
                             "points": list(points),
                             "flags": int(flags_70_bits),
                             "closed": bool(closed),
+                            "vertex_handles": list(sequence_info.get("vertex_handles", [])),
+                            "seqend_handle": sequence_info.get("seqend_handle"),
                         },
                         entity_style_map,
                         layer_color_map,
@@ -373,7 +436,31 @@ class Layout:
                 )
             return
 
+        if dxftype == "VERTEX_3D":
+            _, vertex_owner_map, _ = _polyline_sequence_relationships(decode_path)
+            for handle, flags, x, y, z in raw.decode_vertex_3d_entities(decode_path):
+                owner_handle, owner_type = vertex_owner_map.get(int(handle), (None, None))
+                yield Entity(
+                    dxftype="VERTEX_3D",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "position": (x, y, z),
+                            "flags": int(flags),
+                            "owner_handle": owner_handle,
+                            "owner_type": owner_type,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="VERTEX_3D",
+                    ),
+                )
+            return
+
         if dxftype == "POLYLINE_MESH":
+            polyline_sequence_map, _, _ = _polyline_sequence_relationships(decode_path)
             for (
                 handle,
                 flags,
@@ -382,6 +469,7 @@ class Layout:
                 closed,
                 points,
             ) in raw.decode_polyline_mesh_with_vertices(decode_path):
+                sequence_info = polyline_sequence_map.get(int(handle), {})
                 yield Entity(
                     dxftype="POLYLINE_MESH",
                     handle=handle,
@@ -393,6 +481,8 @@ class Layout:
                             "m_vertex_count": int(m_vertex_count),
                             "n_vertex_count": int(n_vertex_count),
                             "closed": bool(closed),
+                            "vertex_handles": list(sequence_info.get("vertex_handles", [])),
+                            "seqend_handle": sequence_info.get("seqend_handle"),
                         },
                         entity_style_map,
                         layer_color_map,
@@ -402,7 +492,31 @@ class Layout:
                 )
             return
 
+        if dxftype == "VERTEX_MESH":
+            _, vertex_owner_map, _ = _polyline_sequence_relationships(decode_path)
+            for handle, flags, x, y, z in raw.decode_vertex_mesh_entities(decode_path):
+                owner_handle, owner_type = vertex_owner_map.get(int(handle), (None, None))
+                yield Entity(
+                    dxftype="VERTEX_MESH",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "position": (x, y, z),
+                            "flags": int(flags),
+                            "owner_handle": owner_handle,
+                            "owner_type": owner_type,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="VERTEX_MESH",
+                    ),
+                )
+            return
+
         if dxftype == "POLYLINE_PFACE":
+            polyline_sequence_map, _, _ = _polyline_sequence_relationships(decode_path)
             for (
                 handle,
                 num_vertices,
@@ -410,6 +524,7 @@ class Layout:
                 vertices,
                 faces,
             ) in raw.decode_polyline_pface_with_faces(decode_path):
+                sequence_info = polyline_sequence_map.get(int(handle), {})
                 yield Entity(
                     dxftype="POLYLINE_PFACE",
                     handle=handle,
@@ -420,11 +535,87 @@ class Layout:
                             "num_faces": int(num_faces),
                             "vertices": list(vertices),
                             "faces": list(faces),
+                            "vertex_handles": list(sequence_info.get("vertex_handles", [])),
+                            "face_handles": list(sequence_info.get("face_handles", [])),
+                            "seqend_handle": sequence_info.get("seqend_handle"),
                         },
                         entity_style_map,
                         layer_color_map,
                         layer_color_overrides,
                         dxftype="POLYLINE_PFACE",
+                    ),
+                )
+            return
+
+        if dxftype == "VERTEX_PFACE":
+            _, vertex_owner_map, _ = _polyline_sequence_relationships(decode_path)
+            for handle, flags, x, y, z in raw.decode_vertex_pface_entities(decode_path):
+                owner_handle, owner_type = vertex_owner_map.get(int(handle), (None, None))
+                yield Entity(
+                    dxftype="VERTEX_PFACE",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "position": (x, y, z),
+                            "flags": int(flags),
+                            "owner_handle": owner_handle,
+                            "owner_type": owner_type,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="VERTEX_PFACE",
+                    ),
+                )
+            return
+
+        if dxftype == "VERTEX_PFACE_FACE":
+            _, vertex_owner_map, _ = _polyline_sequence_relationships(decode_path)
+            for handle, index1, index2, index3, index4 in raw.decode_vertex_pface_face_entities(
+                decode_path
+            ):
+                owner_handle, owner_type = vertex_owner_map.get(int(handle), (None, None))
+                yield Entity(
+                    dxftype="VERTEX_PFACE_FACE",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "indices": (
+                                int(index1),
+                                int(index2),
+                                int(index3),
+                                int(index4),
+                            ),
+                            "owner_handle": owner_handle,
+                            "owner_type": owner_type,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="VERTEX_PFACE_FACE",
+                    ),
+                )
+            return
+
+        if dxftype == "SEQEND":
+            _, _, seqend_owner_map = _polyline_sequence_relationships(decode_path)
+            for handle in _entity_handles_by_type_name(decode_path, "SEQEND"):
+                owner_handle, owner_type = seqend_owner_map.get(int(handle), (None, None))
+                yield Entity(
+                    dxftype="SEQEND",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "owner_handle": owner_handle,
+                            "owner_type": owner_type,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="SEQEND",
                     ),
                 )
             return
@@ -708,10 +899,23 @@ class Layout:
                 align_flags,
                 attrib_flags,
                 lock_position,
-                style_handle,
+                style_owner_handles,
             ) in raw.decode_attrib_entities(decode_path):
                 thickness, oblique_angle, height, rotation, width_factor = metrics
                 generation, horizontal_alignment, vertical_alignment = align_flags
+                style_handle = None
+                owner_handle = None
+                if isinstance(style_owner_handles, tuple):
+                    if len(style_owner_handles) >= 1:
+                        style_handle = style_owner_handles[0]
+                    if len(style_owner_handles) >= 2:
+                        owner_handle = style_owner_handles[1]
+                owner_handle_value = None
+                if owner_handle is not None:
+                    try:
+                        owner_handle_value = int(owner_handle)
+                    except Exception:
+                        owner_handle_value = None
                 yield Entity(
                     dxftype="ATTRIB",
                     handle=handle,
@@ -735,6 +939,8 @@ class Layout:
                             "style_handle": style_handle,
                             "attribute_flags": int(attrib_flags),
                             "lock_position": bool(lock_position),
+                            "owner_handle": owner_handle_value,
+                            "owner_type": "INSERT" if owner_handle_value is not None else None,
                         },
                         entity_style_map,
                         layer_color_map,
@@ -757,10 +963,23 @@ class Layout:
                 align_flags,
                 attrib_flags,
                 lock_position,
-                style_handle,
+                style_owner_handles,
             ) in raw.decode_attdef_entities(decode_path):
                 thickness, oblique_angle, height, rotation, width_factor = metrics
                 generation, horizontal_alignment, vertical_alignment = align_flags
+                style_handle = None
+                owner_handle = None
+                if isinstance(style_owner_handles, tuple):
+                    if len(style_owner_handles) >= 1:
+                        style_handle = style_owner_handles[0]
+                    if len(style_owner_handles) >= 2:
+                        owner_handle = style_owner_handles[1]
+                owner_handle_value = None
+                if owner_handle is not None:
+                    try:
+                        owner_handle_value = int(owner_handle)
+                    except Exception:
+                        owner_handle_value = None
                 yield Entity(
                     dxftype="ATTDEF",
                     handle=handle,
@@ -784,6 +1003,8 @@ class Layout:
                             "style_handle": style_handle,
                             "attribute_flags": int(attrib_flags),
                             "lock_position": bool(lock_position),
+                            "owner_handle": owner_handle_value,
+                            "owner_type": "BLOCK" if owner_handle_value is not None else None,
                         },
                         entity_style_map,
                         layer_color_map,
@@ -990,40 +1211,120 @@ class Layout:
             return
 
         if dxftype == "MINSERT":
-            for (
-                handle,
-                px,
-                py,
-                pz,
-                sx,
-                sy,
-                sz,
-                rotation,
-                num_columns,
-                num_rows,
-                column_spacing,
-                row_spacing,
-            ) in raw.decode_minsert_entities(decode_path):
+            for row in raw.decode_minsert_entities(decode_path):
+                if len(row) == 9 and isinstance(row[8], tuple):
+                    (
+                        handle,
+                        px,
+                        py,
+                        pz,
+                        sx,
+                        sy,
+                        sz,
+                        rotation,
+                        array_info,
+                    ) = row
+                    (
+                        num_columns,
+                        num_rows,
+                        column_spacing,
+                        row_spacing,
+                        name,
+                    ) = array_info
+                elif len(row) == 12:
+                    (
+                        handle,
+                        px,
+                        py,
+                        pz,
+                        sx,
+                        sy,
+                        sz,
+                        rotation,
+                        num_columns,
+                        num_rows,
+                        column_spacing,
+                        row_spacing,
+                    ) = row
+                    name = None
+                else:
+                    # Backward-compatible shape from older extension builds.
+                    (
+                        handle,
+                        px,
+                        py,
+                        pz,
+                        sx,
+                        sy,
+                        sz,
+                        rotation,
+                        num_columns,
+                        num_rows,
+                        column_spacing,
+                        row_spacing,
+                        name,
+                    ) = row
+                dxf = {
+                    "insert": (px, py, pz),
+                    "xscale": sx,
+                    "yscale": sy,
+                    "zscale": sz,
+                    "rotation": math.degrees(rotation),
+                    "column_count": num_columns,
+                    "row_count": num_rows,
+                    "column_spacing": column_spacing,
+                    "row_spacing": row_spacing,
+                }
+                if isinstance(name, str) and name:
+                    dxf["name"] = name
                 yield Entity(
                     dxftype="MINSERT",
                     handle=handle,
                     dxf=_attach_entity_color(
                         handle,
-                        {
-                            "insert": (px, py, pz),
-                            "xscale": sx,
-                            "yscale": sy,
-                            "zscale": sz,
-                            "rotation": math.degrees(rotation),
-                            "column_count": num_columns,
-                            "row_count": num_rows,
-                            "column_spacing": column_spacing,
-                            "row_spacing": row_spacing,
-                        },
+                        dxf,
                         entity_style_map,
                         layer_color_map,
                         layer_color_overrides,
                         dxftype="MINSERT",
+                    ),
+                )
+            return
+
+        if dxftype == "BLOCK":
+            block_name_map, _ = _block_and_endblk_name_maps(decode_path)
+            for handle in _entity_handles_by_type_name(decode_path, "BLOCK"):
+                yield Entity(
+                    dxftype="BLOCK",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "name": block_name_map.get(handle),
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="BLOCK",
+                    ),
+                )
+            return
+
+        if dxftype == "ENDBLK":
+            _, endblk_name_map = _block_and_endblk_name_maps(decode_path)
+            for handle in _entity_handles_by_type_name(decode_path, "ENDBLK"):
+                yield Entity(
+                    dxftype="ENDBLK",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "name": endblk_name_map.get(handle),
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="ENDBLK",
                     ),
                 )
             return
@@ -1155,7 +1456,7 @@ class Layout:
 
         raise ValueError(
             f"unsupported entity type: {dxftype}. "
-            "Supported types: LINE, LWPOLYLINE, POLYLINE_2D, POLYLINE_3D, POLYLINE_MESH, POLYLINE_PFACE, 3DFACE, SOLID, TRACE, SHAPE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, TOLERANCE, MLINE, INSERT, MINSERT, DIMENSION"
+            "Supported types: LINE, LWPOLYLINE, POLYLINE_2D, VERTEX_2D, POLYLINE_3D, VERTEX_3D, POLYLINE_MESH, VERTEX_MESH, POLYLINE_PFACE, VERTEX_PFACE, VERTEX_PFACE_FACE, SEQEND, 3DFACE, SOLID, TRACE, SHAPE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, TOLERANCE, MLINE, BLOCK, ENDBLK, INSERT, MINSERT, DIMENSION"
         )
 
 
@@ -1377,8 +1678,10 @@ def _build_dimension_common_dxf(
     }
 
 
-@lru_cache(maxsize=16)
-def _present_supported_types(path: str | None) -> tuple[str, ...]:
+@lru_cache(maxsize=32)
+def _present_supported_types(
+    path: str | None, *, include_explicit_only: bool = False
+) -> tuple[str, ...]:
     if not path:
         return tuple(SUPPORTED_ENTITY_TYPES)
     try:
@@ -1395,8 +1698,13 @@ def _present_supported_types(path: str | None) -> tuple[str, ...]:
             seen.add(canonical)
 
     if not seen:
-        return tuple(SUPPORTED_ENTITY_TYPES)
-    return tuple(dxftype for dxftype in SUPPORTED_ENTITY_TYPES if dxftype in seen)
+        present = tuple(SUPPORTED_ENTITY_TYPES)
+    else:
+        present = tuple(dxftype for dxftype in SUPPORTED_ENTITY_TYPES if dxftype in seen)
+
+    if include_explicit_only:
+        return present
+    return tuple(dxftype for dxftype in present if dxftype not in _EXPLICIT_ONLY_ENTITY_TYPES)
 
 
 def _canonical_entity_type_name(raw_name: object) -> str | None:
@@ -1413,6 +1721,11 @@ def _canonical_entity_type_name(raw_name: object) -> str | None:
 
 def _normalize_types(types: str | Iterable[str] | None, path: str | None = None) -> list[str]:
     default_types = list(_present_supported_types(path))
+    candidate_types = (
+        list(_present_supported_types(path, include_explicit_only=True))
+        if path is not None
+        else list(SUPPORTED_ENTITY_TYPES)
+    )
     if types is None:
         return default_types
     if isinstance(types, str):
@@ -1430,7 +1743,6 @@ def _normalize_types(types: str | Iterable[str] | None, path: str | None = None)
 
     selected: list[str] = []
     seen = set()
-    candidate_types = default_types if path is not None else list(SUPPORTED_ENTITY_TYPES)
 
     for token in normalized:
         if any(ch in token for ch in "*?[]"):
@@ -1451,6 +1763,179 @@ def _normalize_types(types: str | Iterable[str] | None, path: str | None = None)
                 selected.append(token)
 
     return selected
+
+
+@lru_cache(maxsize=16)
+def _entity_handles_by_type_name(path: str, type_name: str) -> tuple[int, ...]:
+    target = str(type_name).strip().upper()
+    if not target:
+        return ()
+    try:
+        rows = raw.list_object_headers_with_type(path)
+    except Exception:
+        return ()
+    handles: list[int] = []
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) < 5:
+            continue
+        name = str(row[4]).strip().upper()
+        if name != target:
+            continue
+        try:
+            handles.append(int(row[0]))
+        except Exception:
+            continue
+    return tuple(handles)
+
+
+@lru_cache(maxsize=16)
+def _polyline_sequence_relationships(
+    path: str,
+) -> tuple[
+    dict[int, dict[str, object]],
+    dict[int, tuple[int, str]],
+    dict[int, tuple[int, str]],
+]:
+    try:
+        rows = raw.decode_polyline_sequence_members(path)
+    except Exception:
+        return {}, {}, {}
+
+    polyline_map: dict[int, dict[str, object]] = {}
+    vertex_owner_map: dict[int, tuple[int, str]] = {}
+    seqend_owner_map: dict[int, tuple[int, str]] = {}
+
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) < 5:
+            continue
+        raw_handle, raw_type_name, raw_vertex_handles, raw_face_handles, raw_seqend_handle = row
+        try:
+            handle = int(raw_handle)
+        except Exception:
+            continue
+        owner_type = str(raw_type_name).strip().upper()
+        if owner_type == "":
+            continue
+
+        vertex_handles: list[int] = []
+        for item in list(raw_vertex_handles or []):
+            try:
+                vertex_handles.append(int(item))
+            except Exception:
+                continue
+        face_handles: list[int] = []
+        for item in list(raw_face_handles or []):
+            try:
+                face_handles.append(int(item))
+            except Exception:
+                continue
+        seqend_handle: int | None = None
+        if raw_seqend_handle is not None:
+            try:
+                seqend_handle = int(raw_seqend_handle)
+            except Exception:
+                seqend_handle = None
+
+        polyline_map[handle] = {
+            "vertex_handles": tuple(vertex_handles),
+            "face_handles": tuple(face_handles),
+            "seqend_handle": seqend_handle,
+        }
+        for vertex_handle in vertex_handles:
+            vertex_owner_map[vertex_handle] = (handle, owner_type)
+        for face_handle in face_handles:
+            vertex_owner_map[face_handle] = (handle, owner_type)
+        if seqend_handle is not None:
+            seqend_owner_map[seqend_handle] = (handle, owner_type)
+
+    return polyline_map, vertex_owner_map, seqend_owner_map
+
+
+@lru_cache(maxsize=16)
+def _block_and_endblk_name_maps(path: str) -> tuple[dict[int, str], dict[int, str]]:
+    block_handles = list(_entity_handles_by_type_name(path, "BLOCK"))
+    endblk_handles = list(_entity_handles_by_type_name(path, "ENDBLK"))
+    if not block_handles and not endblk_handles:
+        return {}, {}
+
+    # Preferred: Rust-side deterministic mapping from BLOCK_HEADER -> BLOCK/ENDBLK.
+    try:
+        entity_rows = raw.decode_block_entity_names(path)
+    except Exception:
+        entity_rows = []
+    if entity_rows:
+        block_map: dict[int, str] = {}
+        endblk_map: dict[int, str] = {}
+        for row in entity_rows:
+            if not isinstance(row, tuple) or len(row) < 3:
+                continue
+            handle, type_name, name = row[0], row[1], row[2]
+            if not isinstance(name, str) or not name:
+                continue
+            try:
+                handle_key = int(handle)
+            except Exception:
+                continue
+            type_token = str(type_name).strip().upper()
+            if type_token == "BLOCK":
+                block_map[handle_key] = name
+            elif type_token == "ENDBLK":
+                endblk_map[handle_key] = name
+        if block_map or endblk_map:
+            return block_map, endblk_map
+
+    try:
+        rows = raw.decode_block_header_names(path)
+    except Exception:
+        rows = []
+
+    by_header_handle: dict[int, str] = {}
+    ordered_names: list[str] = []
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) < 2:
+            continue
+        header_handle, name = row[0], row[1]
+        if not isinstance(name, str) or not name:
+            continue
+        ordered_names.append(name)
+        try:
+            by_header_handle[int(header_handle)] = name
+        except Exception:
+            pass
+
+    block_map: dict[int, str] = {}
+    endblk_map: dict[int, str] = {}
+
+    # Prefer exact handle matches when available.
+    for handle in block_handles:
+        name = by_header_handle.get(handle)
+        if name:
+            block_map[handle] = name
+    for handle in endblk_handles:
+        name = by_header_handle.get(handle)
+        if name:
+            endblk_map[handle] = name
+
+    # Fallback: assign names in declaration order to preserve deterministic output.
+    remaining_names = iter(ordered_names)
+    for handle in block_handles:
+        if handle not in block_map:
+            name = next(remaining_names, None)
+            if isinstance(name, str):
+                block_map[handle] = name
+    for index, handle in enumerate(endblk_handles):
+        if handle in endblk_map:
+            continue
+        if index < len(block_handles):
+            paired_name = block_map.get(block_handles[index])
+            if paired_name:
+                endblk_map[handle] = paired_name
+                continue
+        name = next(remaining_names, None)
+        if isinstance(name, str):
+            endblk_map[handle] = name
+
+    return block_map, endblk_map
 
 
 @lru_cache(maxsize=16)

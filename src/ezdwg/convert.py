@@ -5,11 +5,36 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from .document import Document, Layout, read
+from . import raw
+from .document import Document, Layout, SUPPORTED_ENTITY_TYPES, TYPE_ALIASES, read
 from .entity import Entity
 
 
 _POLYLINE_2D_SPLINE_CURVE_TYPES = {"QuadraticBSpline", "CubicBSpline", "Bezier"}
+_BLOCK_EXCLUDED_ENTITY_TYPES = {
+    "BLOCK",
+    "ENDBLK",
+    "SEQEND",
+    "VERTEX_2D",
+    "VERTEX_3D",
+    "VERTEX_MESH",
+    "VERTEX_PFACE",
+    "VERTEX_PFACE_FACE",
+}
+_VERTEX_SEQUENCE_ENTITY_TYPES = {
+    "VERTEX_2D",
+    "VERTEX_3D",
+    "VERTEX_MESH",
+    "VERTEX_PFACE",
+    "VERTEX_PFACE_FACE",
+    "SEQEND",
+}
+_POLYLINE_OWNER_TYPES = {
+    "POLYLINE_2D",
+    "POLYLINE_3D",
+    "POLYLINE_MESH",
+    "POLYLINE_PFACE",
+}
 
 
 @dataclass(frozen=True)
@@ -32,15 +57,27 @@ def to_dxf(
 ) -> ConvertResult:
     ezdxf = _require_ezdxf()
     source_path, layout = _resolve_layout(source)
+    insert_attributes_by_owner = _insert_attributes_by_owner(layout)
 
     dxf_doc = ezdxf.new(dxfversion=dxf_version)
     modelspace = dxf_doc.modelspace()
+    _populate_block_definitions(
+        dxf_doc,
+        layout,
+        insert_attributes_by_owner=insert_attributes_by_owner,
+    )
+
+    source_entities = _resolve_export_entities(
+        layout,
+        types,
+        insert_attributes_by_owner=insert_attributes_by_owner,
+    )
 
     total = 0
     written = 0
     skipped_by_type: dict[str, int] = {}
 
-    for entity in layout.query(types):
+    for entity in source_entities:
         total += 1
         if _write_entity_to_modelspace(modelspace, entity):
             written += 1
@@ -68,6 +105,144 @@ def to_dxf(
     )
 
 
+def _resolve_export_entities(
+    layout: Layout,
+    types: str | Iterable[str] | None,
+    *,
+    insert_attributes_by_owner: dict[int, list[Entity]] | None = None,
+) -> list[Entity]:
+    selected_entities = list(layout.query(types))
+    export_entities = _materialize_export_entities(layout, selected_entities)
+    return _attach_insert_attributes(export_entities, insert_attributes_by_owner)
+
+
+def _materialize_export_entities(
+    layout: Layout,
+    selected_entities: list[Entity],
+    *,
+    allowed_owner_handles: set[int] | None = None,
+    owners_by_handle: dict[int, Entity] | None = None,
+) -> list[Entity]:
+    if not selected_entities:
+        return []
+
+    export_entities: list[Entity] = []
+    seen_handles: set[int] = set()
+    owner_requests: list[tuple[int, str | None]] = []
+
+    for entity in selected_entities:
+        handle = int(entity.handle)
+        if entity.dxftype in _BLOCK_EXCLUDED_ENTITY_TYPES:
+            if entity.dxftype in _VERTEX_SEQUENCE_ENTITY_TYPES:
+                owner_handle = entity.dxf.get("owner_handle")
+                if owner_handle is None:
+                    continue
+                try:
+                    owner_handle_int = int(owner_handle)
+                except Exception:
+                    continue
+                if (
+                    allowed_owner_handles is not None
+                    and owner_handle_int not in allowed_owner_handles
+                ):
+                    continue
+                owner_type = entity.dxf.get("owner_type")
+                owner_requests.append(
+                    (
+                        owner_handle_int,
+                        str(owner_type).strip().upper() if isinstance(owner_type, str) else None,
+                    )
+                )
+            continue
+        if handle in seen_handles:
+            continue
+        seen_handles.add(handle)
+        export_entities.append(entity)
+
+    if not owner_requests:
+        return export_entities
+
+    requested_owner_types = {
+        owner_type for _, owner_type in owner_requests if owner_type in _POLYLINE_OWNER_TYPES
+    }
+    if not requested_owner_types:
+        requested_owner_types = set(_POLYLINE_OWNER_TYPES)
+    if owners_by_handle is None:
+        resolved_owners_by_handle = _entities_by_handle(layout, requested_owner_types)
+    else:
+        resolved_owners_by_handle = {
+            int(handle): entity
+            for handle, entity in owners_by_handle.items()
+            if entity.dxftype in requested_owner_types
+        }
+    for owner_handle, _owner_type in owner_requests:
+        owner_entity = resolved_owners_by_handle.get(owner_handle)
+        if owner_entity is None:
+            continue
+        if owner_entity.dxftype in _BLOCK_EXCLUDED_ENTITY_TYPES:
+            continue
+        handle = int(owner_entity.handle)
+        if handle in seen_handles:
+            continue
+        if allowed_owner_handles is not None and handle not in allowed_owner_handles:
+            continue
+        seen_handles.add(handle)
+        export_entities.append(owner_entity)
+
+    return export_entities
+
+
+def _insert_attributes_by_owner(layout: Layout) -> dict[int, list[Entity]]:
+    try:
+        attrib_entities = list(layout.query("ATTRIB"))
+    except Exception:
+        return {}
+    if not attrib_entities:
+        return {}
+
+    attrs_by_owner: dict[int, list[Entity]] = {}
+    for entity in attrib_entities:
+        owner_handle = entity.dxf.get("owner_handle")
+        if owner_handle is None:
+            continue
+        try:
+            owner_handle_int = int(owner_handle)
+        except Exception:
+            continue
+        attrs_by_owner.setdefault(owner_handle_int, []).append(entity)
+
+    for owner_handle, entities in attrs_by_owner.items():
+        attrs_by_owner[owner_handle] = sorted(entities, key=lambda entry: int(entry.handle))
+    return attrs_by_owner
+
+
+def _attach_insert_attributes(
+    selected_entities: list[Entity],
+    insert_attributes_by_owner: dict[int, list[Entity]] | None,
+) -> list[Entity]:
+    if not selected_entities or not insert_attributes_by_owner:
+        return selected_entities
+
+    export_entities: list[Entity] = []
+    for entity in selected_entities:
+        if entity.dxftype not in {"INSERT", "MINSERT"}:
+            export_entities.append(entity)
+            continue
+        try:
+            handle = int(entity.handle)
+        except Exception:
+            export_entities.append(entity)
+            continue
+        attributes = insert_attributes_by_owner.get(handle)
+        if not attributes:
+            export_entities.append(entity)
+            continue
+        dxf = dict(entity.dxf)
+        dxf["attributes"] = [dict(attribute.dxf) for attribute in attributes]
+        export_entities.append(Entity(dxftype=entity.dxftype, handle=entity.handle, dxf=dxf))
+    return export_entities
+
+
 def _require_ezdxf():
     try:
         import ezdxf
@@ -86,6 +261,230 @@ def _resolve_layout(source: str | Document | Layout) -> tuple[str, Layout]:
         return source.path, source.modelspace()
     doc = read(source)
     return str(source), doc.modelspace()
+
+
+def _populate_block_definitions(
+    dxf_doc: Any,
+    layout: Layout,
+    *,
+    insert_attributes_by_owner: dict[int, list[Entity]] | None = None,
+) -> None:
+    try:
+        insert_entities = list(layout.query("INSERT"))
+    except Exception:
+        insert_entities = []
+    try:
+        minsert_entities = list(layout.query("MINSERT"))
+    except Exception:
+        minsert_entities = []
+    if not insert_entities and not minsert_entities:
+        return
+    reference_entities = [*insert_entities, *minsert_entities]
+
+    referenced_names = {
+        normalized_name
+        for entity in reference_entities
+        for normalized_name in [_normalize_block_name(entity.dxf.get("name"))]
+        if normalized_name is not None
+    }
+    if not referenced_names:
+        return
+
+    decode_path = layout.doc.decode_path or layout.doc.path
+    try:
+        header_rows = raw.list_object_headers_with_type(decode_path)
+    except Exception:
+        return
+    if not header_rows:
+        return
+
+    try:
+        block_name_by_handle = {
+            int(entity.handle): normalized_name
+            for entity in layout.query("BLOCK")
+            for normalized_name in [_normalize_block_name(entity.dxf.get("name"))]
+            if normalized_name is not None
+        }
+    except Exception:
+        return
+    if not block_name_by_handle:
+        return
+
+    block_members_by_name: dict[str, list[tuple[int, str]]] = {}
+    current_block_name: str | None = None
+    for row in header_rows:
+        if not isinstance(row, tuple) or len(row) < 6:
+            continue
+        raw_handle, _offset, _size, _code, raw_type_name, raw_type_class = row
+        type_class = str(raw_type_class).strip().upper()
+        if type_class not in {"E", "ENTITY"}:
+            continue
+        try:
+            handle = int(raw_handle)
+        except Exception:
+            continue
+        type_name = str(raw_type_name).strip().upper()
+
+        if type_name == "BLOCK":
+            block_name = block_name_by_handle.get(handle)
+            if isinstance(block_name, str) and block_name.strip() != "":
+                current_block_name = block_name.strip()
+                block_members_by_name.setdefault(current_block_name, [])
+            else:
+                current_block_name = None
+            continue
+        if type_name == "ENDBLK":
+            current_block_name = None
+            continue
+        if current_block_name is None:
+            continue
+        block_members_by_name[current_block_name].append((handle, type_name))
+
+    if not block_members_by_name:
+        return
+
+    # Include blocks referenced by INSERT; expand transitively if blocks contain INSERT.
+    insert_entities_by_handle = _entities_by_handle(layout, {"INSERT", "MINSERT"})
+    selected_block_names = _collect_referenced_block_names(
+        block_members_by_name,
+        referenced_names,
+        insert_entities_by_handle,
+    )
+
+    if not selected_block_names:
+        return
+
+    all_member_types: set[str] = set()
+    for block_name in selected_block_names:
+        for _handle, raw_type_name in block_members_by_name.get(block_name, []):
+            canonical = _canonical_entity_type(raw_type_name)
+            if canonical in SUPPORTED_ENTITY_TYPES:
+                all_member_types.add(canonical)
+    if not all_member_types:
+        return
+
+    entities_by_handle = _entities_by_handle(layout, all_member_types)
+    if not entities_by_handle:
+        return
+    owner_entities_by_handle = {
+        handle: entity
+        for handle, entity in entities_by_handle.items()
+        if entity.dxftype in _POLYLINE_OWNER_TYPES
+    }
+    owner_type_hints: set[str] = set()
+    for block_name in selected_block_names:
+        for handle, _raw_type_name in block_members_by_name.get(block_name, []):
+            entity = entities_by_handle.get(int(handle))
+            if entity is None or entity.dxftype not in _VERTEX_SEQUENCE_ENTITY_TYPES:
+                continue
+            owner_type = entity.dxf.get("owner_type")
+            if not isinstance(owner_type, str):
+                continue
+            owner_type_token = owner_type.strip().upper()
+            if owner_type_token in _POLYLINE_OWNER_TYPES:
+                owner_type_hints.add(owner_type_token)
+    if owner_type_hints:
+        owner_entities_by_handle.update(_entities_by_handle(layout, owner_type_hints))
+
+    block_layouts: dict[str, Any] = {}
+    for block_name in sorted(selected_block_names):
+        block_layouts[block_name] = _ensure_block_layout(dxf_doc, block_name)
+
+    for block_name in sorted(selected_block_names):
+        block_layout = block_layouts[block_name]
+        members = block_members_by_name.get(block_name, [])
+        member_handles = {int(handle) for handle, _raw_type_name in members}
+        selected_entities = [
+            entity
+            for handle, _raw_type_name in members
+            for entity in [entities_by_handle.get(int(handle))]
+            if entity is not None
+        ]
+        export_entities = _materialize_export_entities(
+            layout,
+            selected_entities,
+            allowed_owner_handles=member_handles,
+            owners_by_handle=owner_entities_by_handle,
+        )
+        export_entities = _attach_insert_attributes(export_entities, insert_attributes_by_owner)
+        for entity in export_entities:
+            _write_entity_to_modelspace(block_layout, entity)
+
+
+def _entities_by_handle(layout: Layout, types: set[str]) -> dict[int, Entity]:
+    result: dict[int, Entity] = {}
+    for dxftype in sorted(types):
+        try:
+            entities = layout.query(dxftype)
+        except Exception:
+            continue
+        try:
+            for entity in entities:
+                try:
+                    result[int(entity.handle)] = entity
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return result
+
+
+def _collect_referenced_block_names(
+    block_members_by_name: dict[str, list[tuple[int, str]]],
+    referenced_names: set[str],
+    insert_entities_by_handle: dict[int, Entity],
+) -> set[str]:
+    selected_block_names: set[str] = set()
+    pending_names: list[str] = [name for name in referenced_names if name in block_members_by_name]
+    pending_name_set: set[str] = set(pending_names)
+    while pending_names:
+        name = pending_names.pop()
+        pending_name_set.discard(name)
+        if name in selected_block_names:
+            continue
+        selected_block_names.add(name)
+        for handle, raw_type_name in block_members_by_name.get(name, []):
+            if _canonical_entity_type(raw_type_name) not in {"INSERT", "MINSERT"}:
+                continue
+            insert_entity = insert_entities_by_handle.get(int(handle))
+            if insert_entity is None:
+                continue
+            nested_name = _normalize_block_name(insert_entity.dxf.get("name"))
+            if nested_name is None:
+                continue
+            if nested_name not in block_members_by_name:
+                continue
+            if nested_name in selected_block_names or nested_name in pending_name_set:
+                continue
+            pending_names.append(nested_name)
+            pending_name_set.add(nested_name)
+    return selected_block_names
+
+
+def _normalize_block_name(name: Any) -> str | None:
+    if not isinstance(name, str):
+        return None
+    normalized = name.strip()
+    if not normalized:
+        return None
+    return normalized
+
+
+def _ensure_block_layout(dxf_doc: Any, name: str) -> Any:
+    try:
+        block_layout = dxf_doc.blocks.get(name)
+        if block_layout is not None:
+            return block_layout
+    except Exception:
+        pass
+    return dxf_doc.blocks.new(name=name)
+
+
+def _canonical_entity_type(raw_type_name: str) -> str:
+    token = str(raw_type_name).strip().upper()
+    if token.startswith("DIM_"):
+        return "DIMENSION"
+    return TYPE_ALIASES.get(token, token)
 
 
 def _write_entity_to_modelspace(modelspace: Any, entity: Entity) -> bool:
@@ -294,7 +693,10 @@ def _write_entity_to_modelspace_unsafe(modelspace: Any, entity: Entity) -> bool:
     if dxftype == "SPLINE":
         return _write_spline(modelspace, dxf, dxfattribs)
 
-    if dxftype in {"TEXT", "ATTRIB", "ATTDEF"}:
+    if dxftype == "ATTDEF":
+        return _write_attdef(modelspace, dxf, dxfattribs)
+
+    if dxftype in {"TEXT", "ATTRIB"}:
         return _write_text_like(modelspace, dxf, dxfattribs)
 
     if dxftype == "MTEXT":
@@ -321,12 +723,44 @@ def _write_entity_to_modelspace_unsafe(modelspace: Any, entity: Entity) -> bool:
         return True
 
     if dxftype == "MINSERT":
+        name = _normalize_block_name(dxf.get("name"))
+        if name is not None:
+            insert = _point3(dxf.get("insert"))
+            row_count = max(1, int(dxf.get("row_count", 1)))
+            column_count = max(1, int(dxf.get("column_count", 1)))
+            attributes = list(dxf.get("attributes") or [])
+            if attributes and (row_count > 1 or column_count > 1):
+                try:
+                    return _write_minsert_expanded(
+                        modelspace,
+                        name,
+                        insert,
+                        dxf,
+                        dxfattribs,
+                        attributes,
+                    )
+                except Exception:
+                    pass
+            try:
+                ref = modelspace.add_blockref(name, insert, dxfattribs=dxfattribs)
+                ref.dxf.xscale = float(dxf.get("xscale", 1.0))
+                ref.dxf.yscale = float(dxf.get("yscale", 1.0))
+                ref.dxf.zscale = float(dxf.get("zscale", 1.0))
+                ref.dxf.rotation = float(dxf.get("rotation", 0.0))
+                ref.dxf.column_count = column_count
+                ref.dxf.row_count = row_count
+                ref.dxf.column_spacing = float(dxf.get("column_spacing", 0.0))
+                ref.dxf.row_spacing = float(dxf.get("row_spacing", 0.0))
+                _write_insert_attributes(ref, attributes)
+                return True
+            except Exception:
+                pass
         modelspace.add_point(_point3(dxf.get("insert")), dxfattribs=dxfattribs)
         return True
 
     if dxftype == "INSERT":
-        name = dxf.get("name")
-        if isinstance(name, str) and name:
+        name = _normalize_block_name(dxf.get("name"))
+        if name is not None:
             insert = _point3(dxf.get("insert"))
             try:
                 ref = modelspace.add_blockref(name, insert, dxfattribs=dxfattribs)
@@ -334,6 +768,7 @@ def _write_entity_to_modelspace_unsafe(modelspace: Any, entity: Entity) -> bool:
                 ref.dxf.yscale = float(dxf.get("yscale", 1.0))
                 ref.dxf.zscale = float(dxf.get("zscale", 1.0))
                 ref.dxf.rotation = float(dxf.get("rotation", 0.0))
+                _write_insert_attributes(ref, list(dxf.get("attributes") or []))
                 return True
             except Exception:
                 # Block definitions are not exported yet. Keep insert location visible.
@@ -654,6 +1089,162 @@ def _write_text_like(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str,
         dxfattribs=dxfattribs,
     )
     text_entity.dxf.insert = _point3(dxf.get("insert"))
+    return True
+
+
+def _write_minsert_expanded(
+    modelspace: Any,
+    name: str,
+    insert: tuple[float, float, float],
+    dxf: dict[str, Any],
+    dxfattribs: dict[str, Any],
+    attributes: list[Any],
+) -> bool:
+    row_count = max(1, int(dxf.get("row_count", 1)))
+    column_count = max(1, int(dxf.get("column_count", 1)))
+    column_spacing = float(dxf.get("column_spacing", 0.0))
+    row_spacing = float(dxf.get("row_spacing", 0.0))
+    rotation_deg = float(dxf.get("rotation", 0.0))
+    rotation = math.radians(rotation_deg)
+    cos_r = math.cos(rotation)
+    sin_r = math.sin(rotation)
+
+    col_dx = column_spacing * cos_r
+    col_dy = column_spacing * sin_r
+    row_dx = -row_spacing * sin_r
+    row_dy = row_spacing * cos_r
+
+    written = 0
+    for row in range(row_count):
+        for column in range(column_count):
+            offset = (
+                column * col_dx + row * row_dx,
+                column * col_dy + row * row_dy,
+                0.0,
+            )
+            cell_insert = (
+                insert[0] + offset[0],
+                insert[1] + offset[1],
+                insert[2] + offset[2],
+            )
+            try:
+                ref = modelspace.add_blockref(name, cell_insert, dxfattribs=dxfattribs)
+                ref.dxf.xscale = float(dxf.get("xscale", 1.0))
+                ref.dxf.yscale = float(dxf.get("yscale", 1.0))
+                ref.dxf.zscale = float(dxf.get("zscale", 1.0))
+                ref.dxf.rotation = rotation_deg
+                shifted_attributes = _shift_attribute_positions(attributes, offset)
+                _write_insert_attributes(ref, shifted_attributes)
+                written += 1
+            except Exception:
+                continue
+    return written > 0
+
+
+def _shift_attribute_positions(attributes: list[Any], offset: tuple[float, float, float]) -> list[Any]:
+    if offset == (0.0, 0.0, 0.0):
+        return attributes
+    shifted: list[Any] = []
+    for attribute in attributes:
+        if not isinstance(attribute, dict):
+            shifted.append(attribute)
+            continue
+        attribute_dxf = dict(attribute)
+        for key in ("insert", "align_point"):
+            point = attribute_dxf.get(key)
+            if not isinstance(point, (list, tuple)) or len(point) < 3:
+                continue
+            try:
+                attribute_dxf[key] = (
+                    float(point[0]) + offset[0],
+                    float(point[1]) + offset[1],
+                    float(point[2]) + offset[2],
+                )
+            except Exception:
+                continue
+        shifted.append(attribute_dxf)
+    return shifted
+
+
+def _write_insert_attributes(insert_ref: Any, attributes: list[Any]) -> None:
+    if not attributes:
+        return
+    for attribute in attributes:
+        if not isinstance(attribute, dict):
+            continue
+        tag = attribute.get("tag")
+        if not isinstance(tag, str):
+            continue
+        tag_value = tag.strip()
+        if tag_value == "":
+            continue
+        text = attribute.get("text")
+        attrib_dxfattribs = _entity_dxfattribs(attribute)
+        height = attribute.get("height")
+        if height is not None:
+            try:
+                attrib_dxfattribs["height"] = float(height)
+            except Exception:
+                pass
+        rotation = attribute.get("rotation")
+        if rotation is not None:
+            try:
+                attrib_dxfattribs["rotation"] = float(rotation)
+            except Exception:
+                pass
+        try:
+            insert_ref.add_attrib(
+                tag_value,
+                "" if text is None else str(text),
+                insert=_point3(attribute.get("insert")),
+                dxfattribs=attrib_dxfattribs or None,
+            )
+        except Exception:
+            continue
+
+
+def _write_attdef(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str, Any]) -> bool:
+    tag = dxf.get("tag")
+    if not isinstance(tag, str):
+        return _write_text_like(modelspace, dxf, dxfattribs)
+    tag_value = tag.strip()
+    if tag_value == "":
+        return _write_text_like(modelspace, dxf, dxfattribs)
+
+    text = str(dxf.get("text", "") or "")
+    insert = _point3(dxf.get("insert"))
+    height = dxf.get("height")
+    rotation = dxf.get("rotation")
+    try:
+        attdef = modelspace.add_attdef(
+            tag=tag_value,
+            insert=insert,
+            text=text,
+            height=float(height) if height is not None else None,
+            rotation=float(rotation) if rotation is not None else None,
+            dxfattribs=dxfattribs or None,
+        )
+    except Exception:
+        return _write_text_like(modelspace, dxf, dxfattribs)
+
+    prompt = dxf.get("prompt")
+    if isinstance(prompt, str):
+        try:
+            attdef.dxf.prompt = prompt
+        except Exception:
+            pass
+    attribute_flags = dxf.get("attribute_flags")
+    if attribute_flags is not None:
+        try:
+            attdef.dxf.flags = int(attribute_flags)
+        except Exception:
+            pass
+    lock_position = dxf.get("lock_position")
+    if lock_position is not None:
+        try:
+            attdef.dxf.lock_position = 1 if bool(lock_position) else 0
+        except Exception:
+            pass
     return True
 
 

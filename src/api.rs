@@ -64,7 +64,7 @@ type AttribEntityRow = (
     TextAlignmentRow,
     u8,
     bool,
-    Option<u64>,
+    (Option<u64>, Option<u64>),
 );
 type MTextBackgroundRow = (u32, Option<f64>, Option<u16>, Option<u32>, Option<u32>);
 type MTextEntityRow = (
@@ -95,6 +95,7 @@ type MLineEntityRow = (
     Vec<MLineVertexRow>,
     Option<u64>,
 );
+type MInsertArrayRow = (u16, u16, f64, f64, Option<String>);
 type DimExtrusionScaleRow = (Point3, Point3);
 type DimAnglesRow = (f64, f64, f64, f64);
 type DimStyleRow = (u8, Option<f64>, Option<u16>, Option<u16>, Option<f64>, f64);
@@ -114,8 +115,19 @@ type DimEntityRow = (
 );
 type DimTypedEntityRow = (String, DimEntityRow);
 type InsertEntityRow = (u64, f64, f64, f64, f64, f64, f64, f64, Option<String>);
-type MInsertEntityRow = (u64, f64, f64, f64, f64, f64, f64, f64, u16, u16, f64, f64);
+type MInsertEntityRow = (
+    u64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    MInsertArrayRow,
+);
 type BlockHeaderNameRow = (u64, String);
+type BlockEntityNameRow = (u64, String, String);
 type Polyline2dEntityRow = (u64, u16, u16, f64, f64, f64, f64);
 type Polyline2dInterpretedRow = (
     u64,
@@ -163,6 +175,7 @@ type PolylineInterpolatedRow = (u64, u16, bool, Vec<Point3>);
 type Vertex2dEntityRow = (u64, u16, f64, f64, f64, f64, f64, f64, f64);
 type VertexDataRow = (f64, f64, f64, f64, f64, f64, f64, u16);
 type PolylineVertexDataRow = (u64, u16, Vec<VertexDataRow>);
+type PolylineSequenceMembersRow = (u64, String, Vec<u64>, Vec<u64>, Option<u64>);
 
 #[pyfunction]
 pub fn detect_version(path: &str) -> PyResult<String> {
@@ -1905,7 +1918,7 @@ where
             ),
             entity.flags,
             entity.lock_position,
-            entity.style_handle,
+            (entity.style_handle, entity.owner_handle),
         ));
         if let Some(limit) = limit {
             if result.len() >= limit {
@@ -2676,7 +2689,8 @@ pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
             if !unresolved_insert_handles.contains(&obj.handle.0) {
                 continue;
             }
-            let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+            let Some((record, header)) =
+                parse_record_and_header(&decoder, obj.offset, best_effort)?
             else {
                 continue;
             };
@@ -2687,12 +2701,9 @@ pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
             if skip_object_type_prefix(&mut reader, decoder.version()).is_err() {
                 continue;
             }
-            let Ok(entity) = decode_insert_for_version(
-                &mut reader,
-                decoder.version(),
-                &header,
-                obj.handle.0,
-            ) else {
+            let Ok(entity) =
+                decode_insert_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
+            else {
                 continue;
             };
             let candidates = collect_insert_block_handle_candidates_r2010_plus(
@@ -2781,7 +2792,93 @@ pub fn decode_minsert_entities(
     let best_effort = is_best_effort_compat_version(&decoder);
     let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
     let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
+    let block_header_entries =
+        collect_block_header_name_entries_in_order(&decoder, &dynamic_types, &index, best_effort)?;
+    let mut known_block_handles: HashSet<u64> = HashSet::new();
+    let mut block_header_names: HashMap<u64, String> = HashMap::new();
+    let mut block_header_decoded_by_raw: HashMap<u64, u64> = HashMap::new();
+    for (raw_handle, decoded_handle, name) in block_header_entries {
+        block_header_decoded_by_raw.insert(raw_handle, decoded_handle);
+        known_block_handles.insert(raw_handle);
+        known_block_handles.insert(decoded_handle);
+        if name.is_empty() {
+            continue;
+        }
+        block_header_names
+            .entry(raw_handle)
+            .or_insert_with(|| name.clone());
+        block_header_names.entry(decoded_handle).or_insert(name);
+    }
+    let (block_name_aliases, recovered_header_names) = collect_block_name_aliases_in_order(
+        &decoder,
+        &dynamic_types,
+        &index,
+        best_effort,
+        &block_header_names,
+    )?;
+    for (header_handle, name) in recovered_header_names {
+        if name.is_empty() {
+            continue;
+        }
+        known_block_handles.insert(header_handle);
+        block_header_names
+            .entry(header_handle)
+            .or_insert_with(|| name.clone());
+        if let Some(decoded_handle) = block_header_decoded_by_raw.get(&header_handle).copied() {
+            known_block_handles.insert(decoded_handle);
+            block_header_names.entry(decoded_handle).or_insert(name);
+        }
+    }
+    for (alias_handle, name) in block_name_aliases {
+        known_block_handles.insert(alias_handle);
+        block_header_names.entry(alias_handle).or_insert(name);
+    }
+    let block_record_aliases = collect_block_record_handle_aliases_in_order(
+        &decoder,
+        &dynamic_types,
+        &index,
+        best_effort,
+        &block_header_names,
+    )?;
+    for (alias_handle, name) in block_record_aliases {
+        known_block_handles.insert(alias_handle);
+        block_header_names.entry(alias_handle).or_insert(name);
+    }
+    let object_type_codes = collect_object_type_codes(&decoder, &index, best_effort)?;
+    let known_layer_handles: HashSet<u64> =
+        collect_known_layer_handles_in_order(&decoder, &dynamic_types, &index, best_effort)?
+            .into_iter()
+            .collect();
+    let stream_aliases = collect_block_header_stream_aliases_in_order(
+        &decoder,
+        &dynamic_types,
+        &index,
+        best_effort,
+        &block_header_names,
+        &object_type_codes,
+        &known_layer_handles,
+    )?;
+    for (alias_handle, name) in stream_aliases {
+        known_block_handles.insert(alias_handle);
+        block_header_names.entry(alias_handle).or_insert(name);
+    }
+    let named_block_handles: HashSet<u64> = block_header_names.keys().copied().collect();
+    let mut decoded_rows: Vec<(
+        u64,
+        f64,
+        f64,
+        f64,
+        f64,
+        f64,
+        f64,
+        f64,
+        u16,
+        u16,
+        f64,
+        f64,
+        Option<u64>,
+    )> = Vec::new();
+    let mut unresolved_minsert_candidates: HashMap<u64, Vec<u64>> = HashMap::new();
     for obj in index.objects.iter() {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
@@ -2802,7 +2899,16 @@ pub fn decode_minsert_entities(
             Err(err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
-        result.push((
+        let block_handle = recover_insert_block_header_handle_r2010_plus(
+            &record,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+            None,
+            &known_block_handles,
+            &named_block_handles,
+        );
+        decoded_rows.push((
             entity.handle,
             entity.position.0,
             entity.position.1,
@@ -2815,13 +2921,164 @@ pub fn decode_minsert_entities(
             entity.num_rows,
             entity.column_spacing,
             entity.row_spacing,
+            block_handle,
         ));
         if let Some(limit) = limit {
-            if result.len() >= limit {
+            if decoded_rows.len() >= limit {
                 break;
             }
         }
     }
+
+    let unresolved_handles: HashSet<u64> = decoded_rows
+        .iter()
+        .filter_map(|row| row.12)
+        .filter(|handle| !block_header_names.contains_key(handle))
+        .collect();
+    if !unresolved_handles.is_empty() {
+        let targeted_aliases = collect_block_header_targeted_aliases_in_order(
+            &decoder,
+            &dynamic_types,
+            &index,
+            best_effort,
+            &block_header_names,
+            &unresolved_handles,
+        )?;
+        for (alias_handle, name) in targeted_aliases {
+            known_block_handles.insert(alias_handle);
+            block_header_names.entry(alias_handle).or_insert(name);
+        }
+    }
+    let unresolved_minsert_handles: HashSet<u64> = decoded_rows
+        .iter()
+        .filter_map(|row| {
+            let missing = row
+                .12
+                .and_then(|handle| block_header_names.get(&handle))
+                .is_none();
+            if missing {
+                Some(row.0)
+            } else {
+                None
+            }
+        })
+        .collect();
+    if !unresolved_minsert_handles.is_empty() {
+        let mut extra_targets: HashSet<u64> = HashSet::new();
+        for obj in index.objects.iter() {
+            if !unresolved_minsert_handles.contains(&obj.handle.0) {
+                continue;
+            }
+            let Some((record, header)) =
+                parse_record_and_header(&decoder, obj.offset, best_effort)?
+            else {
+                continue;
+            };
+            if !matches_type_name(header.type_code, 0x08, "MINSERT", &dynamic_types) {
+                continue;
+            }
+            let mut reader = record.bit_reader();
+            if skip_object_type_prefix(&mut reader, decoder.version()).is_err() {
+                continue;
+            }
+            let Ok(_entity) = entities::decode_minsert(&mut reader) else {
+                continue;
+            };
+            let candidates = collect_insert_block_handle_candidates_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                None,
+                Some(&known_block_handles),
+                8,
+            );
+            if candidates.is_empty() {
+                continue;
+            }
+            for candidate in candidates.iter().copied().take(4) {
+                if !block_header_names.contains_key(&candidate) {
+                    extra_targets.insert(candidate);
+                }
+            }
+            unresolved_minsert_candidates.insert(obj.handle.0, candidates);
+        }
+        if !extra_targets.is_empty() {
+            let targeted_aliases = collect_block_header_targeted_aliases_in_order(
+                &decoder,
+                &dynamic_types,
+                &index,
+                best_effort,
+                &block_header_names,
+                &extra_targets,
+            )?;
+            for (alias_handle, name) in targeted_aliases {
+                known_block_handles.insert(alias_handle);
+                block_header_names.entry(alias_handle).or_insert(name);
+            }
+        }
+    }
+
+    let available_named_handles: Vec<u64> = block_header_names.keys().copied().collect();
+    let mut result = Vec::with_capacity(decoded_rows.len());
+    for (
+        handle,
+        px,
+        py,
+        pz,
+        sx,
+        sy,
+        sz,
+        rotation,
+        num_columns,
+        num_rows,
+        column_spacing,
+        row_spacing,
+        block_handle,
+    ) in decoded_rows
+    {
+        let mut resolved_name = block_handle.and_then(|h| block_header_names.get(&h).cloned());
+        if resolved_name.is_none() {
+            if let Some(candidates) = unresolved_minsert_candidates.get(&handle) {
+                resolved_name = candidates
+                    .iter()
+                    .find_map(|candidate| block_header_names.get(candidate).cloned());
+                if resolved_name.is_none() {
+                    let mut nearby_names: HashSet<String> = HashSet::new();
+                    for candidate in candidates {
+                        for known in &available_named_handles {
+                            if known.abs_diff(*candidate) <= 8 {
+                                if let Some(name) = block_header_names.get(known) {
+                                    nearby_names.insert(name.clone());
+                                }
+                            }
+                        }
+                    }
+                    if nearby_names.len() == 1 {
+                        resolved_name = nearby_names.into_iter().next();
+                    }
+                }
+            }
+        }
+        result.push((
+            handle,
+            px,
+            py,
+            pz,
+            sx,
+            sy,
+            sz,
+            rotation,
+            (
+                num_columns,
+                num_rows,
+                column_spacing,
+                row_spacing,
+                resolved_name,
+            ),
+        ));
+    }
+
     Ok(result)
 }
 
@@ -2839,6 +3096,193 @@ pub fn decode_block_header_names(
         collect_block_header_names_in_order(&decoder, &dynamic_types, &index, best_effort, None)?;
     let mut rows: Vec<BlockHeaderNameRow> = names.into_iter().collect();
     rows.sort_by_key(|(handle, _)| *handle);
+    if let Some(limit) = limit {
+        rows.truncate(limit);
+    }
+    Ok(rows)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_block_entity_names(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<BlockEntityNameRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut ordered_objects: Vec<_> = index.objects.iter().collect();
+    ordered_objects.sort_by_key(|obj| obj.offset);
+    let is_r2010_plus = matches!(
+        decoder.version(),
+        version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
+    );
+    let header_entries =
+        collect_block_header_name_entries_in_order(&decoder, &dynamic_types, &index, best_effort)?;
+    let mut header_entry_name_by_handle: HashMap<u64, String> = HashMap::new();
+    for (raw_handle, decoded_handle, name) in header_entries.iter() {
+        if name.is_empty() {
+            continue;
+        }
+        header_entry_name_by_handle
+            .entry(*raw_handle)
+            .or_insert_with(|| name.clone());
+        header_entry_name_by_handle
+            .entry(*decoded_handle)
+            .or_insert_with(|| name.clone());
+    }
+    let block_header_names =
+        collect_block_header_names_in_order(&decoder, &dynamic_types, &index, best_effort, None)?;
+    let (mut block_aliases, mut endblk_aliases) = collect_block_and_endblk_handle_aliases_in_order(
+        &decoder,
+        &dynamic_types,
+        &index,
+        best_effort,
+        &block_header_names,
+    )?;
+    let header_names_in_order: Vec<String> = if is_r2010_plus {
+        header_entries
+            .into_iter()
+            .filter_map(
+                |(_raw_handle, _decoded_handle, name)| {
+                    if name.is_empty() {
+                        None
+                    } else {
+                        Some(name)
+                    }
+                },
+            )
+            .collect()
+    } else {
+        let mut names = Vec::new();
+        for obj in ordered_objects.iter().copied() {
+            let Some((_record, header)) =
+                parse_record_and_header(&decoder, obj.offset, best_effort)?
+            else {
+                continue;
+            };
+            if !matches_type_name(header.type_code, 0x31, "BLOCK_HEADER", &dynamic_types) {
+                continue;
+            }
+            if let Some(name) = block_header_names
+                .get(&obj.handle.0)
+                .cloned()
+                .filter(|value| !value.is_empty())
+            {
+                names.push(name);
+                continue;
+            }
+            if let Some(name) = header_entry_name_by_handle
+                .get(&obj.handle.0)
+                .cloned()
+                .filter(|value| !value.is_empty())
+            {
+                names.push(name);
+            }
+        }
+        names
+    };
+    let mut block_handles_in_order: Vec<u64> = Vec::new();
+    let mut endblk_handles_in_order: Vec<u64> = Vec::new();
+    for obj in ordered_objects.iter().copied() {
+        let Some((_record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if matches_type_name(header.type_code, 0x04, "BLOCK", &dynamic_types) {
+            block_handles_in_order.push(obj.handle.0);
+            continue;
+        }
+        if matches_type_name(header.type_code, 0x05, "ENDBLK", &dynamic_types) {
+            endblk_handles_in_order.push(obj.handle.0);
+        }
+    }
+
+    if is_r2010_plus {
+        let block_targets: HashSet<u64> = block_handles_in_order.iter().copied().collect();
+        let endblk_targets: HashSet<u64> = endblk_handles_in_order.iter().copied().collect();
+        if !block_targets.is_empty() {
+            for (handle, name) in collect_block_header_targeted_aliases_in_order(
+                &decoder,
+                &dynamic_types,
+                &index,
+                best_effort,
+                &block_header_names,
+                &block_targets,
+            )? {
+                if !name.is_empty() {
+                    block_aliases.insert(handle, name);
+                }
+            }
+        }
+        if !endblk_targets.is_empty() {
+            for (handle, name) in collect_block_header_targeted_aliases_in_order(
+                &decoder,
+                &dynamic_types,
+                &index,
+                best_effort,
+                &block_header_names,
+                &endblk_targets,
+            )? {
+                if !name.is_empty() {
+                    endblk_aliases.insert(handle, name);
+                }
+            }
+        }
+    }
+
+    if !header_names_in_order.is_empty() {
+        if !is_r2010_plus && block_handles_in_order.len() == header_names_in_order.len() {
+            block_aliases = HashMap::new();
+            for (handle, name) in block_handles_in_order
+                .iter()
+                .copied()
+                .zip(header_names_in_order.iter())
+            {
+                block_aliases.insert(handle, name.clone());
+            }
+        } else {
+            for (index, handle) in block_handles_in_order.iter().copied().enumerate() {
+                if block_aliases.contains_key(&handle) {
+                    continue;
+                }
+                if let Some(name) = header_names_in_order.get(index) {
+                    block_aliases.insert(handle, name.clone());
+                }
+            }
+        }
+
+        if !is_r2010_plus && endblk_handles_in_order.len() == header_names_in_order.len() {
+            endblk_aliases = HashMap::new();
+            for (handle, name) in endblk_handles_in_order
+                .iter()
+                .copied()
+                .zip(header_names_in_order.iter())
+            {
+                endblk_aliases.insert(handle, name.clone());
+            }
+        } else {
+            for (index, handle) in endblk_handles_in_order.iter().copied().enumerate() {
+                if endblk_aliases.contains_key(&handle) {
+                    continue;
+                }
+                if let Some(name) = header_names_in_order.get(index) {
+                    endblk_aliases.insert(handle, name.clone());
+                }
+            }
+        }
+    }
+
+    let mut rows: Vec<BlockEntityNameRow> = Vec::new();
+    rows.reserve(block_aliases.len().saturating_add(endblk_aliases.len()));
+    for (handle, name) in block_aliases {
+        rows.push((handle, "BLOCK".to_string(), name));
+    }
+    for (handle, name) in endblk_aliases {
+        rows.push((handle, "ENDBLK".to_string(), name));
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     if let Some(limit) = limit {
         rows.truncate(limit);
     }
@@ -4640,6 +5084,275 @@ fn vertex_data_for_polyline(
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PolylineSequenceKind {
+    Polyline2d,
+    Polyline3d,
+    PolylineMesh,
+    PolylinePFace,
+}
+
+impl PolylineSequenceKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Polyline2d => "POLYLINE_2D",
+            Self::Polyline3d => "POLYLINE_3D",
+            Self::PolylineMesh => "POLYLINE_MESH",
+            Self::PolylinePFace => "POLYLINE_PFACE",
+        }
+    }
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_polyline_sequence_members(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<PolylineSequenceMembersRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut sorted = index.objects.clone();
+    sorted.sort_by_key(|obj| obj.offset);
+
+    let mut vertex_2d_handles: HashSet<u64> = HashSet::new();
+    let mut vertex_3d_handles: HashSet<u64> = HashSet::new();
+    let mut vertex_mesh_handles: HashSet<u64> = HashSet::new();
+    let mut vertex_pface_handles: HashSet<u64> = HashSet::new();
+    let mut vertex_pface_face_handles: HashSet<u64> = HashSet::new();
+    let mut seqend_handles: HashSet<u64> = HashSet::new();
+
+    for obj in sorted.iter() {
+        let Some((_record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if matches_type_name(header.type_code, 0x0A, "VERTEX_2D", &dynamic_types) {
+            vertex_2d_handles.insert(obj.handle.0);
+            continue;
+        }
+        if matches_type_name(header.type_code, 0x0B, "VERTEX_3D", &dynamic_types) {
+            vertex_3d_handles.insert(obj.handle.0);
+            continue;
+        }
+        if matches_type_name(header.type_code, 0x0C, "VERTEX_MESH", &dynamic_types) {
+            vertex_mesh_handles.insert(obj.handle.0);
+            continue;
+        }
+        if matches_type_name(header.type_code, 0x0D, "VERTEX_PFACE", &dynamic_types) {
+            vertex_pface_handles.insert(obj.handle.0);
+            continue;
+        }
+        if matches_type_name(header.type_code, 0x0E, "VERTEX_PFACE_FACE", &dynamic_types) {
+            vertex_pface_face_handles.insert(obj.handle.0);
+            continue;
+        }
+        if matches_type_name(header.type_code, 0x06, "SEQEND", &dynamic_types) {
+            seqend_handles.insert(obj.handle.0);
+        }
+    }
+
+    let mut result = Vec::new();
+    let mut i = 0usize;
+    while i < sorted.len() {
+        let Some((record, header)) =
+            parse_record_and_header(&decoder, sorted[i].offset, best_effort)?
+        else {
+            i += 1;
+            continue;
+        };
+        let kind = if matches_type_name(header.type_code, 0x0F, "POLYLINE_2D", &dynamic_types) {
+            Some(PolylineSequenceKind::Polyline2d)
+        } else if matches_type_name(header.type_code, 0x10, "POLYLINE_3D", &dynamic_types) {
+            Some(PolylineSequenceKind::Polyline3d)
+        } else if matches_type_name(header.type_code, 0x1E, "POLYLINE_MESH", &dynamic_types) {
+            Some(PolylineSequenceKind::PolylineMesh)
+        } else if matches_type_name(header.type_code, 0x1D, "POLYLINE_PFACE", &dynamic_types) {
+            Some(PolylineSequenceKind::PolylinePFace)
+        } else {
+            None
+        };
+        let Some(kind) = kind else {
+            i += 1;
+            continue;
+        };
+
+        let polyline_handle = sorted[i].handle.0;
+        let mut vertex_handles: Vec<u64> = Vec::new();
+        let mut face_handles: Vec<u64> = Vec::new();
+        let mut seqend_handle: Option<u64> = None;
+
+        let owned_handles: Option<Vec<u64>> = {
+            let mut reader = record.bit_reader();
+            if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+                if best_effort {
+                    None
+                } else {
+                    return Err(to_py_err(err));
+                }
+            } else {
+                match kind {
+                    PolylineSequenceKind::Polyline2d => {
+                        match decode_polyline_2d_for_version(
+                            &mut reader,
+                            decoder.version(),
+                            polyline_handle,
+                        ) {
+                            Ok(polyline) => Some(polyline.owned_handles),
+                            Err(err) if best_effort => None,
+                            Err(err) => return Err(to_py_err(err)),
+                        }
+                    }
+                    PolylineSequenceKind::Polyline3d => {
+                        match decode_polyline_3d_for_version(
+                            &mut reader,
+                            decoder.version(),
+                            &header,
+                            polyline_handle,
+                        ) {
+                            Ok(polyline) => Some(polyline.owned_handles),
+                            Err(err) if best_effort => None,
+                            Err(err) => return Err(to_py_err(err)),
+                        }
+                    }
+                    PolylineSequenceKind::PolylineMesh => {
+                        match decode_polyline_mesh_for_version(
+                            &mut reader,
+                            decoder.version(),
+                            &header,
+                            polyline_handle,
+                        ) {
+                            Ok(polyline) => Some(polyline.owned_handles),
+                            Err(err) if best_effort => None,
+                            Err(err) => return Err(to_py_err(err)),
+                        }
+                    }
+                    PolylineSequenceKind::PolylinePFace => {
+                        match decode_polyline_pface_for_version(
+                            &mut reader,
+                            decoder.version(),
+                            &header,
+                            polyline_handle,
+                        ) {
+                            Ok(polyline) => Some(polyline.owned_handles),
+                            Err(err) if best_effort => None,
+                            Err(err) => return Err(to_py_err(err)),
+                        }
+                    }
+                }
+            }
+        };
+
+        let mut next_i = i + 1;
+        if let Some(owned_handles) = owned_handles {
+            for owned_handle in owned_handles {
+                match kind {
+                    PolylineSequenceKind::Polyline2d => {
+                        if vertex_2d_handles.contains(&owned_handle) {
+                            vertex_handles.push(owned_handle);
+                            continue;
+                        }
+                    }
+                    PolylineSequenceKind::Polyline3d => {
+                        if vertex_3d_handles.contains(&owned_handle) {
+                            vertex_handles.push(owned_handle);
+                            continue;
+                        }
+                    }
+                    PolylineSequenceKind::PolylineMesh => {
+                        if vertex_mesh_handles.contains(&owned_handle) {
+                            vertex_handles.push(owned_handle);
+                            continue;
+                        }
+                    }
+                    PolylineSequenceKind::PolylinePFace => {
+                        if vertex_pface_handles.contains(&owned_handle) {
+                            vertex_handles.push(owned_handle);
+                            continue;
+                        }
+                        if vertex_pface_face_handles.contains(&owned_handle) {
+                            face_handles.push(owned_handle);
+                            continue;
+                        }
+                    }
+                }
+                if seqend_handle.is_none() && seqend_handles.contains(&owned_handle) {
+                    seqend_handle = Some(owned_handle);
+                }
+            }
+        } else {
+            while next_i < sorted.len() {
+                let Some((_next_record, next_header)) =
+                    parse_record_and_header(&decoder, sorted[next_i].offset, best_effort)?
+                else {
+                    next_i += 1;
+                    continue;
+                };
+                let next_handle = sorted[next_i].handle.0;
+                let is_member = match kind {
+                    PolylineSequenceKind::Polyline2d => {
+                        matches_type_name(next_header.type_code, 0x0A, "VERTEX_2D", &dynamic_types)
+                    }
+                    PolylineSequenceKind::Polyline3d => {
+                        matches_type_name(next_header.type_code, 0x0B, "VERTEX_3D", &dynamic_types)
+                    }
+                    PolylineSequenceKind::PolylineMesh => matches_type_name(
+                        next_header.type_code,
+                        0x0C,
+                        "VERTEX_MESH",
+                        &dynamic_types,
+                    ),
+                    PolylineSequenceKind::PolylinePFace => matches_type_name(
+                        next_header.type_code,
+                        0x0D,
+                        "VERTEX_PFACE",
+                        &dynamic_types,
+                    ),
+                };
+                if is_member {
+                    vertex_handles.push(next_handle);
+                    next_i += 1;
+                    continue;
+                }
+                if kind == PolylineSequenceKind::PolylinePFace
+                    && matches_type_name(
+                        next_header.type_code,
+                        0x0E,
+                        "VERTEX_PFACE_FACE",
+                        &dynamic_types,
+                    )
+                {
+                    face_handles.push(next_handle);
+                    next_i += 1;
+                    continue;
+                }
+                if matches_type_name(next_header.type_code, 0x06, "SEQEND", &dynamic_types) {
+                    seqend_handle = Some(next_handle);
+                    next_i += 1;
+                }
+                break;
+            }
+        }
+
+        result.push((
+            polyline_handle,
+            kind.label().to_string(),
+            vertex_handles,
+            face_handles,
+            seqend_handle,
+        ));
+        i = next_i;
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(detect_version, module)?)?;
     module.add_function(wrap_pyfunction!(list_section_locators, module)?)?;
@@ -4678,6 +5391,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_insert_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_minsert_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_block_header_names, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_block_entity_names, module)?)?;
     module.add_function(wrap_pyfunction!(decode_polyline_2d_entities, module)?)?;
     module.add_function(wrap_pyfunction!(
         decode_polyline_2d_entities_interpreted,
@@ -4710,6 +5424,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         decode_polyline_2d_with_vertex_data,
         module
     )?)?;
+    module.add_function(wrap_pyfunction!(decode_polyline_sequence_members, module)?)?;
     Ok(())
 }
 
@@ -5663,7 +6378,10 @@ fn collect_block_header_names_in_order(
         if name.is_empty() {
             continue;
         }
-        let decoded_handle = raw_to_decoded.get(&raw_handle).copied().unwrap_or(raw_handle);
+        let decoded_handle = raw_to_decoded
+            .get(&raw_handle)
+            .copied()
+            .unwrap_or(raw_handle);
         if let Some(handles) = only_handles {
             if !handles.contains(&raw_handle) && !handles.contains(&decoded_handle) {
                 continue;
@@ -5764,6 +6482,49 @@ fn collect_block_record_handle_aliases_in_order(
         };
         if matches_type_name(header.type_code, 0x31, "BLOCK_HEADER", dynamic_types) {
             pending_name = block_header_names.get(&obj.handle.0).cloned();
+            if pending_name.is_none() || pending_name.as_ref().is_some_and(|name| name.is_empty()) {
+                let prefer_prefixed = matches!(
+                    decoder.version(),
+                    version::DwgVersion::R2010
+                        | version::DwgVersion::R2013
+                        | version::DwgVersion::R2018
+                );
+                let parsed = if prefer_prefixed {
+                    let mut prefixed_reader = record.bit_reader();
+                    if skip_object_type_prefix(&mut prefixed_reader, decoder.version()).is_ok() {
+                        decode_block_header_name_record(
+                            &mut prefixed_reader,
+                            decoder.version(),
+                            obj.handle.0,
+                            Some(&header),
+                        )
+                    } else {
+                        let mut reader = record.bit_reader();
+                        decode_block_header_name_record(
+                            &mut reader,
+                            decoder.version(),
+                            obj.handle.0,
+                            Some(&header),
+                        )
+                    }
+                } else {
+                    let mut reader = record.bit_reader();
+                    decode_block_header_name_record(
+                        &mut reader,
+                        decoder.version(),
+                        obj.handle.0,
+                        Some(&header),
+                    )
+                };
+                if let Ok((decoded_handle, decoded_name)) = parsed {
+                    let mapped = block_header_names.get(&decoded_handle).cloned();
+                    if mapped.is_some() {
+                        pending_name = mapped;
+                    } else if !decoded_name.is_empty() {
+                        pending_name = Some(decoded_name);
+                    }
+                }
+            }
             continue;
         }
         if matches_type_name(header.type_code, 0x04, "BLOCK", dynamic_types) {
@@ -5813,6 +6574,149 @@ fn collect_block_record_handle_aliases_in_order(
         }
     }
     Ok(aliases)
+}
+
+fn collect_block_and_endblk_handle_aliases_in_order(
+    decoder: &decoder::Decoder<'_>,
+    dynamic_types: &HashMap<u16, String>,
+    index: &objects::ObjectIndex,
+    best_effort: bool,
+    block_header_names: &HashMap<u64, String>,
+) -> PyResult<(HashMap<u64, String>, HashMap<u64, String>)> {
+    let is_r2010_plus = matches!(
+        decoder.version(),
+        version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
+    );
+    let mut block_aliases: HashMap<u64, String> = HashMap::new();
+    let mut endblk_aliases: HashMap<u64, String> = HashMap::new();
+    let mut pending_name: Option<String> = None;
+    let mut current_block_name: Option<String> = None;
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if matches_type_name(header.type_code, 0x31, "BLOCK_HEADER", dynamic_types) {
+            pending_name = block_header_names.get(&obj.handle.0).cloned();
+            continue;
+        }
+        if matches_type_name(header.type_code, 0x04, "BLOCK", dynamic_types) {
+            let recovered_name =
+                recover_block_name_from_block_record(&record, decoder.version(), &header);
+            let mut block_name = pending_name.clone();
+            if !is_r2010_plus && recovered_name.as_ref().is_some_and(|name| !name.is_empty()) {
+                block_name = recovered_name.clone();
+            }
+            if block_name.is_none() || block_name.as_ref().is_some_and(|name| name.is_empty()) {
+                block_name = recovered_name;
+            }
+            if let Some(name) = block_name {
+                if !name.is_empty() {
+                    current_block_name = Some(name.clone());
+                    block_aliases
+                        .entry(obj.handle.0)
+                        .or_insert_with(|| name.clone());
+                    let prefer_prefixed = matches!(
+                        decoder.version(),
+                        version::DwgVersion::R2010
+                            | version::DwgVersion::R2013
+                            | version::DwgVersion::R2018
+                    );
+                    let decoded_handle = if prefer_prefixed {
+                        let mut prefixed_reader = record.bit_reader();
+                        if skip_object_type_prefix(&mut prefixed_reader, decoder.version()).is_ok()
+                        {
+                            decode_block_record_handle(
+                                &mut prefixed_reader,
+                                decoder.version(),
+                                &header,
+                                obj.handle.0,
+                            )
+                        } else {
+                            let mut reader = record.bit_reader();
+                            decode_block_record_handle(
+                                &mut reader,
+                                decoder.version(),
+                                &header,
+                                obj.handle.0,
+                            )
+                        }
+                    } else {
+                        let mut reader = record.bit_reader();
+                        decode_block_record_handle(
+                            &mut reader,
+                            decoder.version(),
+                            &header,
+                            obj.handle.0,
+                        )
+                    };
+                    if let Ok(decoded_handle) = decoded_handle {
+                        block_aliases.entry(decoded_handle).or_insert(name);
+                    }
+                } else {
+                    current_block_name = None;
+                }
+            } else {
+                current_block_name = None;
+            }
+            continue;
+        }
+        if matches_type_name(header.type_code, 0x05, "ENDBLK", dynamic_types) {
+            let mut endblk_name = current_block_name.clone();
+            if endblk_name.is_none() || endblk_name.as_ref().is_some_and(|name| name.is_empty()) {
+                endblk_name = pending_name.clone();
+            }
+            let Some(name) = endblk_name else {
+                pending_name = None;
+                current_block_name = None;
+                continue;
+            };
+            if !name.is_empty() {
+                endblk_aliases
+                    .entry(obj.handle.0)
+                    .or_insert_with(|| name.clone());
+                let prefer_prefixed = matches!(
+                    decoder.version(),
+                    version::DwgVersion::R2010
+                        | version::DwgVersion::R2013
+                        | version::DwgVersion::R2018
+                );
+                let decoded_handle = if prefer_prefixed {
+                    let mut prefixed_reader = record.bit_reader();
+                    if skip_object_type_prefix(&mut prefixed_reader, decoder.version()).is_ok() {
+                        decode_block_record_handle(
+                            &mut prefixed_reader,
+                            decoder.version(),
+                            &header,
+                            obj.handle.0,
+                        )
+                    } else {
+                        let mut reader = record.bit_reader();
+                        decode_block_record_handle(
+                            &mut reader,
+                            decoder.version(),
+                            &header,
+                            obj.handle.0,
+                        )
+                    }
+                } else {
+                    let mut reader = record.bit_reader();
+                    decode_block_record_handle(
+                        &mut reader,
+                        decoder.version(),
+                        &header,
+                        obj.handle.0,
+                    )
+                };
+                if let Ok(decoded_handle) = decoded_handle {
+                    endblk_aliases.entry(decoded_handle).or_insert(name);
+                }
+            }
+            pending_name = None;
+            current_block_name = None;
+        }
+    }
+    Ok((block_aliases, endblk_aliases))
 }
 
 fn collect_block_header_stream_aliases_in_order(
@@ -5895,9 +6799,8 @@ fn collect_block_header_stream_aliases_in_order(
                     score = score.saturating_add(120);
                 }
 
-                let known_like =
-                    object_type_codes.contains_key(&candidate)
-                        || block_header_names.contains_key(&candidate);
+                let known_like = object_type_codes.contains_key(&candidate)
+                    || block_header_names.contains_key(&candidate);
                 if known_like {
                     match best_known {
                         Some((best_score, _)) if best_score <= score => {}

@@ -9,6 +9,7 @@ import ezdwg
 import ezdwg.cli as cli_module
 import ezdwg.convert as convert_module
 import ezdwg.document as document_module
+from ezdwg.entity import Entity
 from tests._dxf_helpers import dxf_entities_of_type, group_float
 from tests._dxf_helpers import dxf_lwpolyline_points
 
@@ -151,6 +152,783 @@ def test_to_dxf_writes_insert_as_point_fallback(tmp_path: Path) -> None:
     assert abs(group_float(inserts[0], "50") - 15.0) < 1.0e-6
 
 
+def test_to_dxf_exports_block_definition_for_insert(tmp_path: Path) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    output = tmp_path / "insert_block_out.dxf"
+    result = ezdwg.to_dxf(
+        str(SAMPLES / "insert_2004.dwg"),
+        str(output),
+        types="INSERT",
+        dxf_version="R2010",
+    )
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+
+    dxf_doc = ezdxf.readfile(str(output))
+    block = dxf_doc.blocks.get("BLK1")
+    # BLK1 contains at least one drawable primitive in the source DWG.
+    assert len(list(block)) > 0
+
+    inserts = list(dxf_doc.modelspace().query("INSERT"))
+    assert len(inserts) == 1
+    assert inserts[0].dxf.name == "BLK1"
+
+
+def test_to_dxf_insert_writes_linked_attribs(monkeypatch, tmp_path: Path) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_handles_by_type_name.cache_clear()
+    document_module._block_and_endblk_name_maps.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [
+            (100, 10, 0, 0x04, "BLOCK", "Entity"),
+            (110, 11, 0, 0x13, "LINE", "Entity"),
+            (101, 12, 0, 0x05, "ENDBLK", "Entity"),
+            (200, 13, 0, 0x07, "INSERT", "Entity"),
+            (210, 14, 0, 0x02, "ATTRIB", "Entity"),
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_block_entity_names",
+        lambda _path: [(100, "BLOCK", "BLK_ATTR"), (101, "ENDBLK", "BLK_ATTR")],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_line_entities",
+        lambda _path: [(110, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0)],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_insert_entities",
+        lambda _path: [(200, 5.0, 5.0, 0.0, 1.0, 1.0, 1.0, 0.0, "BLK_ATTR")],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_attrib_entities",
+        lambda _path: [
+            (
+                210,
+                "VAL1",
+                "TAG1",
+                None,
+                (5.0, 5.0, 0.0),
+                None,
+                (0.0, 0.0, 1.0),
+                (0.0, 0.0, 2.5, 0.0, 1.0),
+                (0, 0, 0),
+                0,
+                False,
+                (None, 200),
+            )
+        ],
+    )
+
+    output = tmp_path / "insert_attrib_out.dxf"
+    doc = document_module.Document(path="dummy_insert_attrib.dwg", version="AC1018")
+    result = ezdwg.to_dxf(doc, str(output), types="INSERT", dxf_version="R2010")
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+
+    dxf_doc = ezdxf.readfile(str(output))
+    inserts = list(dxf_doc.modelspace().query("INSERT"))
+    assert len(inserts) == 1
+    assert inserts[0].dxf.name == "BLK_ATTR"
+    assert len(inserts[0].attribs) == 1
+    assert inserts[0].attribs[0].dxf.tag == "TAG1"
+    assert inserts[0].attribs[0].dxf.text == "VAL1"
+    assert abs(float(inserts[0].attribs[0].dxf.height) - 2.5) < 1.0e-9
+    assert len(dxf_entities_of_type(output, "POINT")) == 0
+
+
+def test_to_dxf_block_export_writes_attdef_entity(monkeypatch, tmp_path: Path) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_handles_by_type_name.cache_clear()
+    document_module._block_and_endblk_name_maps.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [
+            (100, 10, 0, 0x04, "BLOCK", "Entity"),
+            (110, 11, 0, 0x03, "ATTDEF", "Entity"),
+            (101, 12, 0, 0x05, "ENDBLK", "Entity"),
+            (200, 13, 0, 0x07, "INSERT", "Entity"),
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_block_entity_names",
+        lambda _path: [(100, "BLOCK", "BLK_ATTDEF"), (101, "ENDBLK", "BLK_ATTDEF")],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_insert_entities",
+        lambda _path: [(200, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, "BLK_ATTDEF")],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_attdef_entities",
+        lambda _path: [
+            (
+                110,
+                "Default",
+                "NAME",
+                "Enter name",
+                (1.0, 2.0, 0.0),
+                None,
+                (0.0, 0.0, 1.0),
+                (0.0, 0.0, 2.0, 0.0, 1.0),
+                (0, 0, 0),
+                0,
+                False,
+                (None, 100),
+            )
+        ],
+    )
+
+    output = tmp_path / "insert_attdef_out.dxf"
+    doc = document_module.Document(path="dummy_insert_attdef.dwg", version="AC1018")
+    result = ezdwg.to_dxf(doc, str(output), types="INSERT", dxf_version="R2010")
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+
+    dxf_doc = ezdxf.readfile(str(output))
+    block = dxf_doc.blocks.get("BLK_ATTDEF")
+    attdefs = list(block.query("ATTDEF"))
+    assert len(attdefs) == 1
+    assert attdefs[0].dxf.tag == "NAME"
+    assert attdefs[0].dxf.text == "Default"
+    assert len(list(block.query("TEXT"))) == 0
+
+
+def test_to_dxf_writes_minsert_as_insert_array(monkeypatch, tmp_path: Path) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_handles_by_type_name.cache_clear()
+    document_module._block_and_endblk_name_maps.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [
+            (100, 10, 0, 0x04, "BLOCK", "Entity"),
+            (110, 11, 0, 0x13, "LINE", "Entity"),
+            (101, 12, 0, 0x05, "ENDBLK", "Entity"),
+            (200, 13, 0, 0x08, "MINSERT", "Entity"),
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_block_entity_names",
+        lambda _path: [(100, "BLOCK", "BLK_ARRAY"), (101, "ENDBLK", "BLK_ARRAY")],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_line_entities",
+        lambda _path: [(110, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0)],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_minsert_entities",
+        lambda _path: [
+            (
+                200,
+                5.0,
+                6.0,
+                0.0,
+                1.0,
+                1.0,
+                1.0,
+                0.0,
+                (4, 5, 2.5, 3.5, "BLK_ARRAY"),
+            )
+        ],
+    )
+
+    output = tmp_path / "minsert_out.dxf"
+    doc = document_module.Document(path="dummy_minsert_convert.dwg", version="AC1018")
+    result = ezdwg.to_dxf(doc, str(output), types="MINSERT", dxf_version="R2010")
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+    assert result.skipped_entities == 0
+    assert len(dxf_entities_of_type(output, "POINT")) == 0
+
+    dxf_doc = ezdxf.readfile(str(output))
+    inserts = list(dxf_doc.modelspace().query("INSERT"))
+    assert len(inserts) == 1
+    insert = inserts[0]
+    assert insert.dxf.name == "BLK_ARRAY"
+    assert int(insert.dxf.column_count) == 4
+    assert int(insert.dxf.row_count) == 5
+    assert abs(float(insert.dxf.column_spacing) - 2.5) < 1.0e-9
+    assert abs(float(insert.dxf.row_spacing) - 3.5) < 1.0e-9
+
+    block = dxf_doc.blocks.get("BLK_ARRAY")
+    assert len(list(block.query("LINE"))) == 1
+
+
+def test_to_dxf_writes_minsert_with_attribs_as_expanded_inserts(
+    monkeypatch, tmp_path: Path
+) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_handles_by_type_name.cache_clear()
+    document_module._block_and_endblk_name_maps.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [
+            (100, 10, 0, 0x04, "BLOCK", "Entity"),
+            (110, 11, 0, 0x13, "LINE", "Entity"),
+            (101, 12, 0, 0x05, "ENDBLK", "Entity"),
+            (200, 13, 0, 0x08, "MINSERT", "Entity"),
+            (210, 14, 0, 0x02, "ATTRIB", "Entity"),
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_block_entity_names",
+        lambda _path: [(100, "BLOCK", "BLK_ARRAY"), (101, "ENDBLK", "BLK_ARRAY")],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_line_entities",
+        lambda _path: [(110, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0)],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_minsert_entities",
+        lambda _path: [
+            (
+                200,
+                5.0,
+                6.0,
+                0.0,
+                1.0,
+                1.0,
+                1.0,
+                0.0,
+                (2, 2, 2.5, 3.5, "BLK_ARRAY"),
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_attrib_entities",
+        lambda _path: [
+            (
+                210,
+                "ARRAY_VAL",
+                "ARRAY_TAG",
+                None,
+                (5.0, 6.0, 0.0),
+                None,
+                (0.0, 0.0, 1.0),
+                (0.0, 0.0, 1.2, 0.0, 1.0),
+                (0, 0, 0),
+                0,
+                False,
+                (None, 200),
+            )
+        ],
+    )
+
+    output = tmp_path / "minsert_expand_out.dxf"
+    doc = document_module.Document(path="dummy_minsert_expand.dwg", version="AC1018")
+    result = ezdwg.to_dxf(doc, str(output), types="MINSERT", dxf_version="R2010")
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+    assert result.skipped_entities == 0
+
+    dxf_doc = ezdxf.readfile(str(output))
+    inserts = list(dxf_doc.modelspace().query("INSERT"))
+    assert len(inserts) == 4
+
+    insert_points = {
+        (float(insert.dxf.insert.x), float(insert.dxf.insert.y)) for insert in inserts
+    }
+    assert insert_points == {(5.0, 6.0), (7.5, 6.0), (5.0, 9.5), (7.5, 9.5)}
+
+    attrib_points = {
+        (float(insert.attribs[0].dxf.insert.x), float(insert.attribs[0].dxf.insert.y))
+        for insert in inserts
+    }
+    assert attrib_points == insert_points
+    assert all(len(insert.attribs) == 1 for insert in inserts)
+    assert all(insert.attribs[0].dxf.tag == "ARRAY_TAG" for insert in inserts)
+    assert all(insert.attribs[0].dxf.text == "ARRAY_VAL" for insert in inserts)
+    assert len(dxf_entities_of_type(output, "POINT")) == 0
+
+
+def test_to_dxf_writes_minsert_with_rotation_expanded_offsets(
+    monkeypatch, tmp_path: Path
+) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_handles_by_type_name.cache_clear()
+    document_module._block_and_endblk_name_maps.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [
+            (100, 10, 0, 0x04, "BLOCK", "Entity"),
+            (110, 11, 0, 0x13, "LINE", "Entity"),
+            (101, 12, 0, 0x05, "ENDBLK", "Entity"),
+            (200, 13, 0, 0x08, "MINSERT", "Entity"),
+            (210, 14, 0, 0x02, "ATTRIB", "Entity"),
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_block_entity_names",
+        lambda _path: [(100, "BLOCK", "BLK_ROT"), (101, "ENDBLK", "BLK_ROT")],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_line_entities",
+        lambda _path: [(110, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0)],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_minsert_entities",
+        lambda _path: [
+            (
+                200,
+                10.0,
+                20.0,
+                0.0,
+                1.0,
+                1.0,
+                1.0,
+                math.pi / 2.0,
+                (2, 2, 2.0, 3.0, "BLK_ROT"),
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_attrib_entities",
+        lambda _path: [
+            (
+                210,
+                "ROT_VAL",
+                "ROT_TAG",
+                None,
+                (10.0, 20.0, 0.0),
+                None,
+                (0.0, 0.0, 1.0),
+                (0.0, 0.0, 1.0, 0.0, 1.0),
+                (0, 0, 0),
+                0,
+                False,
+                (None, 200),
+            )
+        ],
+    )
+
+    output = tmp_path / "minsert_rot_expand_out.dxf"
+    doc = document_module.Document(path="dummy_minsert_rot_expand.dwg", version="AC1018")
+    result = ezdwg.to_dxf(doc, str(output), types="MINSERT", dxf_version="R2010")
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+    assert result.skipped_entities == 0
+
+    dxf_doc = ezdxf.readfile(str(output))
+    inserts = list(dxf_doc.modelspace().query("INSERT"))
+    assert len(inserts) == 4
+
+    expected = {(10.0, 20.0), (10.0, 22.0), (7.0, 20.0), (7.0, 22.0)}
+    insert_points = {
+        (round(float(insert.dxf.insert.x), 6), round(float(insert.dxf.insert.y), 6))
+        for insert in inserts
+    }
+    assert insert_points == expected
+
+    attrib_points = {
+        (
+            round(float(insert.attribs[0].dxf.insert.x), 6),
+            round(float(insert.attribs[0].dxf.insert.y), 6),
+        )
+        for insert in inserts
+    }
+    assert attrib_points == expected
+
+
+def test_to_dxf_block_export_materializes_helper_vertices(monkeypatch, tmp_path: Path) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_handles_by_type_name.cache_clear()
+    document_module._block_and_endblk_name_maps.cache_clear()
+    document_module._polyline_sequence_relationships.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [
+            (100, 10, 0, 0x04, "BLOCK", "Entity"),
+            (110, 11, 0, 0x7F00, "POLYLINE", "Entity"),
+            (111, 12, 0, 0x0A, "VERTEX_2D", "Entity"),
+            (112, 13, 0, 0x0A, "VERTEX_2D", "Entity"),
+            (113, 14, 0, 0x06, "SEQEND", "Entity"),
+            (101, 15, 0, 0x05, "ENDBLK", "Entity"),
+            (200, 16, 0, 0x07, "INSERT", "Entity"),
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_block_entity_names",
+        lambda _path: [(100, "BLOCK", "BLK_HELP"), (101, "ENDBLK", "BLK_HELP")],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_insert_entities",
+        lambda _path: [(200, 5.0, 5.0, 0.0, 1.0, 1.0, 1.0, 0.0, "BLK_HELP")],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_polyline_2d_with_vertex_data",
+        lambda _path: [
+            (
+                110,
+                0,
+                [
+                    (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0),
+                    (10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0),
+                ],
+            )
+        ],
+    )
+    monkeypatch.setattr(document_module.raw, "decode_polyline_2d_entities_interpreted", lambda _path: [])
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_polyline_2d_with_vertices_interpolated",
+        lambda _path, _segments_per_span=8: [],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_vertex_2d_entities",
+        lambda _path: [
+            (111, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            (112, 0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_polyline_sequence_members",
+        lambda _path: [(110, "POLYLINE_2D", [111, 112], [], 113)],
+    )
+
+    output = tmp_path / "insert_helper_block_out.dxf"
+    doc = document_module.Document(path="dummy_insert_helper_block.dwg", version="AC1018")
+    result = ezdwg.to_dxf(doc, str(output), types="INSERT", dxf_version="R2010")
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+
+    dxf_doc = ezdxf.readfile(str(output))
+    inserts = list(dxf_doc.modelspace().query("INSERT"))
+    assert len(inserts) == 1
+    assert inserts[0].dxf.name == "BLK_HELP"
+
+    block = dxf_doc.blocks.get("BLK_HELP")
+    assert len(list(block.query("LWPOLYLINE"))) == 1
+
+
+def test_to_dxf_block_export_reuses_owner_map_for_helpers(monkeypatch, tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_handles_by_type_name.cache_clear()
+    document_module._block_and_endblk_name_maps.cache_clear()
+    document_module._polyline_sequence_relationships.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [
+            (100, 10, 0, 0x04, "BLOCK", "Entity"),
+            (110, 11, 0, 0x7F00, "POLYLINE", "Entity"),
+            (111, 12, 0, 0x0A, "VERTEX_2D", "Entity"),
+            (112, 13, 0, 0x0A, "VERTEX_2D", "Entity"),
+            (113, 14, 0, 0x06, "SEQEND", "Entity"),
+            (101, 15, 0, 0x05, "ENDBLK", "Entity"),
+            (120, 16, 0, 0x04, "BLOCK", "Entity"),
+            (130, 17, 0, 0x7F00, "POLYLINE", "Entity"),
+            (131, 18, 0, 0x0A, "VERTEX_2D", "Entity"),
+            (132, 19, 0, 0x0A, "VERTEX_2D", "Entity"),
+            (133, 20, 0, 0x06, "SEQEND", "Entity"),
+            (121, 21, 0, 0x05, "ENDBLK", "Entity"),
+            (200, 22, 0, 0x07, "INSERT", "Entity"),
+            (201, 23, 0, 0x07, "INSERT", "Entity"),
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_block_entity_names",
+        lambda _path: [
+            (100, "BLOCK", "BLK_HELP_A"),
+            (101, "ENDBLK", "BLK_HELP_A"),
+            (120, "BLOCK", "BLK_HELP_B"),
+            (121, "ENDBLK", "BLK_HELP_B"),
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_insert_entities",
+        lambda _path: [
+            (200, 5.0, 5.0, 0.0, 1.0, 1.0, 1.0, 0.0, "BLK_HELP_A"),
+            (201, 15.0, 5.0, 0.0, 1.0, 1.0, 1.0, 0.0, "BLK_HELP_B"),
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_polyline_2d_with_vertex_data",
+        lambda _path: [
+            (
+                110,
+                0,
+                [
+                    (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0),
+                    (10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0),
+                ],
+            ),
+            (
+                130,
+                0,
+                [
+                    (0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0),
+                    (10.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0),
+                ],
+            ),
+        ],
+    )
+    monkeypatch.setattr(document_module.raw, "decode_polyline_2d_entities_interpreted", lambda _path: [])
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_polyline_2d_with_vertices_interpolated",
+        lambda _path, _segments_per_span=8: [],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_vertex_2d_entities",
+        lambda _path: [
+            (111, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            (112, 0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            (131, 0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            (132, 0, 10.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_polyline_sequence_members",
+        lambda _path: [
+            (110, "POLYLINE_2D", [111, 112], [], 113),
+            (130, "POLYLINE_2D", [131, 132], [], 133),
+        ],
+    )
+
+    original_entities_by_handle = convert_module._entities_by_handle
+    counter = {"calls": 0}
+
+    def counted_entities_by_handle(layout, types):
+        counter["calls"] += 1
+        return original_entities_by_handle(layout, types)
+
+    monkeypatch.setattr(convert_module, "_entities_by_handle", counted_entities_by_handle)
+
+    output = tmp_path / "insert_helper_block_perf_out.dxf"
+    doc = document_module.Document(path="dummy_insert_helper_block_perf.dwg", version="AC1018")
+    result = ezdwg.to_dxf(doc, str(output), types="INSERT", dxf_version="R2010")
+
+    assert output.exists()
+    assert result.total_entities == 2
+    assert result.written_entities == 2
+    # Expected calls:
+    # 1) block traversal for INSERT references
+    # 2) all block member entities by type
+    # 3) one-time owner polyline fetch reused across blocks
+    assert counter["calls"] == 3
+
+
+def test_entities_by_handle_skips_invalid_handles_and_iteration_errors() -> None:
+    class DummyLayout:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def query(self, dxftype: str):
+            self.calls.append(dxftype)
+            if dxftype == "ARC":
+                def arc_iter():
+                    yield Entity(dxftype="ARC", handle=0x200, dxf={})
+                    raise RuntimeError("broken arc iterator")
+
+                return arc_iter()
+            if dxftype == "CIRCLE":
+                raise RuntimeError("failed to build query")
+            if dxftype == "LINE":
+                return iter(
+                    [
+                        Entity(dxftype="LINE", handle=0x100, dxf={}),
+                        Entity(dxftype="LINE", handle="bad-handle", dxf={}),
+                        Entity(dxftype="LINE", handle=0x101, dxf={}),
+                    ]
+                )
+            return iter([])
+
+    layout = DummyLayout()
+    entities_by_handle = convert_module._entities_by_handle(layout, {"LINE", "ARC", "CIRCLE"})
+
+    assert layout.calls == ["ARC", "CIRCLE", "LINE"]
+    assert sorted(entities_by_handle) == [0x100, 0x101, 0x200]
+    assert entities_by_handle[0x200].dxftype == "ARC"
+
+
+def test_collect_referenced_block_names_trims_insert_names() -> None:
+    block_members_by_name = {
+        "BLK_A": [(10, "INSERT"), (11, "LINE")],
+        "BLK_B": [(20, "LINE")],
+    }
+    insert_entities_by_handle = {
+        10: Entity(dxftype="INSERT", handle=10, dxf={"name": "  BLK_B  "}),
+    }
+
+    selected = convert_module._collect_referenced_block_names(
+        block_members_by_name,
+        {"BLK_A"},
+        insert_entities_by_handle,
+    )
+
+    assert selected == {"BLK_A", "BLK_B"}
+
+
+def test_collect_referenced_block_names_includes_minsert_references() -> None:
+    block_members_by_name = {
+        "BLK_A": [(10, "MINSERT"), (11, "LINE")],
+        "BLK_B": [(20, "LINE")],
+    }
+    insert_entities_by_handle = {
+        10: Entity(dxftype="MINSERT", handle=10, dxf={"name": " BLK_B "}),
+    }
+
+    selected = convert_module._collect_referenced_block_names(
+        block_members_by_name,
+        {"BLK_A"},
+        insert_entities_by_handle,
+    )
+
+    assert selected == {"BLK_A", "BLK_B"}
+
+
+def test_to_dxf_block_export_trims_insert_block_name(monkeypatch, tmp_path: Path) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_handles_by_type_name.cache_clear()
+    document_module._block_and_endblk_name_maps.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [
+            (100, 10, 0, 0x04, "BLOCK", "Entity"),
+            (110, 11, 0, 0x13, "LINE", "Entity"),
+            (101, 12, 0, 0x05, "ENDBLK", "Entity"),
+            (200, 13, 0, 0x07, "INSERT", "Entity"),
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_block_entity_names",
+        lambda _path: [(100, "BLOCK", "BLK_TRIM"), (101, "ENDBLK", "BLK_TRIM")],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_line_entities",
+        lambda _path: [(110, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0)],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_insert_entities",
+        lambda _path: [(200, 5.0, 5.0, 0.0, 1.0, 1.0, 1.0, 0.0, "  BLK_TRIM  ")],
+    )
+
+    output = tmp_path / "insert_trimmed_name_out.dxf"
+    doc = document_module.Document(path="dummy_insert_trimmed_name.dwg", version="AC1018")
+    result = ezdwg.to_dxf(doc, str(output), types="INSERT", dxf_version="R2010")
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+
+    dxf_doc = ezdxf.readfile(str(output))
+    inserts = list(dxf_doc.modelspace().query("INSERT"))
+    assert len(inserts) == 1
+    assert inserts[0].dxf.name == "BLK_TRIM"
+    assert len(dxf_entities_of_type(output, "POINT")) == 0
+
+    block = dxf_doc.blocks.get("BLK_TRIM")
+    assert len(list(block.query("LINE"))) == 1
+
+
 def test_read_insert_exposes_block_name() -> None:
     doc = ezdwg.read(str(SAMPLES / "insert_2004.dwg"))
     entities = list(doc.modelspace().query("INSERT"))
@@ -184,6 +962,57 @@ def test_to_dxf_dimension_writes_native_dimension_without_line_fallback(tmp_path
     assert result.written_entities == result.total_entities
     assert len(dxf_entities_of_type(output, "DIMENSION")) > 0
     assert len(dxf_entities_of_type(output, "LINE")) == 0
+
+
+def test_to_dxf_vertex_filter_writes_owner_polyline(monkeypatch, tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+    document_module._polyline_sequence_relationships.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_vertex_2d_entities",
+        lambda _path: [
+            (0x5101, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            (0x5102, 0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_polyline_2d_with_vertex_data",
+        lambda _path: [
+            (
+                0x5001,
+                0,
+                [
+                    (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0),
+                    (10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0),
+                ],
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_polyline_sequence_members",
+        lambda _path: [(0x5001, "POLYLINE_2D", [0x5101, 0x5102], [], 0x51FF)],
+    )
+
+    output = tmp_path / "vertex_owner_out.dxf"
+    doc = document_module.Document(path="dummy_vertex_convert_owner.dwg", version="AC1018")
+    result = ezdwg.to_dxf(doc, str(output), types="VERTEX_2D", dxf_version="R2010")
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+    assert result.skipped_entities == 0
+    entities = dxf_entities_of_type(output, "LWPOLYLINE")
+    assert len(entities) == 1
+    points = dxf_lwpolyline_points(entities[0])
+    assert points == [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0)]
 
 
 def test_to_dxf_writes_polyline_2d_as_lwpolyline(monkeypatch, tmp_path: Path) -> None:

@@ -30,7 +30,7 @@ def test_query_attrib_maps_text_and_attribute_fields(monkeypatch) -> None:
                 (0, 0, 0),
                 2,
                 True,
-                None,
+                (None, 0x404),
             )
         ],
     )
@@ -46,6 +46,8 @@ def test_query_attrib_maps_text_and_attribute_fields(monkeypatch) -> None:
     assert dxf["attribute_flags"] == 2
     assert dxf["lock_position"] is True
     assert dxf["height"] == 2.5
+    assert dxf["owner_handle"] == 0x404
+    assert dxf["owner_type"] == "INSERT"
 
 
 def test_query_attdef_includes_prompt(monkeypatch) -> None:
@@ -66,7 +68,7 @@ def test_query_attdef_includes_prompt(monkeypatch) -> None:
                 (0, 1, 0),
                 0,
                 False,
-                None,
+                (None, 0x300),
             )
         ],
     )
@@ -80,6 +82,8 @@ def test_query_attdef_includes_prompt(monkeypatch) -> None:
     assert dxf["tag"] == "NAME"
     assert dxf["prompt"] == "Enter name"
     assert dxf["lock_position"] is False
+    assert dxf["owner_handle"] == 0x300
+    assert dxf["owner_type"] == "BLOCK"
 
 
 def test_query_minsert_maps_array_parameters(monkeypatch) -> None:
@@ -97,10 +101,7 @@ def test_query_minsert_maps_array_parameters(monkeypatch) -> None:
                 3.0,
                 1.0,
                 math.pi / 2.0,
-                4,
-                5,
-                6.5,
-                7.5,
+                (4, 5, 6.5, 7.5, "BLK_ARRAY"),
             )
         ],
     )
@@ -120,6 +121,7 @@ def test_query_minsert_maps_array_parameters(monkeypatch) -> None:
     assert dxf["row_count"] == 5
     assert dxf["column_spacing"] == 6.5
     assert dxf["row_spacing"] == 7.5
+    assert dxf["name"] == "BLK_ARRAY"
 
 
 def test_query_insert_maps_transform_parameters(monkeypatch) -> None:

@@ -8,6 +8,7 @@ def _patch_empty_color_maps(monkeypatch) -> None:
     monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
     document_module._entity_style_map.cache_clear()
     document_module._layer_color_map.cache_clear()
+    document_module._polyline_sequence_relationships.cache_clear()
 
 
 def test_query_polyline_3d_maps_vertices(monkeypatch) -> None:
@@ -28,6 +29,11 @@ def test_query_polyline_3d_maps_vertices(monkeypatch) -> None:
             )
         ],
     )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_polyline_sequence_members",
+        lambda _path: [(0xA01, "POLYLINE_3D", [0xA11, 0xA12, 0xA13], [], 0xAFF)],
+    )
 
     doc = document_module.Document(path="dummy_polyline3d.dwg", version="AC1018")
     entities = list(doc.modelspace().query("POLYLINE_3D"))
@@ -39,4 +45,5 @@ def test_query_polyline_3d_maps_vertices(monkeypatch) -> None:
     assert entity.dxf["flags"] == 0x09
     assert entity.dxf["closed"] is True
     assert entity.dxf["points"][0] == (0.0, 0.0, 1.0)
-
+    assert entity.dxf["vertex_handles"] == [0xA11, 0xA12, 0xA13]
+    assert entity.dxf["seqend_handle"] == 0xAFF

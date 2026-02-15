@@ -54,7 +54,6 @@ doc.plot(types="ARC", arc_segments=96)
 ```bash
 ezdwg --version
 ezdwg inspect examples/data/line_2000.dwg
-python -m ezdwg inspect examples/data/line_2000.dwg
 ezdwg convert examples/data/line_2000.dwg /tmp/line_2000_out.dxf
 ezdwg convert examples/data/arc_2000.dwg /tmp/arc_2000_out.dxf --types "ARC" --dxf-version R2010
 ```

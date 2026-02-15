@@ -10,6 +10,7 @@ use crate::entities::common::{
 #[derive(Debug, Clone)]
 pub struct AttribEntity {
     pub handle: u64,
+    pub owner_handle: Option<u64>,
     pub color_index: Option<u16>,
     pub true_color: Option<u32>,
     pub layer_handle: u64,
@@ -189,8 +190,9 @@ fn decode_attrib_like_with_header(
     // Handles are stored in the handle stream at obj_size bit offset.
     reader.set_bit_pos(header.obj_size);
     let handles_pos = reader.get_pos();
-    let (layer_handle, style_handle) = match parse_common_entity_handles(reader, &header) {
+    let (owner_handle, layer_handle, style_handle) = match parse_common_entity_handles(reader, &header) {
         Ok(common_handles) => (
+            common_handles.owner_ref,
             common_handles.layer,
             read_handle_reference(reader, header.handle).ok(),
         ),
@@ -203,13 +205,14 @@ fn decode_attrib_like_with_header(
         {
             reader.set_pos(handles_pos.0, handles_pos.1);
             let layer = parse_common_entity_layer_handle(reader, &header).unwrap_or(0);
-            (layer, None)
+            (None, layer, None)
         }
         Err(err) => return Err(err),
     };
 
     Ok(AttribEntity {
         handle: header.handle,
+        owner_handle,
         color_index: header.color.index,
         true_color: header.color.true_color,
         layer_handle,
