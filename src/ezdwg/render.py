@@ -68,6 +68,23 @@ def plot_layout(
                 closed=bool(entity.dxf.get("closed", False)),
                 arc_segments=arc_segments,
             )
+        elif dxftype == "POLYLINE_2D":
+            interpolation_applied = bool(entity.dxf.get("interpolation_applied", False))
+            draw_points = (
+                entity.dxf.get("interpolated_points", [])
+                if interpolation_applied
+                else entity.dxf.get("points", [])
+            )
+            draw_bulges = None if interpolation_applied else entity.dxf.get("bulges")
+            _draw_polyline(
+                ax,
+                draw_points,
+                line_width,
+                color=color,
+                bulges=draw_bulges,
+                closed=bool(entity.dxf.get("closed", False)),
+                arc_segments=arc_segments,
+            )
         elif dxftype == "POLYLINE_3D":
             _draw_polyline(
                 ax,

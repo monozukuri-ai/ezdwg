@@ -14,6 +14,7 @@ SUPPORTED_VERSIONS = {"AC1014", "AC1015", "AC1018", "AC1021", "AC1024", "AC1027"
 SUPPORTED_ENTITY_TYPES = (
     "LINE",
     "LWPOLYLINE",
+    "POLYLINE_2D",
     "POLYLINE_3D",
     "POLYLINE_MESH",
     "POLYLINE_PFACE",
@@ -50,6 +51,8 @@ TYPE_ALIASES = {
 }
 
 _BULK_PRIMITIVE_TYPES = {"LINE", "ARC", "CIRCLE"}
+_POLYLINE_2D_INTERPOLATION_SEGMENTS = 8
+_POLYLINE_2D_SPLINE_CURVE_TYPES = {"QuadraticBSpline", "CubicBSpline", "Bezier"}
 
 
 def read(path: str) -> "Document":
@@ -227,6 +230,123 @@ class Layout:
                         layer_color_map,
                         layer_color_overrides,
                         dxftype="LWPOLYLINE",
+                    ),
+                )
+            return
+
+        if dxftype == "POLYLINE_2D":
+            interpreted_map = _polyline_2d_interpreted_map(decode_path)
+            interpolated_points_map = _polyline_2d_interpolated_points_map(
+                decode_path, interpreted_map
+            )
+            for handle, flags, vertices in raw.decode_polyline_2d_with_vertex_data(decode_path):
+                points = []
+                bulges = []
+                widths = []
+                tangent_dirs = []
+                vertex_flags = []
+                for vertex in vertices:
+                    (
+                        x,
+                        y,
+                        z,
+                        start_width,
+                        end_width,
+                        bulge,
+                        tangent_dir,
+                        vertex_flag,
+                    ) = vertex
+                    points.append((x, y, z))
+                    bulges.append(bulge)
+                    widths.append((start_width, end_width))
+                    tangent_dirs.append(tangent_dir)
+                    vertex_flags.append(int(vertex_flag))
+
+                flags_info = _polyline_2d_flags_info(int(flags))
+                interpreted = interpreted_map.get(int(handle))
+                curve_type = None
+                curve_type_label = None
+                if interpreted is not None:
+                    flags_info.update(
+                        {
+                            "closed": bool(interpreted.get("closed", flags_info["closed"])),
+                            "curve_fit": bool(interpreted.get("curve_fit", flags_info["curve_fit"])),
+                            "spline_fit": bool(interpreted.get("spline_fit", flags_info["spline_fit"])),
+                            "is_3d_polyline": bool(
+                                interpreted.get("is_3d_polyline", flags_info["is_3d_polyline"])
+                            ),
+                            "is_3d_mesh": bool(
+                                interpreted.get("is_3d_mesh", flags_info["is_3d_mesh"])
+                            ),
+                            "is_closed_mesh": bool(
+                                interpreted.get("is_closed_mesh", flags_info["is_closed_mesh"])
+                            ),
+                            "is_polyface_mesh": bool(
+                                interpreted.get("is_polyface_mesh", flags_info["is_polyface_mesh"])
+                            ),
+                            "continuous_linetype": bool(
+                                interpreted.get(
+                                    "continuous_linetype",
+                                    flags_info["continuous_linetype"],
+                                )
+                            ),
+                        }
+                    )
+                    if interpreted.get("curve_type") is not None:
+                        curve_type = int(interpreted["curve_type"])
+                    if interpreted.get("curve_type_label") is not None:
+                        curve_type_label = str(interpreted["curve_type_label"])
+
+                closed = bool(flags_info["closed"])
+                if closed and len(points) > 1:
+                    points = _strip_duplicate_closure_point(points)
+                    if bulges:
+                        bulges.pop()
+                    if widths:
+                        widths.pop()
+                    if tangent_dirs:
+                        tangent_dirs.pop()
+                    if vertex_flags:
+                        vertex_flags.pop()
+
+                should_interpolate = _polyline_2d_should_interpolate(
+                    bool(flags_info["curve_fit"]),
+                    bool(flags_info["spline_fit"]),
+                    curve_type_label,
+                )
+                interpolated_points = list(interpolated_points_map.get(int(handle), []))
+                interpolation_applied = bool(interpolated_points)
+
+                yield Entity(
+                    dxftype="POLYLINE_2D",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "points": points,
+                            "flags": int(flags),
+                            "closed": closed,
+                            "bulges": bulges,
+                            "widths": widths,
+                            "tangent_dirs": tangent_dirs,
+                            "vertex_flags": vertex_flags,
+                            "curve_type": curve_type,
+                            "curve_type_label": curve_type_label,
+                            "curve_fit": bool(flags_info["curve_fit"]),
+                            "spline_fit": bool(flags_info["spline_fit"]),
+                            "is_3d_polyline": bool(flags_info["is_3d_polyline"]),
+                            "is_3d_mesh": bool(flags_info["is_3d_mesh"]),
+                            "is_closed_mesh": bool(flags_info["is_closed_mesh"]),
+                            "is_polyface_mesh": bool(flags_info["is_polyface_mesh"]),
+                            "continuous_linetype": bool(flags_info["continuous_linetype"]),
+                            "should_interpolate": should_interpolate,
+                            "interpolation_applied": interpolation_applied,
+                            "interpolated_points": interpolated_points,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="POLYLINE_2D",
                     ),
                 )
             return
@@ -1035,7 +1155,7 @@ class Layout:
 
         raise ValueError(
             f"unsupported entity type: {dxftype}. "
-            "Supported types: LINE, LWPOLYLINE, POLYLINE_3D, POLYLINE_MESH, POLYLINE_PFACE, 3DFACE, SOLID, TRACE, SHAPE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, TOLERANCE, MLINE, INSERT, MINSERT, DIMENSION"
+            "Supported types: LINE, LWPOLYLINE, POLYLINE_2D, POLYLINE_3D, POLYLINE_MESH, POLYLINE_PFACE, 3DFACE, SOLID, TRACE, SHAPE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, TOLERANCE, MLINE, INSERT, MINSERT, DIMENSION"
         )
 
 
@@ -1107,6 +1227,117 @@ def _decode_mtext_plain_text(value: str) -> str:
         i += 2
 
     return "".join(out)
+
+
+def _strip_duplicate_closure_point(
+    points: list[tuple[float, float, float]],
+) -> list[tuple[float, float, float]]:
+    if len(points) > 1 and points[0] == points[-1]:
+        return points[:-1]
+    return points
+
+
+def _polyline_2d_flags_info(flags: int) -> dict[str, bool]:
+    value = int(flags)
+    return {
+        "closed": bool(value & 0x01),
+        "curve_fit": bool(value & 0x02),
+        "spline_fit": bool(value & 0x04),
+        "is_3d_polyline": bool(value & 0x08),
+        "is_3d_mesh": bool(value & 0x10),
+        "is_closed_mesh": bool(value & 0x20),
+        "is_polyface_mesh": bool(value & 0x40),
+        "continuous_linetype": bool(value & 0x80),
+    }
+
+
+def _polyline_2d_should_interpolate(
+    curve_fit: bool,
+    spline_fit: bool,
+    curve_type_label: str | None,
+) -> bool:
+    if curve_fit or spline_fit:
+        return True
+    if curve_type_label in _POLYLINE_2D_SPLINE_CURVE_TYPES:
+        return True
+    return False
+
+
+def _polyline_2d_interpreted_map(path: str) -> dict[int, dict[str, object]]:
+    try:
+        rows = raw.decode_polyline_2d_entities_interpreted(path)
+    except Exception:
+        return {}
+
+    interpreted: dict[int, dict[str, object]] = {}
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) < 12:
+            continue
+        (
+            handle,
+            _flags,
+            curve_type,
+            curve_type_label,
+            closed,
+            curve_fit,
+            spline_fit,
+            is_3d_polyline,
+            is_3d_mesh,
+            is_closed_mesh,
+            is_polyface_mesh,
+            continuous_linetype,
+        ) = row
+        interpreted[int(handle)] = {
+            "curve_type": int(curve_type),
+            "curve_type_label": str(curve_type_label),
+            "closed": bool(closed),
+            "curve_fit": bool(curve_fit),
+            "spline_fit": bool(spline_fit),
+            "is_3d_polyline": bool(is_3d_polyline),
+            "is_3d_mesh": bool(is_3d_mesh),
+            "is_closed_mesh": bool(is_closed_mesh),
+            "is_polyface_mesh": bool(is_polyface_mesh),
+            "continuous_linetype": bool(continuous_linetype),
+        }
+    return interpreted
+
+
+def _polyline_2d_interpolated_points_map(
+    path: str,
+    interpreted_map: dict[int, dict[str, object]],
+) -> dict[int, list[tuple[float, float, float]]]:
+    interpolation_handles = {
+        handle
+        for handle, info in interpreted_map.items()
+        if _polyline_2d_should_interpolate(
+            bool(info.get("curve_fit", False)),
+            bool(info.get("spline_fit", False)),
+            str(info.get("curve_type_label", "")),
+        )
+    }
+    if not interpolation_handles:
+        return {}
+
+    try:
+        rows = raw.decode_polyline_2d_with_vertices_interpolated(
+            path, _POLYLINE_2D_INTERPOLATION_SEGMENTS
+        )
+    except Exception:
+        return {}
+
+    interpolated: dict[int, list[tuple[float, float, float]]] = {}
+    for handle, flags, applied, points in rows:
+        handle_key = int(handle)
+        if handle_key not in interpolation_handles or not bool(applied):
+            continue
+        closed = bool(
+            interpreted_map.get(handle_key, {}).get("closed", bool(int(flags) & 0x01))
+        )
+        points3d = list(points)
+        if closed:
+            points3d = _strip_duplicate_closure_point(points3d)
+        interpolated[handle_key] = points3d
+    return interpolated
 
 
 def _build_dimension_common_dxf(

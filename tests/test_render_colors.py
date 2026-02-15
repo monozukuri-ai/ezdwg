@@ -137,6 +137,49 @@ def test_build_lwpolyline_path_expands_bulge_arc() -> None:
     assert max(abs(y) for _x, y in path) > 0.45
 
 
+def test_plot_layout_polyline_2d_uses_interpolated_points(monkeypatch) -> None:
+    captured: list[tuple[list[tuple[float, float, float]], object, bool]] = []
+    monkeypatch.setattr(render_module, "_require_matplotlib", lambda: object())
+    monkeypatch.setattr(
+        render_module,
+        "_draw_polyline",
+        lambda _ax, points, _line_width, color=None, bulges=None, closed=False, arc_segments=64: captured.append(
+            (list(points), bulges, closed)
+        ),
+    )
+
+    layout = _FakeLayout(
+        [
+            SimpleNamespace(
+                dxftype="POLYLINE_2D",
+                dxf={
+                    "points": [(0.0, 0.0, 0.0), (2.0, 0.0, 0.0)],
+                    "bulges": [1.0, 0.0],
+                    "closed": False,
+                    "interpolation_applied": True,
+                    "interpolated_points": [
+                        (0.0, 0.0, 0.0),
+                        (1.0, 0.5, 0.0),
+                        (2.0, 0.0, 0.0),
+                    ],
+                },
+            )
+        ]
+    )
+    ax = _FakeAx()
+
+    render_module.plot_layout(layout, ax=ax, show=False, auto_fit=False, equal=False)
+
+    assert len(captured) == 1
+    assert captured[0][0] == [
+        (0.0, 0.0, 0.0),
+        (1.0, 0.5, 0.0),
+        (2.0, 0.0, 0.0),
+    ]
+    assert captured[0][1] is None
+    assert captured[0][2] is False
+
+
 def test_resolve_mtext_background_bbox_uses_true_color() -> None:
     bbox = render_module._resolve_mtext_background_bbox(
         _FakeMTextAx(),
