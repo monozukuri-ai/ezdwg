@@ -52,6 +52,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Fail if any entity cannot be converted.",
     )
+    convert_parser.add_argument(
+        "--include-unsupported",
+        action="store_true",
+        help="Also query unsupported entity types (keeps legacy skip reporting behavior).",
+    )
     return parser
 
 
@@ -115,6 +120,7 @@ def _run_convert(
     types: str | None = None,
     dxf_version: str = "R2010",
     strict: bool = False,
+    include_unsupported: bool = False,
 ) -> int:
     dwg_path = Path(input_path)
     if not dwg_path.exists():
@@ -128,6 +134,7 @@ def _run_convert(
             types=types,
             dxf_version=dxf_version,
             strict=strict,
+            include_unsupported=include_unsupported,
         )
     except Exception as exc:
         print(f"error: failed to convert DWG to DXF: {exc}", file=sys.stderr)
@@ -156,6 +163,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             types=args.types,
             dxf_version=args.dxf_version,
             strict=bool(args.strict),
+            include_unsupported=bool(args.include_unsupported),
         )
 
     parser.print_help()

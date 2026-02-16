@@ -6,7 +6,14 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import raw
-from .document import Document, Layout, SUPPORTED_ENTITY_TYPES, TYPE_ALIASES, read
+from .document import (
+    Document,
+    Layout,
+    SUPPORTED_ENTITY_TYPES,
+    TYPE_ALIASES,
+    _present_supported_types,
+    read,
+)
 from .entity import Entity
 
 
@@ -35,6 +42,36 @@ _POLYLINE_OWNER_TYPES = {
     "POLYLINE_MESH",
     "POLYLINE_PFACE",
 }
+_WRITABLE_ENTITY_TYPES = {
+    "LINE",
+    "RAY",
+    "XLINE",
+    "POINT",
+    "ARC",
+    "CIRCLE",
+    "ELLIPSE",
+    "LWPOLYLINE",
+    "POLYLINE_2D",
+    "POLYLINE_3D",
+    "POLYLINE_MESH",
+    "POLYLINE_PFACE",
+    "3DFACE",
+    "SOLID",
+    "TRACE",
+    "SHAPE",
+    "SPLINE",
+    "TEXT",
+    "ATTRIB",
+    "ATTDEF",
+    "MTEXT",
+    "LEADER",
+    "HATCH",
+    "TOLERANCE",
+    "MLINE",
+    "INSERT",
+    "MINSERT",
+    "DIMENSION",
+}
 
 
 @dataclass(frozen=True)
@@ -54,6 +91,7 @@ def to_dxf(
     types: str | Iterable[str] | None = None,
     dxf_version: str = "R2010",
     strict: bool = False,
+    include_unsupported: bool = False,
 ) -> ConvertResult:
     ezdxf = _require_ezdxf()
     source_path, layout = _resolve_layout(source)
@@ -70,6 +108,7 @@ def to_dxf(
     source_entities = _resolve_export_entities(
         layout,
         types,
+        include_unsupported=include_unsupported,
         insert_attributes_by_owner=insert_attributes_by_owner,
     )
 
@@ -109,9 +148,18 @@ def _resolve_export_entities(
     layout: Layout,
     types: str | Iterable[str] | None,
     *,
+    include_unsupported: bool = False,
     insert_attributes_by_owner: dict[int, list[Entity]] | None = None,
 ) -> list[Entity]:
-    selected_entities = list(layout.query(types))
+    query_types: str | Iterable[str] | None
+    if types is not None:
+        query_types = types
+    elif include_unsupported:
+        query_types = None
+    else:
+        present_types = set(_present_supported_types(layout.doc.decode_path))
+        query_types = tuple(sorted(present_types & _WRITABLE_ENTITY_TYPES))
+    selected_entities = list(layout.query(query_types))
     export_entities = _materialize_export_entities(layout, selected_entities)
     return _attach_insert_attributes(export_entities, insert_attributes_by_owner)
 
@@ -501,6 +549,22 @@ def _write_entity_to_modelspace_unsafe(modelspace: Any, entity: Entity) -> bool:
 
     if dxftype == "LINE":
         modelspace.add_line(_point3(dxf.get("start")), _point3(dxf.get("end")), dxfattribs=dxfattribs)
+        return True
+
+    if dxftype == "RAY":
+        modelspace.add_ray(
+            _point3(dxf.get("start")),
+            _point3(dxf.get("unit_vector")),
+            dxfattribs=dxfattribs,
+        )
+        return True
+
+    if dxftype == "XLINE":
+        modelspace.add_xline(
+            _point3(dxf.get("start")),
+            _point3(dxf.get("unit_vector")),
+            dxfattribs=dxfattribs,
+        )
         return True
 
     if dxftype == "POINT":

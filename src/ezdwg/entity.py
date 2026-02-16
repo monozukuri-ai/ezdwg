@@ -15,6 +15,17 @@ class Entity:
     def to_points(self) -> list[Point3D]:
         if self.dxftype == "LINE":
             return [self.dxf["start"], self.dxf["end"]]
+        if self.dxftype == "RAY":
+            start = self.dxf.get("start", (0.0, 0.0, 0.0))
+            direction = self.dxf.get("unit_vector", (1.0, 0.0, 0.0))
+            return [start, (start[0] + direction[0], start[1] + direction[1], start[2] + direction[2])]
+        if self.dxftype == "XLINE":
+            start = self.dxf.get("start", (0.0, 0.0, 0.0))
+            direction = self.dxf.get("unit_vector", (1.0, 0.0, 0.0))
+            return [
+                (start[0] - direction[0], start[1] - direction[1], start[2] - direction[2]),
+                (start[0] + direction[0], start[1] + direction[1], start[2] + direction[2]),
+            ]
         if self.dxftype == "LWPOLYLINE":
             return list(self.dxf.get("points", []))
         if self.dxftype == "POINT":

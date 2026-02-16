@@ -1,5 +1,6 @@
 pub mod arc;
 pub mod attrib;
+pub mod body;
 pub mod circle;
 pub mod common;
 pub mod dim_diameter;
@@ -20,9 +21,12 @@ pub mod polyline_2d;
 pub mod polyline_3d;
 pub mod polyline_mesh;
 pub mod polyline_pface;
+pub mod ray;
+pub mod region;
 pub mod seqend;
 pub mod shape;
 pub mod solid;
+pub mod solid3d;
 pub mod spline;
 pub mod text;
 pub mod tolerance;
@@ -30,6 +34,8 @@ pub mod trace;
 pub mod vertex_2d;
 pub mod vertex_3d;
 pub mod vertex_pface_face;
+pub mod viewport;
+pub mod xline;
 
 pub use arc::{
     decode_arc, decode_arc_r14, decode_arc_r2007, decode_arc_r2010, decode_arc_r2013, ArcEntity,
@@ -37,6 +43,10 @@ pub use arc::{
 pub use attrib::{
     decode_attdef, decode_attdef_r2007, decode_attdef_r2010, decode_attdef_r2013, decode_attrib,
     decode_attrib_r2007, decode_attrib_r2010, decode_attrib_r2013, AttribEntity,
+};
+pub use body::{
+    decode_body, decode_body_r14, decode_body_r2007, decode_body_r2010, decode_body_r2013,
+    BodyEntity,
 };
 pub use circle::{
     decode_circle, decode_circle_r14, decode_circle_r2007, decode_circle_r2010,
@@ -108,12 +118,23 @@ pub use polyline_pface::{
     decode_polyline_pface, decode_polyline_pface_r2007, decode_polyline_pface_r2010,
     decode_polyline_pface_r2013, PolylinePFaceEntity,
 };
+pub use ray::{
+    decode_ray, decode_ray_r14, decode_ray_r2007, decode_ray_r2010, decode_ray_r2013, RayEntity,
+};
+pub use region::{
+    decode_region, decode_region_r14, decode_region_r2007, decode_region_r2010,
+    decode_region_r2013, RegionEntity,
+};
 pub use seqend::{decode_seqend, SeqendEntity};
 pub use shape::{
     decode_shape, decode_shape_r2007, decode_shape_r2010, decode_shape_r2013, ShapeEntity,
 };
 pub use solid::{
     decode_solid, decode_solid_r2007, decode_solid_r2010, decode_solid_r2013, SolidEntity,
+};
+pub use solid3d::{
+    decode_3dsolid, decode_3dsolid_r14, decode_3dsolid_r2007, decode_3dsolid_r2010,
+    decode_3dsolid_r2013, Solid3dEntity,
 };
 pub use spline::{
     catmull_rom_spline, decode_spline, decode_spline_r2007, decode_spline_r2010,
@@ -138,4 +159,12 @@ pub use vertex_3d::{
 pub use vertex_pface_face::{
     decode_vertex_pface_face, decode_vertex_pface_face_r2007, decode_vertex_pface_face_r2010,
     decode_vertex_pface_face_r2013, VertexPFaceFaceEntity,
+};
+pub use viewport::{
+    decode_viewport, decode_viewport_r14, decode_viewport_r2007, decode_viewport_r2010,
+    decode_viewport_r2013, ViewportEntity,
+};
+pub use xline::{
+    decode_xline, decode_xline_r14, decode_xline_r2007, decode_xline_r2010, decode_xline_r2013,
+    XLineEntity,
 };

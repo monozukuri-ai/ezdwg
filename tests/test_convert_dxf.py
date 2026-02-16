@@ -54,6 +54,231 @@ def test_document_export_dxf_writes_arc_angles(tmp_path: Path) -> None:
     assert abs(group_float(out_arc, "51") - float(source_arc["end_angle"])) < 1.0e-6
 
 
+def test_to_dxf_writes_ray_and_xline_entities(monkeypatch, tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [
+            (101, 10, 0, 0x28, "RAY", "Entity"),
+            (102, 11, 0, 0x29, "XLINE", "Entity"),
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_ray_entities",
+        lambda _path: [(101, (1.0, 2.0, 0.0), (1.0, 0.0, 0.0))],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_xline_entities",
+        lambda _path: [(102, (3.0, 4.0, 0.0), (0.0, 1.0, 0.0))],
+    )
+
+    output = tmp_path / "ray_xline_out.dxf"
+    doc = document_module.Document(path="dummy_ray_xline.dwg", version="AC1021")
+    result = ezdwg.to_dxf(doc, str(output), types="RAY XLINE", dxf_version="R2010")
+
+    assert result.total_entities == 2
+    assert result.written_entities == 2
+    assert len(dxf_entities_of_type(output, "RAY")) == 1
+    assert len(dxf_entities_of_type(output, "XLINE")) == 1
+
+    ray = dxf_entities_of_type(output, "RAY")[0]
+    assert abs(group_float(ray, "10") - 1.0) < 1.0e-6
+    assert abs(group_float(ray, "20") - 2.0) < 1.0e-6
+    assert abs(group_float(ray, "11") - 1.0) < 1.0e-6
+    assert abs(group_float(ray, "21") - 0.0) < 1.0e-6
+
+    xline = dxf_entities_of_type(output, "XLINE")[0]
+    assert abs(group_float(xline, "10") - 3.0) < 1.0e-6
+    assert abs(group_float(xline, "20") - 4.0) < 1.0e-6
+    assert abs(group_float(xline, "11") - 0.0) < 1.0e-6
+    assert abs(group_float(xline, "21") - 1.0) < 1.0e-6
+
+
+def test_to_dxf_skips_region_entity(monkeypatch, tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [(201, 10, 0, 0x25, "REGION", "Entity")],
+    )
+    monkeypatch.setattr(document_module.raw, "decode_region_entities", lambda _path: [(201,)])
+
+    output = tmp_path / "region_out.dxf"
+    doc = document_module.Document(path="dummy_region.dwg", version="AC1021")
+    result = ezdwg.to_dxf(doc, str(output), types="REGION", dxf_version="R2010")
+
+    assert result.total_entities == 1
+    assert result.written_entities == 0
+    assert result.skipped_entities == 1
+    assert result.skipped_by_type == {"REGION": 1}
+    assert len(dxf_entities_of_type(output, "REGION")) == 0
+
+
+def test_to_dxf_skips_3dsolid_entity(monkeypatch, tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [(301, 10, 0, 0x26, "3DSOLID", "Entity")],
+    )
+    monkeypatch.setattr(document_module.raw, "decode_3dsolid_entities", lambda _path: [(301,)])
+
+    output = tmp_path / "3dsolid_out.dxf"
+    doc = document_module.Document(path="dummy_3dsolid.dwg", version="AC1021")
+    result = ezdwg.to_dxf(doc, str(output), types="3DSOLID", dxf_version="R2010")
+
+    assert result.total_entities == 1
+    assert result.written_entities == 0
+    assert result.skipped_entities == 1
+    assert result.skipped_by_type == {"3DSOLID": 1}
+    assert len(dxf_entities_of_type(output, "3DSOLID")) == 0
+
+
+def test_to_dxf_skips_body_entity(monkeypatch, tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [(302, 10, 0, 0x27, "BODY", "Entity")],
+    )
+    monkeypatch.setattr(document_module.raw, "decode_body_entities", lambda _path: [(302,)])
+
+    output = tmp_path / "body_out.dxf"
+    doc = document_module.Document(path="dummy_body.dwg", version="AC1021")
+    result = ezdwg.to_dxf(doc, str(output), types="BODY", dxf_version="R2010")
+
+    assert result.total_entities == 1
+    assert result.written_entities == 0
+    assert result.skipped_entities == 1
+    assert result.skipped_by_type == {"BODY": 1}
+    assert len(dxf_entities_of_type(output, "BODY")) == 0
+
+
+def test_to_dxf_default_query_skips_unsupported_types(monkeypatch, tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [
+            (101, 10, 0, 0x13, "LINE", "Entity"),
+            (201, 11, 0, 0x25, "REGION", "Entity"),
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_line_entities",
+        lambda _path: [(101, 1.0, 2.0, 0.0, 3.0, 4.0, 0.0)],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_line_arc_circle_entities",
+        lambda _path: ([(101, 1.0, 2.0, 0.0, 3.0, 4.0, 0.0)], [], []),
+    )
+    region_decode_called = {"called": False}
+
+    def _decode_region_entities(_path):
+        region_decode_called["called"] = True
+        return [(201,)]
+
+    monkeypatch.setattr(document_module.raw, "decode_region_entities", _decode_region_entities)
+
+    output = tmp_path / "default_skip_unsupported_out.dxf"
+    doc = document_module.Document(path="dummy_default_skip_unsupported.dwg", version="AC1021")
+    result = ezdwg.to_dxf(doc, str(output), dxf_version="R2010", strict=True)
+
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+    assert result.skipped_entities == 0
+    assert result.skipped_by_type == {}
+    assert region_decode_called["called"] is False
+    assert len(dxf_entities_of_type(output, "LINE")) == 1
+    assert len(dxf_entities_of_type(output, "REGION")) == 0
+
+
+def test_to_dxf_include_unsupported_keeps_skip_reporting(monkeypatch, tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [
+            (101, 10, 0, 0x13, "LINE", "Entity"),
+            (201, 11, 0, 0x25, "REGION", "Entity"),
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_line_entities",
+        lambda _path: [(101, 1.0, 2.0, 0.0, 3.0, 4.0, 0.0)],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_line_arc_circle_entities",
+        lambda _path: ([(101, 1.0, 2.0, 0.0, 3.0, 4.0, 0.0)], [], []),
+    )
+    monkeypatch.setattr(document_module.raw, "decode_region_entities", lambda _path: [(201,)])
+
+    output = tmp_path / "default_include_unsupported_out.dxf"
+    doc = document_module.Document(path="dummy_default_include_unsupported.dwg", version="AC1021")
+    result = ezdwg.to_dxf(
+        doc,
+        str(output),
+        dxf_version="R2010",
+        include_unsupported=True,
+    )
+
+    assert result.total_entities == 2
+    assert result.written_entities == 1
+    assert result.skipped_entities == 1
+    assert result.skipped_by_type == {"REGION": 1}
+    assert len(dxf_entities_of_type(output, "LINE")) == 1
+    assert len(dxf_entities_of_type(output, "REGION")) == 0
+
+
 def test_cli_convert_writes_lwpolyline(tmp_path: Path, capsys) -> None:
     pytest.importorskip("ezdxf")
 

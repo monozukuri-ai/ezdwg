@@ -28,6 +28,12 @@ SUPPORTED_ENTITY_TYPES = (
     "SOLID",
     "TRACE",
     "SHAPE",
+    "3DSOLID",
+    "BODY",
+    "VIEWPORT",
+    "REGION",
+    "RAY",
+    "XLINE",
     "ARC",
     "CIRCLE",
     "ELLIPSE",
@@ -71,6 +77,14 @@ _EXPLICIT_ONLY_ENTITY_TYPES = {
 }
 _POLYLINE_2D_INTERPOLATION_SEGMENTS = 8
 _POLYLINE_2D_SPLINE_CURVE_TYPES = {"QuadraticBSpline", "CubicBSpline", "Bezier"}
+_ACIS_ROLE_HINTS = {
+    0x214: "acis-link-table",
+    0x221: "acis-header",
+    0x222: "acis-payload-chunk",
+    0x223: "acis-payload-chunk",
+    0x224: "acis-payload-chunk",
+    0x225: "acis-payload-chunk",
+}
 
 
 def read(path: str) -> "Document":
@@ -718,6 +732,153 @@ class Layout:
                         layer_color_map,
                         layer_color_overrides,
                         dxftype="SHAPE",
+                    ),
+                )
+            return
+
+        if dxftype == "3DSOLID":
+            acis_candidate_map = _acis_candidate_handles_map(decode_path)
+            acis_record_map = _acis_candidate_record_map(decode_path)
+            for row in raw.decode_3dsolid_entities(decode_path):
+                if not row:
+                    continue
+                handle = int(row[0])
+                acis_handles = _normalize_int_handles(row[1] if len(row) >= 2 else [])
+                dxf = _attach_entity_color(
+                    handle,
+                    {
+                        "acis_handles": acis_handles,
+                    },
+                    entity_style_map,
+                    layer_color_map,
+                    layer_color_overrides,
+                    dxftype="3DSOLID",
+                )
+                layer_handle = dxf.get("layer_handle")
+                if isinstance(layer_handle, int):
+                    dxf["acis_handles"] = [h for h in acis_handles if h != layer_handle]
+                candidate_handles = list(acis_candidate_map.get(handle, ()))
+                dxf.update(_build_acis_entity_payload(handle, candidate_handles, acis_record_map))
+                yield Entity(
+                    dxftype="3DSOLID",
+                    handle=handle,
+                    dxf=dxf,
+                )
+            return
+
+        if dxftype == "BODY":
+            acis_candidate_map = _acis_candidate_handles_map(decode_path)
+            acis_record_map = _acis_candidate_record_map(decode_path)
+            for row in raw.decode_body_entities(decode_path):
+                if not row:
+                    continue
+                handle = int(row[0])
+                acis_handles = _normalize_int_handles(row[1] if len(row) >= 2 else [])
+                dxf = _attach_entity_color(
+                    handle,
+                    {
+                        "acis_handles": acis_handles,
+                    },
+                    entity_style_map,
+                    layer_color_map,
+                    layer_color_overrides,
+                    dxftype="BODY",
+                )
+                layer_handle = dxf.get("layer_handle")
+                if isinstance(layer_handle, int):
+                    dxf["acis_handles"] = [h for h in acis_handles if h != layer_handle]
+                candidate_handles = list(acis_candidate_map.get(handle, ()))
+                dxf.update(_build_acis_entity_payload(handle, candidate_handles, acis_record_map))
+                yield Entity(
+                    dxftype="BODY",
+                    handle=handle,
+                    dxf=dxf,
+                )
+            return
+
+        if dxftype == "VIEWPORT":
+            for row in raw.decode_viewport_entities(decode_path):
+                if not row:
+                    continue
+                handle = int(row[0])
+                yield Entity(
+                    dxftype="VIEWPORT",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {},
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="VIEWPORT",
+                    ),
+                )
+            return
+
+        if dxftype == "REGION":
+            acis_candidate_map = _acis_candidate_handles_map(decode_path)
+            acis_record_map = _acis_candidate_record_map(decode_path)
+            for row in raw.decode_region_entities(decode_path):
+                if not row:
+                    continue
+                handle = int(row[0])
+                acis_handles = _normalize_int_handles(row[1] if len(row) >= 2 else [])
+                dxf = _attach_entity_color(
+                    handle,
+                    {
+                        "acis_handles": acis_handles,
+                    },
+                    entity_style_map,
+                    layer_color_map,
+                    layer_color_overrides,
+                    dxftype="REGION",
+                )
+                layer_handle = dxf.get("layer_handle")
+                if isinstance(layer_handle, int):
+                    dxf["acis_handles"] = [h for h in acis_handles if h != layer_handle]
+                candidate_handles = list(acis_candidate_map.get(handle, ()))
+                dxf.update(_build_acis_entity_payload(handle, candidate_handles, acis_record_map))
+                yield Entity(
+                    dxftype="REGION",
+                    handle=handle,
+                    dxf=dxf,
+                )
+            return
+
+        if dxftype == "RAY":
+            for handle, start, unit_vector in raw.decode_ray_entities(decode_path):
+                yield Entity(
+                    dxftype="RAY",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "start": start,
+                            "unit_vector": unit_vector,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="RAY",
+                    ),
+                )
+            return
+
+        if dxftype == "XLINE":
+            for handle, start, unit_vector in raw.decode_xline_entities(decode_path):
+                yield Entity(
+                    dxftype="XLINE",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "start": start,
+                            "unit_vector": unit_vector,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="XLINE",
                     ),
                 )
             return
@@ -1456,7 +1617,7 @@ class Layout:
 
         raise ValueError(
             f"unsupported entity type: {dxftype}. "
-            "Supported types: LINE, LWPOLYLINE, POLYLINE_2D, VERTEX_2D, POLYLINE_3D, VERTEX_3D, POLYLINE_MESH, VERTEX_MESH, POLYLINE_PFACE, VERTEX_PFACE, VERTEX_PFACE_FACE, SEQEND, 3DFACE, SOLID, TRACE, SHAPE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, TOLERANCE, MLINE, BLOCK, ENDBLK, INSERT, MINSERT, DIMENSION"
+            "Supported types: LINE, LWPOLYLINE, POLYLINE_2D, VERTEX_2D, POLYLINE_3D, VERTEX_3D, POLYLINE_MESH, VERTEX_MESH, POLYLINE_PFACE, VERTEX_PFACE, VERTEX_PFACE_FACE, SEQEND, 3DFACE, SOLID, TRACE, SHAPE, 3DSOLID, BODY, VIEWPORT, REGION, RAY, XLINE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, TOLERANCE, MLINE, BLOCK, ENDBLK, INSERT, MINSERT, DIMENSION"
         )
 
 
@@ -1786,6 +1947,587 @@ def _entity_handles_by_type_name(path: str, type_name: str) -> tuple[int, ...]:
         except Exception:
             continue
     return tuple(handles)
+
+
+@lru_cache(maxsize=16)
+def _object_headers_with_type_map(path: str) -> dict[int, tuple[int, int, int, str, str]]:
+    try:
+        rows = raw.list_object_headers_with_type(path)
+    except Exception:
+        return {}
+
+    out: dict[int, tuple[int, int, int, str, str]] = {}
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) < 6:
+            continue
+        try:
+            handle = int(row[0])
+            offset = int(row[1])
+            data_size = int(row[2])
+            type_code = int(row[3])
+        except Exception:
+            continue
+        type_name = str(row[4]).strip().upper()
+        type_class = str(row[5]).strip().upper()
+        out[handle] = (offset, data_size, type_code, type_name, type_class)
+    return out
+
+
+def _extract_ascii_preview(raw_bytes: bytes) -> str | None:
+    if not raw_bytes:
+        return None
+    best: str | None = None
+    for match in re.finditer(rb"[ -~]{6,}", raw_bytes):
+        text = match.group(0).decode("ascii", errors="ignore").strip()
+        if not text:
+            continue
+        if best is None or len(text) > len(best):
+            best = text
+    if best is None:
+        return None
+    if len(best) > 96:
+        return f"{best[:93]}..."
+    return best
+
+
+def _extract_likely_handle_refs(
+    raw_bytes: bytes,
+    known_handles: set[int],
+    *,
+    max_count: int = 8,
+    min_handle: int = 64,
+) -> list[int]:
+    if not raw_bytes or not known_handles:
+        return []
+    found: list[int] = []
+    seen: set[int] = set()
+
+    def _push(value: int) -> None:
+        if value < min_handle or value not in known_handles or value in seen:
+            return
+        seen.add(value)
+        found.append(value)
+
+    scan_len = min(len(raw_bytes), 512)
+    for offset in range(0, max(0, scan_len - 4 + 1)):
+        value = int.from_bytes(raw_bytes[offset : offset + 4], byteorder="little", signed=False)
+        _push(value)
+        if len(found) >= max_count:
+            return found
+    for offset in range(0, max(0, scan_len - 8 + 1)):
+        value = int.from_bytes(raw_bytes[offset : offset + 8], byteorder="little", signed=False)
+        _push(value)
+        if len(found) >= max_count:
+            return found
+    return found
+
+
+def _acis_role_hint(
+    type_code: int,
+    record_size: int | None,
+    ascii_preview: str | None,
+) -> str:
+    hint = _ACIS_ROLE_HINTS.get(type_code)
+    if hint is None:
+        if 0x214 <= type_code <= 0x225:
+            return "acis-aux"
+        return "unknown"
+    if hint == "acis-header" and ascii_preview:
+        return "acis-text-header"
+    if hint == "acis-payload-chunk" and isinstance(record_size, int) and record_size >= 128:
+        return "acis-payload-main"
+    return hint
+
+
+def _handle_ref_details(
+    handles: list[int],
+    header_map: dict[int, tuple[int, int, int, str, str]],
+) -> list[dict[str, object]]:
+    details: list[dict[str, object]] = []
+    for handle in handles:
+        offset, data_size, type_code, type_name, type_class = header_map.get(
+            handle,
+            (0, 0, 0, "UNKNOWN", ""),
+        )
+        details.append(
+            {
+                "handle": handle,
+                "offset": offset,
+                "data_size": data_size,
+                "type_code": type_code,
+                "type_name": type_name,
+                "type_class": type_class,
+            }
+        )
+    return details
+
+
+def _normalize_int_handles(values: object) -> list[int]:
+    out: list[int] = []
+    seen: set[int] = set()
+    for item in list(values or []):
+        try:
+            value = int(item)
+        except Exception:
+            continue
+        if value <= 0 or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _merge_handle_lists(primary: object, secondary: object) -> list[int]:
+    out: list[int] = []
+    seen: set[int] = set()
+    for values in (primary, secondary):
+        for item in list(values or []):
+            try:
+                value = int(item)
+            except Exception:
+                continue
+            if value <= 0 or value in seen:
+                continue
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _select_acis_parent_ref_handles(
+    stream_refs: list[int],
+    scanned_refs: list[int],
+    *,
+    confidence: int,
+) -> tuple[list[int], str]:
+    if not stream_refs:
+        return list(scanned_refs), "scan-only"
+
+    scanned_set = set(scanned_refs)
+    overlap_refs = [ref for ref in stream_refs if ref in scanned_set]
+
+    if confidence >= 60:
+        return list(stream_refs), "stream"
+
+    if overlap_refs:
+        if confidence >= 40:
+            return list(overlap_refs), "stream-overlap"
+        return list(overlap_refs), "stream-scan-overlap"
+
+    if confidence >= 40:
+        return list(stream_refs), "stream-mid"
+
+    # Low-confidence decode with no corroborating overlap: keep only explicit
+    # overlap and drop inferred references to avoid noisy edges.
+    return [], "lowconf-drop"
+
+
+def _build_acis_entity_payload(
+    entity_handle: int,
+    candidate_handles: list[int],
+    acis_record_map: dict[int, dict[str, object]],
+) -> dict[str, object]:
+    candidate_handles = _normalize_int_handles(candidate_handles)
+    candidate_index = {handle: index for index, handle in enumerate(candidate_handles)}
+    candidate_set = set(candidate_handles)
+
+    records: list[dict[str, object]] = []
+    for index, handle in enumerate(candidate_handles):
+        record = dict(acis_record_map.get(handle, {"handle": handle}))
+        refs_source = record.get("acis_parent_ref_handles")
+        refs = _normalize_int_handles(
+            refs_source if refs_source is not None else record.get("likely_handle_refs")
+        )
+        parent_ref_strategy = str(record.get("acis_parent_ref_strategy") or "")
+        if not refs and parent_ref_strategy == "lowconf-drop":
+            # Entity-level safety net: if the merged candidates still include only
+            # the current entity owner, recover that edge while keeping noisy refs dropped.
+            likely_refs = _normalize_int_handles(record.get("likely_handle_refs"))
+            if entity_handle in likely_refs:
+                refs = [entity_handle]
+                parent_ref_strategy = "lowconf-entity-fallback"
+        record["acis_parent_ref_strategy_effective"] = parent_ref_strategy
+        entity_refs = [ref for ref in refs if ref == entity_handle]
+        candidate_refs = [ref for ref in refs if ref in candidate_set and ref != handle]
+        external_refs = [ref for ref in refs if ref not in candidate_set and ref != entity_handle]
+
+        record["acis_candidate_index"] = index
+        record["entity_ref_handles"] = entity_refs
+        record["candidate_ref_handles"] = candidate_refs
+        record["external_ref_handles"] = external_refs
+        records.append(record)
+
+    role_by_handle: dict[int, str] = {}
+    for record in records:
+        try:
+            handle = int(record.get("handle", 0))
+        except Exception:
+            continue
+        role_by_handle[handle] = str(record.get("acis_role_hint") or "unknown")
+
+    def _select_candidate_parent(
+        current_index: int,
+        candidate_refs: list[int],
+        *,
+        allowed_roles: set[str] | None = None,
+    ) -> int | None:
+        filtered = [
+            ref
+            for ref in candidate_refs
+            if allowed_roles is None or role_by_handle.get(ref, "unknown") in allowed_roles
+        ]
+        if not filtered:
+            return None
+        prev_filtered = [ref for ref in filtered if candidate_index.get(ref, -1) < current_index]
+        if prev_filtered:
+            return max(prev_filtered, key=lambda ref: candidate_index.get(ref, -1))
+        return filtered[0]
+
+    for record in records:
+        role_hint = str(record.get("acis_role_hint") or "unknown")
+        current_index = int(record.get("acis_candidate_index", 0))
+        entity_refs = _normalize_int_handles(record.get("entity_ref_handles"))
+        candidate_refs = _normalize_int_handles(record.get("candidate_ref_handles"))
+        external_refs = _normalize_int_handles(record.get("external_ref_handles"))
+
+        parent_handle: int | None = None
+        parent_kind = "none"
+        parent_rule = "none"
+
+        if role_hint in {"acis-header", "acis-text-header"}:
+            if entity_refs:
+                parent_handle = entity_refs[0]
+                parent_kind = "entity"
+                parent_rule = "header-prefers-entity"
+            else:
+                candidate_parent = _select_candidate_parent(
+                    current_index,
+                    candidate_refs,
+                    allowed_roles={"acis-header", "acis-text-header"},
+                )
+                if candidate_parent is not None:
+                    parent_handle = candidate_parent
+                    parent_kind = "candidate"
+                    parent_rule = "header-fallback-candidate"
+        elif role_hint == "acis-link-table":
+            for allowed_roles, rule in (
+                ({"acis-header", "acis-text-header"}, "link-prefers-header"),
+                (None, "link-fallback-candidate"),
+            ):
+                candidate_parent = _select_candidate_parent(
+                    current_index,
+                    candidate_refs,
+                    allowed_roles=allowed_roles,
+                )
+                if candidate_parent is not None:
+                    parent_handle = candidate_parent
+                    parent_kind = "candidate"
+                    parent_rule = rule
+                    break
+            if parent_handle is None and entity_refs:
+                parent_handle = entity_refs[0]
+                parent_kind = "entity"
+                parent_rule = "link-fallback-entity"
+        elif role_hint in {"acis-payload-main", "acis-payload-chunk"}:
+            for allowed_roles, rule in (
+                ({"acis-link-table"}, "payload-prefers-link"),
+                ({"acis-payload-main", "acis-payload-chunk"}, "payload-prefers-payload"),
+                ({"acis-header", "acis-text-header"}, "payload-fallback-header"),
+                (None, "payload-fallback-candidate"),
+            ):
+                candidate_parent = _select_candidate_parent(
+                    current_index,
+                    candidate_refs,
+                    allowed_roles=allowed_roles,
+                )
+                if candidate_parent is not None:
+                    parent_handle = candidate_parent
+                    parent_kind = "candidate"
+                    parent_rule = rule
+                    break
+            if parent_handle is None and entity_refs:
+                parent_handle = entity_refs[0]
+                parent_kind = "entity"
+                parent_rule = "payload-fallback-entity"
+        else:
+            if entity_refs:
+                parent_handle = entity_refs[0]
+                parent_kind = "entity"
+                parent_rule = "generic-entity"
+            else:
+                candidate_parent = _select_candidate_parent(current_index, candidate_refs)
+                if candidate_parent is not None:
+                    parent_handle = candidate_parent
+                    parent_kind = "candidate"
+                    parent_rule = "generic-candidate"
+
+        if parent_handle is None and external_refs:
+            parent_handle = external_refs[0]
+            parent_kind = "external"
+            parent_rule = "external-fallback"
+
+        record["acis_parent_handle"] = parent_handle
+        record["acis_parent_kind"] = parent_kind
+        record["acis_parent_rule"] = parent_rule
+
+    child_map: dict[int, list[int]] = {}
+    edges: list[dict[str, object]] = []
+    primary_edges: list[dict[str, object]] = []
+    for record in records:
+        source = int(record.get("handle", 0))
+        for target in list(record.get("entity_ref_handles") or []):
+            edges.append({"source": source, "target": int(target), "kind": "entity"})
+        for target in list(record.get("candidate_ref_handles") or []):
+            target = int(target)
+            edges.append({"source": source, "target": target, "kind": "candidate"})
+        for target in list(record.get("external_ref_handles") or []):
+            edges.append({"source": source, "target": int(target), "kind": "external"})
+        parent_handle = record.get("acis_parent_handle")
+        parent_kind = str(record.get("acis_parent_kind") or "none")
+        if isinstance(parent_handle, int) and parent_kind in {"entity", "candidate", "external"}:
+            primary_edges.append(
+                {
+                    "source": source,
+                    "target": parent_handle,
+                    "kind": parent_kind,
+                    "rule": str(record.get("acis_parent_rule") or "none"),
+                }
+            )
+        if record.get("acis_parent_kind") == "candidate":
+            parent = record.get("acis_parent_handle")
+            if isinstance(parent, int):
+                child_map.setdefault(parent, []).append(source)
+
+    for record in records:
+        source = int(record.get("handle", 0))
+        record["acis_child_candidate_handles"] = child_map.get(source, [])
+
+    return {
+        "acis_candidate_handles": candidate_handles,
+        "acis_candidate_records": records,
+        "acis_candidate_edges": edges,
+        "acis_primary_edges": primary_edges,
+    }
+
+
+@lru_cache(maxsize=16)
+def _acis_candidate_handles_map(path: str) -> dict[int, tuple[int, ...]]:
+    try:
+        rows = raw.list_object_headers_with_type(path)
+    except Exception:
+        return {}
+
+    normalized_rows: list[tuple[int, int, int, str, str]] = []
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) < 6:
+            continue
+        try:
+            handle = int(row[0])
+            offset = int(row[1])
+            type_code = int(row[3])
+        except Exception:
+            continue
+        type_name = str(row[4]).strip().upper()
+        type_class = str(row[5]).strip().upper()
+        normalized_rows.append((handle, offset, type_code, type_name, type_class))
+
+    if not normalized_rows:
+        return {}
+
+    def _scan_candidates(
+        sorted_rows: list[tuple[int, int, int, str, str]],
+    ) -> dict[int, tuple[int, ...]]:
+        target_types = {"3DSOLID", "BODY", "REGION"}
+        out: dict[int, tuple[int, ...]] = {}
+        for index, (handle, _offset, _type_code, type_name, type_class) in enumerate(sorted_rows):
+            if type_class not in {"E", "ENTITY"} or type_name not in target_types:
+                continue
+            candidates: list[int] = []
+            for (
+                next_handle,
+                _next_offset,
+                next_type_code,
+                next_type_name,
+                next_type_class,
+            ) in sorted_rows[index + 1 :]:
+                if next_type_class in {"E", "ENTITY"}:
+                    break
+                if not next_type_name.startswith("UNKNOWN("):
+                    continue
+                # ACIS companion records for modeler entities are typically in the
+                # dynamic UNKNOWN range 0x214-0x225 for our current sample corpus.
+                if 0x214 <= next_type_code <= 0x225:
+                    candidates.append(next_handle)
+            out[handle] = tuple(candidates)
+        return out
+
+    by_offset = sorted(normalized_rows, key=lambda item: (item[1], item[0]))
+    by_handle = sorted(normalized_rows, key=lambda item: (item[0], item[1]))
+    offset_map = _scan_candidates(by_offset)
+    handle_map = _scan_candidates(by_handle)
+
+    out: dict[int, tuple[int, ...]] = {}
+    for handle in set(offset_map.keys()) | set(handle_map.keys()):
+        handle_candidates = handle_map.get(handle, ())
+        offset_candidates = offset_map.get(handle, ())
+        if handle_candidates:
+            out[handle] = handle_candidates
+        elif offset_candidates:
+            out[handle] = offset_candidates
+        else:
+            out[handle] = ()
+
+    return out
+
+
+@lru_cache(maxsize=16)
+def _acis_candidate_record_map(path: str) -> dict[int, dict[str, object]]:
+    candidate_map = _acis_candidate_handles_map(path)
+    candidate_handles = sorted(
+        {
+            handle
+            for handles in candidate_map.values()
+            for handle in handles
+            if isinstance(handle, int) and handle > 0
+        }
+    )
+    if not candidate_handles:
+        return {}
+
+    try:
+        rows = raw.read_object_records_by_handle(path, candidate_handles)
+    except Exception:
+        rows = []
+    try:
+        acis_info_rows = raw.decode_acis_candidate_infos(path, candidate_handles)
+    except Exception:
+        acis_info_rows = []
+    acis_info_map: dict[int, tuple[int, int, str, list[int], int]] = {}
+    for row in acis_info_rows:
+        if not isinstance(row, tuple) or len(row) < 5:
+            continue
+        try:
+            handle = int(row[0])
+            type_code = int(row[1])
+            data_size = int(row[2])
+        except Exception:
+            continue
+        role_hint = str(row[3]).strip()
+        refs = _normalize_int_handles(row[4])
+        confidence = 0
+        if len(row) >= 6:
+            try:
+                confidence = int(row[5])
+            except Exception:
+                confidence = 0
+        confidence = max(0, min(100, confidence))
+        acis_info_map[handle] = (type_code, data_size, role_hint, refs, confidence)
+
+    header_map = _object_headers_with_type_map(path)
+    known_handles = set(header_map.keys())
+    out: dict[int, dict[str, object]] = {}
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) < 5:
+            continue
+        try:
+            handle = int(row[0])
+            offset = int(row[1])
+            data_size = int(row[2])
+            type_code = int(row[3])
+        except Exception:
+            continue
+        record_bytes = bytes(row[4]) if row[4] is not None else b""
+        _, _, _, type_name, _type_class = header_map.get(
+            handle,
+            (offset, data_size, type_code, f"UNKNOWN(0x{type_code:X})", ""),
+        )
+        info = acis_info_map.get(handle)
+        if info is not None:
+            info_type_code, info_data_size, info_role_hint, info_refs, info_confidence = info
+            if info_type_code > 0:
+                type_code = info_type_code
+            if info_data_size > 0:
+                data_size = info_data_size
+            role_hint = info_role_hint
+            ref_confidence = info_confidence
+            stream_handle_refs = [
+                ref for ref in info_refs if ref in known_handles and ref != handle
+            ]
+        else:
+            role_hint = ""
+            ref_confidence = 0
+            stream_handle_refs = []
+        scanned_refs = [
+            ref
+            for ref in _extract_likely_handle_refs(record_bytes, known_handles)
+            if ref != handle
+        ]
+        if stream_handle_refs:
+            if ref_confidence < 40:
+                likely_handle_refs = _merge_handle_lists(stream_handle_refs, scanned_refs)
+            else:
+                likely_handle_refs = list(stream_handle_refs)
+            parent_handle_refs, parent_ref_strategy = _select_acis_parent_ref_handles(
+                stream_handle_refs,
+                scanned_refs,
+                confidence=ref_confidence,
+            )
+        else:
+            likely_handle_refs = scanned_refs
+            parent_handle_refs, parent_ref_strategy = _select_acis_parent_ref_handles(
+                stream_handle_refs,
+                scanned_refs,
+                confidence=ref_confidence,
+            )
+        ascii_preview = _extract_ascii_preview(record_bytes)
+        out[handle] = {
+            "handle": handle,
+            "offset": offset,
+            "data_size": data_size,
+            "type_code": type_code,
+            "type_name": type_name,
+            "record_size": len(record_bytes),
+            "ascii_preview": ascii_preview,
+            "likely_handle_refs": likely_handle_refs,
+            "likely_handle_ref_details": _handle_ref_details(likely_handle_refs, header_map),
+            "acis_stream_handle_refs": stream_handle_refs,
+            "acis_scanned_handle_refs": scanned_refs,
+            "acis_parent_ref_handles": parent_handle_refs,
+            "acis_parent_ref_strategy": parent_ref_strategy,
+            "acis_ref_confidence": ref_confidence,
+            "acis_role_hint": role_hint
+            if role_hint
+            else _acis_role_hint(type_code, len(record_bytes), ascii_preview),
+        }
+
+    for handle in candidate_handles:
+        if handle in out:
+            continue
+        offset, data_size, type_code, type_name, _type_class = header_map.get(
+            handle,
+            (0, 0, 0, "UNKNOWN", ""),
+        )
+        out[handle] = {
+            "handle": handle,
+            "offset": offset,
+            "data_size": data_size,
+            "type_code": type_code,
+            "type_name": type_name,
+            "record_size": None,
+            "ascii_preview": None,
+            "likely_handle_refs": [],
+            "likely_handle_ref_details": [],
+            "acis_stream_handle_refs": [],
+            "acis_scanned_handle_refs": [],
+            "acis_parent_ref_handles": [],
+            "acis_parent_ref_strategy": "none",
+            "acis_ref_confidence": 0,
+            "acis_role_hint": (
+                acis_info_map.get(handle, (type_code, data_size, "", [], 0))[2]
+                or _acis_role_hint(type_code, None, None)
+            ),
+        }
+
+    return out
 
 
 @lru_cache(maxsize=16)

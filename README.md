@@ -12,10 +12,10 @@ This project is **DWG read-focused** today and focuses on a simple, friendly API
 - Output units/angles: high-level API returns ARC angles in **degrees**
 
 ## Install
-Rust toolchain is required (PyO3 build).
+Install from PyPI:
 
 ```bash
-pip install -e .
+pip install ezdwg
 ```
 
 Plotting (optional):
@@ -28,6 +28,16 @@ DWG to DXF conversion (optional, ezdxf backend):
 
 ```bash
 pip install "ezdwg[dxf]"
+```
+
+If you want to contribute or develop locally, you can install from source:
+Rust toolchain is required (PyO3 build).
+
+```bash
+git clone https://github.com/neka-nat/ezdwg.git
+cd ezdwg
+maturin develop
+pip install -e .
 ```
 
 ## Quick Start
@@ -47,7 +57,7 @@ Plot in matplotlib:
 import ezdwg
 
 doc = ezdwg.read("path/to/file.dwg")
-doc.plot(types="ARC", arc_segments=96)
+doc.plot()
 ```
 
 ## CLI

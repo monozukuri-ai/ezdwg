@@ -20,6 +20,8 @@ type ObjectMapEntryRow = (u64, u32);
 type ObjectHeaderRow = (u64, u32, u32, u16);
 type ObjectHeaderWithTypeRow = (u64, u32, u32, u16, String, String);
 type ObjectRecordBytesRow = (u64, u32, u32, u16, Vec<u8>);
+type HandleStreamRefsRow = (u64, Vec<u64>);
+type AcisCandidateInfoRow = (u64, u16, u32, String, Vec<u64>, u8);
 type EntityStyleRow = (u64, Option<u16>, Option<u32>, u64);
 type LayerColorRow = (u64, u16, Option<u32>);
 
@@ -115,17 +117,7 @@ type DimEntityRow = (
 );
 type DimTypedEntityRow = (String, DimEntityRow);
 type InsertEntityRow = (u64, f64, f64, f64, f64, f64, f64, f64, Option<String>);
-type MInsertEntityRow = (
-    u64,
-    f64,
-    f64,
-    f64,
-    f64,
-    f64,
-    f64,
-    f64,
-    MInsertArrayRow,
-);
+type MInsertEntityRow = (u64, f64, f64, f64, f64, f64, f64, f64, MInsertArrayRow);
 type BlockHeaderNameRow = (u64, String);
 type BlockEntityNameRow = (u64, String, String);
 type Polyline2dEntityRow = (u64, u16, u16, f64, f64, f64, f64);
@@ -170,6 +162,12 @@ type ShapeEntityRow = (
     Point3,
     Option<u64>,
 );
+type ViewportEntityRow = (u64,);
+type RegionEntityRow = (u64, Vec<u64>);
+type Solid3dEntityRow = (u64, Vec<u64>);
+type BodyEntityRow = (u64, Vec<u64>);
+type RayEntityRow = (u64, Point3, Point3);
+type XLineEntityRow = (u64, Point3, Point3);
 type PolylineVerticesRow = (u64, u16, Vec<Point3>);
 type PolylineInterpolatedRow = (u64, u16, bool, Vec<Point3>);
 type Vertex2dEntityRow = (u64, u16, f64, f64, f64, f64, f64, f64, f64);
@@ -356,6 +354,397 @@ pub fn read_object_records_by_type(
             header.data_size,
             header.type_code,
             record,
+        ));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, handles, limit=None))]
+pub fn read_object_records_by_handle(
+    path: &str,
+    handles: Vec<u64>,
+    limit: Option<usize>,
+) -> PyResult<Vec<ObjectRecordBytesRow>> {
+    if handles.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let target_handles: HashSet<u64> = handles.iter().copied().collect();
+    let mut found_rows: HashMap<u64, ObjectRecordBytesRow> = HashMap::new();
+
+    for obj in index.objects.iter() {
+        let handle = obj.handle.0;
+        if !target_handles.contains(&handle) || found_rows.contains_key(&handle) {
+            continue;
+        }
+        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
+        let header =
+            parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
+        found_rows.insert(
+            handle,
+            (
+                handle,
+                obj.offset,
+                header.data_size,
+                header.type_code,
+                record.raw.as_ref().to_vec(),
+            ),
+        );
+        if found_rows.len() >= target_handles.len() {
+            break;
+        }
+    }
+
+    let mut result = Vec::new();
+    for handle in handles {
+        if let Some(row) = found_rows.remove(&handle) {
+            result.push(row);
+            if let Some(limit) = limit {
+                if result.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn start_delta_candidates_for_type(type_code: u16) -> &'static [i32] {
+    const DEFAULT: &[i32] = &[-8, -4, 0, 4, 8];
+    const HEADER_LIKE: &[i32] = &[-16, -8, -4, 0, 4, 8, 16];
+    const PAYLOAD_LIKE: &[i32] = &[-32, -24, -16, -8, -4, 0, 4, 8, 16, 24, 32];
+    match type_code {
+        0x214 | 0x221 => HEADER_LIKE,
+        0x222 | 0x223 | 0x224 | 0x225 => PAYLOAD_LIKE,
+        _ => DEFAULT,
+    }
+}
+
+fn preferred_ref_type_codes_for_acis_unknown(type_code: u16) -> &'static [u16] {
+    match type_code {
+        // HEADER-like records usually point back to owner 3DSOLID/BODY/REGION or link table.
+        0x221 => &[0x26, 0x27, 0x25, 0x214],
+        // Link table records are expected to link to header/payload records.
+        0x214 => &[0x221, 0x222, 0x223, 0x224, 0x225],
+        // Payload chunks often refer to link table/header and sometimes sibling payload chunks.
+        0x222 | 0x223 | 0x224 | 0x225 => &[0x214, 0x221, 0x222, 0x223, 0x224, 0x225],
+        _ => &[],
+    }
+}
+
+fn resolve_handle_stream_start_candidates(
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    type_code: u16,
+) -> Vec<u32> {
+    if !matches!(
+        version,
+        version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
+    ) {
+        return Vec::new();
+    }
+    let total_bits = header.data_size.saturating_mul(8);
+    let mut bases = resolve_r2010_object_data_end_bit_candidates(header);
+    if let Ok(canonical) = resolve_r2010_object_data_end_bit(header) {
+        bases.push(canonical);
+    }
+    let mut out = Vec::new();
+    for base in bases {
+        for delta in start_delta_candidates_for_type(type_code).iter().copied() {
+            let candidate_i64 = i64::from(base) + i64::from(delta);
+            if candidate_i64 < 0 {
+                continue;
+            }
+            let Ok(candidate) = u32::try_from(candidate_i64) else {
+                continue;
+            };
+            if candidate >= total_bits {
+                continue;
+            }
+            out.push(candidate);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+#[derive(Default)]
+struct KnownHandleRefsDecode {
+    refs: Vec<u64>,
+    confidence: u8,
+}
+
+fn derive_known_handle_refs_confidence(
+    refs_len: usize,
+    quality_score: i64,
+    best_score: i64,
+    second_score: Option<i64>,
+) -> u8 {
+    if refs_len == 0 {
+        return 0;
+    }
+    let mut confidence = 8i64;
+    confidence = confidence.saturating_add(i64::try_from(refs_len.min(8)).unwrap_or(0) * 7);
+    if quality_score > 0 {
+        confidence = confidence.saturating_add(quality_score.min(12) * 3);
+    }
+    if let Some(second) = second_score {
+        let margin = best_score.saturating_sub(second);
+        let margin_boost = if margin >= 48 {
+            26
+        } else if margin >= 24 {
+            18
+        } else if margin >= 12 {
+            12
+        } else if margin >= 6 {
+            7
+        } else if margin > 0 {
+            3
+        } else {
+            0
+        };
+        confidence = confidence.saturating_add(margin_boost);
+    } else {
+        // Only one candidate decoded successfully: moderate confidence, not maximal.
+        confidence = confidence.saturating_add(14);
+    }
+    confidence.clamp(0, 100) as u8
+}
+
+fn decode_known_handle_refs_from_object_record(
+    record: &objects::ObjectRecord<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+    known_handles: &HashSet<u64>,
+    object_type_codes: Option<&HashMap<u64, u16>>,
+    max_refs: usize,
+) -> KnownHandleRefsDecode {
+    let total_bits = u64::from(header.data_size.saturating_mul(8));
+    let start_candidates =
+        resolve_handle_stream_start_candidates(version, header, header.type_code);
+    if start_candidates.is_empty() {
+        return KnownHandleRefsDecode::default();
+    }
+    let canonical_start = resolve_r2010_object_data_end_bit(header).ok();
+    let preferred_ref_types = preferred_ref_type_codes_for_acis_unknown(header.type_code);
+    let mut best: Option<(i64, i64, usize, u32, Vec<u64>)> = None;
+    let mut second_score: Option<i64> = None;
+
+    for start_bit in start_candidates {
+        let mut reader = record.bit_reader();
+        if skip_object_type_prefix(&mut reader, version).is_err() {
+            continue;
+        }
+        reader.set_bit_pos(start_bit);
+
+        let mut refs: Vec<u64> = Vec::new();
+        let mut seen: HashSet<u64> = HashSet::new();
+        let mut quality_score: i64 = 0;
+        for _ in 0..128usize {
+            if reader.tell_bits() >= total_bits {
+                break;
+            }
+            let before_bits = reader.tell_bits();
+            let value = match entities::common::read_handle_reference(&mut reader, object_handle) {
+                Ok(value) => value,
+                Err(_) => break,
+            };
+            if reader.tell_bits() <= before_bits {
+                break;
+            }
+            if value == 0 || value == object_handle || !known_handles.contains(&value) {
+                continue;
+            }
+            if seen.insert(value) {
+                refs.push(value);
+                if let Some(type_codes) = object_type_codes {
+                    if let Some(ref_type_code) = type_codes.get(&value) {
+                        if preferred_ref_types.contains(ref_type_code) {
+                            quality_score += 6;
+                        } else if (0x214..=0x225).contains(ref_type_code) {
+                            quality_score += 3;
+                        } else if matches!(*ref_type_code, 0x25 | 0x26 | 0x27) {
+                            quality_score += 2;
+                        } else if *ref_type_code == 0x33 {
+                            quality_score -= 2;
+                        }
+                    }
+                }
+                if refs.len() >= max_refs {
+                    break;
+                }
+            }
+        }
+
+        let delta = canonical_start
+            .map(|canonical| canonical.abs_diff(start_bit))
+            .unwrap_or(0);
+        let score = quality_score
+            .saturating_mul(32)
+            .saturating_add((refs.len() as i64).saturating_mul(4))
+            .saturating_sub(i64::from(delta));
+
+        let should_replace_best = match &best {
+            Some((best_score, _best_quality, best_len, best_delta, _))
+                if score < *best_score
+                    || (score == *best_score
+                        && (refs.len() < *best_len
+                            || (refs.len() == *best_len && delta >= *best_delta))) =>
+            {
+                false
+            }
+            _ => true,
+        };
+        if should_replace_best {
+            if let Some((prev_best_score, _, _, _, _)) = &best {
+                second_score = Some(
+                    second_score
+                        .map(|value| value.max(*prev_best_score))
+                        .unwrap_or(*prev_best_score),
+                );
+            }
+            best = Some((score, quality_score, refs.len(), delta, refs));
+        } else {
+            second_score = Some(second_score.map(|value| value.max(score)).unwrap_or(score));
+        }
+    }
+
+    if let Some((best_score, quality_score, _len, _delta, refs)) = best {
+        let confidence = derive_known_handle_refs_confidence(
+            refs.len(),
+            quality_score,
+            best_score,
+            second_score,
+        );
+        KnownHandleRefsDecode { refs, confidence }
+    } else {
+        KnownHandleRefsDecode::default()
+    }
+}
+
+#[pyfunction(signature = (path, handles, limit=None))]
+pub fn decode_object_handle_stream_refs(
+    path: &str,
+    handles: Vec<u64>,
+    limit: Option<usize>,
+) -> PyResult<Vec<HandleStreamRefsRow>> {
+    if handles.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let known_handles: HashSet<u64> = index.objects.iter().map(|obj| obj.handle.0).collect();
+    let object_offsets: HashMap<u64, u32> = index
+        .objects
+        .iter()
+        .map(|obj| (obj.handle.0, obj.offset))
+        .collect();
+
+    let mut result = Vec::new();
+    for handle in handles {
+        let Some(offset) = object_offsets.get(&handle).copied() else {
+            continue;
+        };
+        let Some((record, header)) = parse_record_and_header(&decoder, offset, best_effort)? else {
+            continue;
+        };
+        let decoded = decode_known_handle_refs_from_object_record(
+            &record,
+            decoder.version(),
+            &header,
+            handle,
+            &known_handles,
+            None,
+            16,
+        );
+        result.push((handle, decoded.refs));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn acis_unknown_role_hint_from_type_code(type_code: u16, data_size: u32) -> &'static str {
+    match type_code {
+        0x214 => "acis-link-table",
+        0x221 => "acis-header",
+        0x222 => "acis-payload-chunk",
+        0x223 | 0x224 | 0x225 => {
+            if data_size >= 128 {
+                "acis-payload-main"
+            } else {
+                "acis-payload-chunk"
+            }
+        }
+        0x215..=0x220 => "acis-aux",
+        _ if (0x214..=0x225).contains(&type_code) => "acis-aux",
+        _ => "unknown",
+    }
+}
+
+#[pyfunction(signature = (path, handles, limit=None))]
+pub fn decode_acis_candidate_infos(
+    path: &str,
+    handles: Vec<u64>,
+    limit: Option<usize>,
+) -> PyResult<Vec<AcisCandidateInfoRow>> {
+    if handles.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let known_handles: HashSet<u64> = index.objects.iter().map(|obj| obj.handle.0).collect();
+    let object_type_codes = collect_object_type_codes(&decoder, &index, best_effort)?;
+    let object_offsets: HashMap<u64, u32> = index
+        .objects
+        .iter()
+        .map(|obj| (obj.handle.0, obj.offset))
+        .collect();
+
+    let mut result = Vec::new();
+    for handle in handles {
+        let Some(offset) = object_offsets.get(&handle).copied() else {
+            continue;
+        };
+        let Some((record, header)) = parse_record_and_header(&decoder, offset, best_effort)? else {
+            continue;
+        };
+        let decoded = decode_known_handle_refs_from_object_record(
+            &record,
+            decoder.version(),
+            &header,
+            handle,
+            &known_handles,
+            Some(&object_type_codes),
+            16,
+        );
+        let role = acis_unknown_role_hint_from_type_code(header.type_code, header.data_size);
+        result.push((
+            handle,
+            header.type_code,
+            header.data_size,
+            role.to_string(),
+            decoded.refs,
+            decoded.confidence,
         ));
         if let Some(limit) = limit {
             if result.len() >= limit {
@@ -1012,6 +1401,177 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
             ));
         } else if matches_type_name(header.type_code, 0x21, "SHAPE", &dynamic_types) {
             let entity = match decode_shape_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
+            let layer_handle = layer_handle_remap
+                .get(&layer_handle)
+                .copied()
+                .unwrap_or(layer_handle);
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x22, "VIEWPORT", &dynamic_types) {
+            let entity = match decode_viewport_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
+            let layer_handle = layer_handle_remap
+                .get(&layer_handle)
+                .copied()
+                .unwrap_or(layer_handle);
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x25, "REGION", &dynamic_types) {
+            let entity = match decode_region_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
+            let layer_handle = layer_handle_remap
+                .get(&layer_handle)
+                .copied()
+                .unwrap_or(layer_handle);
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x26, "3DSOLID", &dynamic_types) {
+            let entity = match decode_3dsolid_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
+            let layer_handle = layer_handle_remap
+                .get(&layer_handle)
+                .copied()
+                .unwrap_or(layer_handle);
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x27, "BODY", &dynamic_types) {
+            let entity = match decode_body_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
+            let layer_handle = layer_handle_remap
+                .get(&layer_handle)
+                .copied()
+                .unwrap_or(layer_handle);
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x28, "RAY", &dynamic_types) {
+            let entity =
+                match decode_ray_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
+                {
+                    Ok(entity) => entity,
+                    Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                    Err(err) => return Err(to_py_err(err)),
+                };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
+            let layer_handle = layer_handle_remap
+                .get(&layer_handle)
+                .copied()
+                .unwrap_or(layer_handle);
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x29, "XLINE", &dynamic_types) {
+            let entity = match decode_xline_for_version(
                 &mut reader,
                 decoder.version(),
                 &header,
@@ -4462,6 +5022,291 @@ pub fn decode_shape_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<S
     Ok(result)
 }
 
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_viewport_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<ViewportEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x22, "VIEWPORT", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity = match decode_viewport_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(entity) => entity,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        result.push((entity.handle,));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_region_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<RegionEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let known_layer_handles: HashSet<u64> =
+        collect_known_layer_handles_in_order(&decoder, &dynamic_types, &index, best_effort)?
+            .into_iter()
+            .collect();
+    let known_handles: HashSet<u64> = index.objects.iter().map(|obj| obj.handle.0).collect();
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x25, "REGION", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity = match decode_region_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(entity) => entity,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        let layer_handle = entity.layer_handle;
+        let mut acis_handles = entity.acis_handles;
+        acis_handles.retain(|handle| {
+            *handle != layer_handle
+                && known_handles.contains(handle)
+                && !known_layer_handles.contains(handle)
+        });
+        result.push((entity.handle, acis_handles));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_3dsolid_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<Solid3dEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let known_layer_handles: HashSet<u64> =
+        collect_known_layer_handles_in_order(&decoder, &dynamic_types, &index, best_effort)?
+            .into_iter()
+            .collect();
+    let known_handles: HashSet<u64> = index.objects.iter().map(|obj| obj.handle.0).collect();
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x26, "3DSOLID", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity =
+            match decode_3dsolid_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
+            {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+        let layer_handle = entity.layer_handle;
+        let mut acis_handles = entity.acis_handles;
+        acis_handles.retain(|handle| {
+            *handle != layer_handle
+                && known_handles.contains(handle)
+                && !known_layer_handles.contains(handle)
+        });
+        result.push((entity.handle, acis_handles));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_body_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<BodyEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let known_layer_handles: HashSet<u64> =
+        collect_known_layer_handles_in_order(&decoder, &dynamic_types, &index, best_effort)?
+            .into_iter()
+            .collect();
+    let known_handles: HashSet<u64> = index.objects.iter().map(|obj| obj.handle.0).collect();
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x27, "BODY", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity =
+            match decode_body_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+        let layer_handle = entity.layer_handle;
+        let mut acis_handles = entity.acis_handles;
+        acis_handles.retain(|handle| {
+            *handle != layer_handle
+                && known_handles.contains(handle)
+                && !known_layer_handles.contains(handle)
+        });
+        result.push((entity.handle, acis_handles));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_ray_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<RayEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x28, "RAY", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity =
+            match decode_ray_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+        result.push((entity.handle, entity.start, entity.unit_vector));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_xline_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<XLineEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x29, "XLINE", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity =
+            match decode_xline_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+        result.push((entity.handle, entity.start, entity.unit_vector));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
 #[derive(Debug, Clone)]
 struct PolylinePFaceRow {
     handle: u64,
@@ -5362,6 +6207,9 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(list_object_headers_with_type, module)?)?;
     module.add_function(wrap_pyfunction!(list_object_headers_by_type, module)?)?;
     module.add_function(wrap_pyfunction!(read_object_records_by_type, module)?)?;
+    module.add_function(wrap_pyfunction!(read_object_records_by_handle, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_object_handle_stream_refs, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_acis_candidate_infos, module)?)?;
     module.add_function(wrap_pyfunction!(decode_entity_styles, module)?)?;
     module.add_function(wrap_pyfunction!(decode_layer_colors, module)?)?;
     module.add_function(wrap_pyfunction!(decode_line_entities, module)?)?;
@@ -5410,6 +6258,12 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_solid_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_trace_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_shape_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_viewport_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_region_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_3dsolid_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_body_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_ray_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_xline_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_polyline_2d_with_vertices, module)?)?;
     module.add_function(wrap_pyfunction!(
         decode_polyline_2d_with_vertices_interpolated,
@@ -6050,6 +6904,132 @@ fn decode_shape_for_version(
         }
         version::DwgVersion::R2007 => entities::decode_shape_r2007(reader),
         _ => entities::decode_shape(reader),
+    }
+}
+
+fn decode_viewport_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::ViewportEntity> {
+    match version {
+        version::DwgVersion::R14 => entities::decode_viewport_r14(reader, object_handle),
+        version::DwgVersion::R2010 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_viewport_r2010(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_viewport_r2013(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2007 => entities::decode_viewport_r2007(reader),
+        _ => entities::decode_viewport(reader),
+    }
+}
+
+fn decode_region_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::RegionEntity> {
+    match version {
+        version::DwgVersion::R14 => entities::decode_region_r14(reader, object_handle),
+        version::DwgVersion::R2010 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_region_r2010(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_region_r2013(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2007 => entities::decode_region_r2007(reader),
+        _ => entities::decode_region(reader),
+    }
+}
+
+fn decode_3dsolid_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::Solid3dEntity> {
+    match version {
+        version::DwgVersion::R14 => entities::decode_3dsolid_r14(reader, object_handle),
+        version::DwgVersion::R2010 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_3dsolid_r2010(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_3dsolid_r2013(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2007 => entities::decode_3dsolid_r2007(reader),
+        _ => entities::decode_3dsolid(reader),
+    }
+}
+
+fn decode_body_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::BodyEntity> {
+    match version {
+        version::DwgVersion::R14 => entities::decode_body_r14(reader, object_handle),
+        version::DwgVersion::R2010 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_body_r2010(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_body_r2013(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2007 => entities::decode_body_r2007(reader),
+        _ => entities::decode_body(reader),
+    }
+}
+
+fn decode_ray_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::RayEntity> {
+    match version {
+        version::DwgVersion::R14 => entities::decode_ray_r14(reader, object_handle),
+        version::DwgVersion::R2010 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_ray_r2010(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_ray_r2013(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2007 => entities::decode_ray_r2007(reader),
+        _ => entities::decode_ray(reader),
+    }
+}
+
+fn decode_xline_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::XLineEntity> {
+    match version {
+        version::DwgVersion::R14 => entities::decode_xline_r14(reader, object_handle),
+        version::DwgVersion::R2010 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_xline_r2010(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_xline_r2013(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2007 => entities::decode_xline_r2007(reader),
+        _ => entities::decode_xline(reader),
     }
 }
 

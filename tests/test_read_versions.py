@@ -136,3 +136,73 @@ def test_read_ac1014_sample_smoke() -> None:
 
     rows = ezdwg.raw.list_object_headers_with_type(str(path), limit=20)
     assert len(rows) == 20
+
+
+def test_read_object_records_by_handle_roundtrip() -> None:
+    path = ROOT / "test_dwg/acadsharp/sample_AC1032.dwg"
+    assert path.exists(), f"missing sample: {path}"
+
+    headers = ezdwg.raw.list_object_headers_with_type(str(path), limit=5)
+    handles = [int(row[0]) for row in headers[:3]]
+    rows = ezdwg.raw.read_object_records_by_handle(str(path), handles)
+
+    assert [int(row[0]) for row in rows] == handles
+    assert all(len(bytes(row[4])) > 0 for row in rows)
+
+
+def test_decode_object_handle_stream_refs_smoke() -> None:
+    path = ROOT / "test_dwg/acadsharp/sample_AC1032.dwg"
+    assert path.exists(), f"missing sample: {path}"
+
+    headers = ezdwg.raw.list_object_headers_with_type(str(path))
+    handles = [int(row[0]) for row in headers if int(row[3]) in {0x222, 0x223}][:2]
+    assert handles
+
+    rows = ezdwg.raw.decode_object_handle_stream_refs(str(path), handles)
+    assert [int(row[0]) for row in rows] == handles
+
+    known_handles = {handle for handle, _ in ezdwg.raw.list_object_map_entries(str(path))}
+    for _handle, refs in rows:
+        assert all(int(ref) in known_handles for ref in refs)
+    assert any(len(refs) > 0 for _handle, refs in rows)
+
+
+def test_decode_acis_candidate_infos_smoke() -> None:
+    path = ROOT / "test_dwg/acadsharp/sample_AC1032.dwg"
+    assert path.exists(), f"missing sample: {path}"
+
+    headers = ezdwg.raw.list_object_headers_with_type(str(path))
+    handles = [int(row[0]) for row in headers if int(row[3]) in {0x222, 0x223}][:2]
+    assert handles
+
+    rows = ezdwg.raw.decode_acis_candidate_infos(str(path), handles)
+    assert [int(row[0]) for row in rows] == handles
+
+    known_handles = {handle for handle, _ in ezdwg.raw.list_object_map_entries(str(path))}
+    for _handle, type_code, data_size, role_hint, refs, confidence in rows:
+        assert type_code in {0x214, 0x221, 0x222, 0x223, 0x224, 0x225} or type_code > 0
+        assert data_size >= 0
+        assert isinstance(role_hint, str) and role_hint != ""
+        assert all(int(ref) in known_handles for ref in refs)
+        assert 0 <= int(confidence) <= 100
+    assert any(str(row[3]).startswith("acis-") for row in rows)
+
+
+def test_decode_acis_candidate_infos_expected_chain_sample() -> None:
+    path = ROOT / "test_dwg/acadsharp/sample_AC1032.dwg"
+    assert path.exists(), f"missing sample: {path}"
+
+    rows = ezdwg.raw.decode_acis_candidate_infos(str(path), [3430, 3431, 3432])
+    row_map = {
+        int(handle): (int(type_code), str(role_hint), list(refs), int(confidence))
+        for handle, type_code, _size, role_hint, refs, confidence in rows
+    }
+
+    assert 3430 in row_map and 3431 in row_map and 3432 in row_map
+    assert row_map[3430][1] in {"acis-header", "acis-text-header"}
+    assert row_map[3431][1] == "acis-link-table"
+    assert row_map[3432][1].startswith("acis-payload")
+    assert 3429 in row_map[3430][2]
+    assert 3430 in row_map[3431][2]
+    assert 3431 in row_map[3432][2]
+    assert all(0 <= row_map[handle][3] <= 100 for handle in (3430, 3431, 3432))

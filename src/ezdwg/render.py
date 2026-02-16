@@ -56,6 +56,22 @@ def plot_layout(
         dxftype = entity.dxftype
         if dxftype == "LINE":
             _draw_line(ax, entity.dxf["start"], entity.dxf["end"], line_width, color=color)
+        elif dxftype == "RAY":
+            _draw_ray(
+                ax,
+                entity.dxf.get("start", (0.0, 0.0, 0.0)),
+                entity.dxf.get("unit_vector", (1.0, 0.0, 0.0)),
+                line_width,
+                color=color,
+            )
+        elif dxftype == "XLINE":
+            _draw_xline(
+                ax,
+                entity.dxf.get("start", (0.0, 0.0, 0.0)),
+                entity.dxf.get("unit_vector", (1.0, 0.0, 0.0)),
+                line_width,
+                color=color,
+            )
         elif dxftype == "POINT":
             _draw_point(ax, entity.dxf["location"], line_width, color=color)
         elif dxftype == "LWPOLYLINE":
@@ -371,6 +387,36 @@ def _aci_approx_rgb(index: int):
 
 def _draw_line(ax, start, end, line_width: float, color=None):
     ax.plot([start[0], end[0]], [start[1], end[1]], linewidth=line_width, color=color)
+
+
+def _draw_ray(ax, start, unit_vector, line_width: float, color=None):
+    dx, dy = _normalize_vector_2d(unit_vector)
+    scale = 20.0
+    end = (start[0] + dx * scale, start[1] + dy * scale)
+    _draw_line(ax, start, end, line_width, color=color)
+
+
+def _draw_xline(ax, start, unit_vector, line_width: float, color=None):
+    dx, dy = _normalize_vector_2d(unit_vector)
+    scale = 20.0
+    p1 = (start[0] - dx * scale, start[1] - dy * scale)
+    p2 = (start[0] + dx * scale, start[1] + dy * scale)
+    _draw_line(ax, p1, p2, line_width, color=color)
+
+
+def _normalize_vector_2d(vector):
+    try:
+        vx = float(vector[0])
+    except Exception:
+        vx = 0.0
+    try:
+        vy = float(vector[1])
+    except Exception:
+        vy = 0.0
+    norm = (vx * vx + vy * vy) ** 0.5
+    if norm <= 1.0e-12:
+        return 1.0, 0.0
+    return vx / norm, vy / norm
 
 
 def _draw_point(ax, location, line_width: float, color=None):

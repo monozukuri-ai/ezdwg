@@ -190,25 +190,26 @@ fn decode_attrib_like_with_header(
     // Handles are stored in the handle stream at obj_size bit offset.
     reader.set_bit_pos(header.obj_size);
     let handles_pos = reader.get_pos();
-    let (owner_handle, layer_handle, style_handle) = match parse_common_entity_handles(reader, &header) {
-        Ok(common_handles) => (
-            common_handles.owner_ref,
-            common_handles.layer,
-            read_handle_reference(reader, header.handle).ok(),
-        ),
-        Err(err)
-            if allow_handle_decode_failure
-                && matches!(
-                    err.kind,
-                    ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
-                ) =>
-        {
-            reader.set_pos(handles_pos.0, handles_pos.1);
-            let layer = parse_common_entity_layer_handle(reader, &header).unwrap_or(0);
-            (None, layer, None)
-        }
-        Err(err) => return Err(err),
-    };
+    let (owner_handle, layer_handle, style_handle) =
+        match parse_common_entity_handles(reader, &header) {
+            Ok(common_handles) => (
+                common_handles.owner_ref,
+                common_handles.layer,
+                read_handle_reference(reader, header.handle).ok(),
+            ),
+            Err(err)
+                if allow_handle_decode_failure
+                    && matches!(
+                        err.kind,
+                        ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
+                    ) =>
+            {
+                reader.set_pos(handles_pos.0, handles_pos.1);
+                let layer = parse_common_entity_layer_handle(reader, &header).unwrap_or(0);
+                (None, layer, None)
+            }
+            Err(err) => return Err(err),
+        };
 
     Ok(AttribEntity {
         handle: header.handle,

@@ -378,3 +378,22 @@ pub fn read_handle_reference(reader: &mut BitReader<'_>, base_handle: u64) -> Re
     };
     Ok(absolute)
 }
+
+pub fn read_additional_entity_handles(
+    reader: &mut BitReader<'_>,
+    base_handle: u64,
+    max_count: usize,
+) -> Vec<u64> {
+    let mut handles = Vec::new();
+    for _ in 0..max_count {
+        let handle = match read_handle_reference(reader, base_handle) {
+            Ok(value) => value,
+            Err(_) => break,
+        };
+        if handle == 0 || handles.contains(&handle) {
+            continue;
+        }
+        handles.push(handle);
+    }
+    handles
+}
