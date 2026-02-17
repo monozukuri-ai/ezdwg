@@ -34,7 +34,7 @@ If you want to contribute or develop locally, you can install from source:
 Rust toolchain is required (PyO3 build).
 
 ```bash
-git clone https://github.com/neka-nat/ezdwg.git
+git clone https://github.com/monozukuri-ai/ezdwg.git
 cd ezdwg
 maturin develop
 pip install -e .
