@@ -16,6 +16,7 @@ pub mod lwpolyline;
 pub mod minsert;
 pub mod mline;
 pub mod mtext;
+pub mod oleframe;
 pub mod point;
 pub mod polyline_2d;
 pub mod polyline_3d;
@@ -97,6 +98,11 @@ pub use mline::{
 pub use mtext::{
     decode_mtext, decode_mtext_r2004, decode_mtext_r2007, decode_mtext_r2010, decode_mtext_r2013,
     MTextEntity,
+};
+pub use oleframe::{
+    decode_ole2frame, decode_ole2frame_r14, decode_ole2frame_r2007, decode_ole2frame_r2010,
+    decode_ole2frame_r2013, decode_oleframe, decode_oleframe_r14, decode_oleframe_r2007,
+    decode_oleframe_r2010, decode_oleframe_r2013, OleFrameEntity,
 };
 pub use point::{
     decode_point, decode_point_r14, decode_point_r2007, decode_point_r2010, decode_point_r2013,

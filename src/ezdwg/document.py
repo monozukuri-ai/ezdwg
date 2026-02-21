@@ -31,6 +31,8 @@ SUPPORTED_ENTITY_TYPES = (
     "3DSOLID",
     "BODY",
     "VIEWPORT",
+    "OLEFRAME",
+    "OLE2FRAME",
     "REGION",
     "RAY",
     "XLINE",
@@ -811,6 +813,44 @@ class Layout:
                         layer_color_map,
                         layer_color_overrides,
                         dxftype="VIEWPORT",
+                    ),
+                )
+            return
+
+        if dxftype == "OLEFRAME":
+            for row in raw.decode_oleframe_entities(decode_path):
+                if not row:
+                    continue
+                handle = int(row[0])
+                yield Entity(
+                    dxftype="OLEFRAME",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {},
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="OLEFRAME",
+                    ),
+                )
+            return
+
+        if dxftype == "OLE2FRAME":
+            for row in raw.decode_ole2frame_entities(decode_path):
+                if not row:
+                    continue
+                handle = int(row[0])
+                yield Entity(
+                    dxftype="OLE2FRAME",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {},
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="OLE2FRAME",
                     ),
                 )
             return
@@ -1617,7 +1657,7 @@ class Layout:
 
         raise ValueError(
             f"unsupported entity type: {dxftype}. "
-            "Supported types: LINE, LWPOLYLINE, POLYLINE_2D, VERTEX_2D, POLYLINE_3D, VERTEX_3D, POLYLINE_MESH, VERTEX_MESH, POLYLINE_PFACE, VERTEX_PFACE, VERTEX_PFACE_FACE, SEQEND, 3DFACE, SOLID, TRACE, SHAPE, 3DSOLID, BODY, VIEWPORT, REGION, RAY, XLINE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, TOLERANCE, MLINE, BLOCK, ENDBLK, INSERT, MINSERT, DIMENSION"
+            "Supported types: LINE, LWPOLYLINE, POLYLINE_2D, VERTEX_2D, POLYLINE_3D, VERTEX_3D, POLYLINE_MESH, VERTEX_MESH, POLYLINE_PFACE, VERTEX_PFACE, VERTEX_PFACE_FACE, SEQEND, 3DFACE, SOLID, TRACE, SHAPE, 3DSOLID, BODY, VIEWPORT, OLEFRAME, OLE2FRAME, REGION, RAY, XLINE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, TOLERANCE, MLINE, BLOCK, ENDBLK, INSERT, MINSERT, DIMENSION"
         )
 
 

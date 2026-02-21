@@ -185,6 +185,43 @@ def test_to_dxf_skips_body_entity(monkeypatch, tmp_path: Path) -> None:
     assert len(dxf_entities_of_type(output, "BODY")) == 0
 
 
+def test_to_dxf_skips_oleframe_and_ole2frame_entities(monkeypatch, tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [
+            (401, 10, 0, 0x2B, "OLEFRAME", "Entity"),
+            (402, 11, 0, 0x4A, "OLE2FRAME", "Entity"),
+        ],
+    )
+    monkeypatch.setattr(document_module.raw, "decode_oleframe_entities", lambda _path: [(401,)])
+    monkeypatch.setattr(document_module.raw, "decode_ole2frame_entities", lambda _path: [(402,)])
+
+    output = tmp_path / "oleframes_out.dxf"
+    doc = document_module.Document(path="dummy_oleframes.dwg", version="AC1021")
+    result = ezdwg.to_dxf(
+        doc,
+        str(output),
+        types="OLEFRAME OLE2FRAME",
+        dxf_version="R2010",
+    )
+
+    assert result.total_entities == 2
+    assert result.written_entities == 0
+    assert result.skipped_entities == 2
+    assert result.skipped_by_type == {"OLE2FRAME": 1, "OLEFRAME": 1}
+    assert len(dxf_entities_of_type(output, "OLEFRAME")) == 0
+    assert len(dxf_entities_of_type(output, "OLE2FRAME")) == 0
+
+
 def test_to_dxf_default_query_skips_unsupported_types(monkeypatch, tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 
