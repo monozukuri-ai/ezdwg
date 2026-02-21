@@ -64,6 +64,7 @@ doc.plot()
 ```bash
 ezdwg --version
 ezdwg inspect examples/data/line_2000.dwg
+ezdwg inspect examples/data/line_2000.dwg --verbose
 ezdwg convert examples/data/line_2000.dwg /tmp/line_2000_out.dxf
 ezdwg convert examples/data/arc_2000.dwg /tmp/arc_2000_out.dxf --types "ARC" --dxf-version R2010
 ```

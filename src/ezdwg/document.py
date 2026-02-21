@@ -33,6 +33,7 @@ SUPPORTED_ENTITY_TYPES = (
     "VIEWPORT",
     "OLEFRAME",
     "OLE2FRAME",
+    "LONG_TRANSACTION",
     "REGION",
     "RAY",
     "XLINE",
@@ -818,16 +819,18 @@ class Layout:
             return
 
         if dxftype == "OLEFRAME":
+            ole_record_map = _oleframe_record_map(decode_path)
             for row in raw.decode_oleframe_entities(decode_path):
                 if not row:
                     continue
                 handle = int(row[0])
+                dxf_data = dict(ole_record_map.get(handle, {}))
                 yield Entity(
                     dxftype="OLEFRAME",
                     handle=handle,
                     dxf=_attach_entity_color(
                         handle,
-                        {},
+                        dxf_data,
                         entity_style_map,
                         layer_color_map,
                         layer_color_overrides,
@@ -837,20 +840,102 @@ class Layout:
             return
 
         if dxftype == "OLE2FRAME":
+            ole_record_map = _ole2frame_record_map(decode_path)
             for row in raw.decode_ole2frame_entities(decode_path):
                 if not row:
                     continue
                 handle = int(row[0])
+                dxf_data = dict(ole_record_map.get(handle, {}))
                 yield Entity(
                     dxftype="OLE2FRAME",
                     handle=handle,
                     dxf=_attach_entity_color(
                         handle,
-                        {},
+                        dxf_data,
                         entity_style_map,
                         layer_color_map,
                         layer_color_overrides,
                         dxftype="OLE2FRAME",
+                    ),
+                )
+            return
+
+        if dxftype == "LONG_TRANSACTION":
+            long_tx_record_map = _long_transaction_record_map(decode_path)
+            header_map = _object_headers_with_type_map(decode_path)
+            for row in raw.decode_long_transaction_entities(decode_path):
+                if not row:
+                    continue
+                handle = int(row[0])
+                owner_handle = None
+                if len(row) >= 2 and row[1] is not None:
+                    try:
+                        owner_handle = int(row[1])
+                    except Exception:
+                        owner_handle = None
+                reactor_handles = _normalize_int_handles(row[2] if len(row) >= 3 else [])
+                xdic_obj_handle = None
+                if len(row) >= 4 and row[3] is not None:
+                    try:
+                        xdic_obj_handle = int(row[3])
+                    except Exception:
+                        xdic_obj_handle = None
+                ltype_handle = None
+                if len(row) >= 5 and row[4] is not None:
+                    try:
+                        ltype_handle = int(row[4])
+                    except Exception:
+                        ltype_handle = None
+                plotstyle_handle = None
+                if len(row) >= 6 and row[5] is not None:
+                    try:
+                        plotstyle_handle = int(row[5])
+                    except Exception:
+                        plotstyle_handle = None
+                material_handle = None
+                if len(row) >= 7 and row[6] is not None:
+                    try:
+                        material_handle = int(row[6])
+                    except Exception:
+                        material_handle = None
+                extra_handles = _normalize_int_handles(row[7] if len(row) >= 8 else [])
+                decoded_handle_refs = _normalize_int_handles(
+                    [
+                        owner_handle,
+                        *reactor_handles,
+                        xdic_obj_handle,
+                        ltype_handle,
+                        plotstyle_handle,
+                        material_handle,
+                        *extra_handles,
+                    ]
+                )
+                dxf_data = {
+                    "owner_handle": owner_handle,
+                    "reactor_handles": reactor_handles,
+                    "xdic_obj_handle": xdic_obj_handle,
+                    "ltype_handle": ltype_handle,
+                    "plotstyle_handle": plotstyle_handle,
+                    "material_handle": material_handle,
+                    "extra_handles": extra_handles,
+                    "decoded_handle_refs": decoded_handle_refs,
+                    "decoded_handle_ref_details": _handle_ref_details(
+                        decoded_handle_refs, header_map
+                    ),
+                }
+                record_info = long_tx_record_map.get(handle)
+                if record_info is not None:
+                    dxf_data.update(record_info)
+                yield Entity(
+                    dxftype="LONG_TRANSACTION",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        dxf_data,
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="LONG_TRANSACTION",
                     ),
                 )
             return
@@ -1657,7 +1742,7 @@ class Layout:
 
         raise ValueError(
             f"unsupported entity type: {dxftype}. "
-            "Supported types: LINE, LWPOLYLINE, POLYLINE_2D, VERTEX_2D, POLYLINE_3D, VERTEX_3D, POLYLINE_MESH, VERTEX_MESH, POLYLINE_PFACE, VERTEX_PFACE, VERTEX_PFACE_FACE, SEQEND, 3DFACE, SOLID, TRACE, SHAPE, 3DSOLID, BODY, VIEWPORT, OLEFRAME, OLE2FRAME, REGION, RAY, XLINE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, TOLERANCE, MLINE, BLOCK, ENDBLK, INSERT, MINSERT, DIMENSION"
+            "Supported types: LINE, LWPOLYLINE, POLYLINE_2D, VERTEX_2D, POLYLINE_3D, VERTEX_3D, POLYLINE_MESH, VERTEX_MESH, POLYLINE_PFACE, VERTEX_PFACE, VERTEX_PFACE_FACE, SEQEND, 3DFACE, SOLID, TRACE, SHAPE, 3DSOLID, BODY, VIEWPORT, OLEFRAME, OLE2FRAME, LONG_TRANSACTION, REGION, RAY, XLINE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, TOLERANCE, MLINE, BLOCK, ENDBLK, INSERT, MINSERT, DIMENSION"
         )
 
 
@@ -2415,6 +2500,83 @@ def _acis_candidate_handles_map(path: str) -> dict[int, tuple[int, ...]]:
             out[handle] = offset_candidates
         else:
             out[handle] = ()
+
+    return out
+
+
+@lru_cache(maxsize=16)
+def _long_transaction_record_map(path: str) -> dict[int, dict[str, object]]:
+    return _entity_record_diagnostics_map(path, "LONG_TRANSACTION")
+
+
+@lru_cache(maxsize=16)
+def _oleframe_record_map(path: str) -> dict[int, dict[str, object]]:
+    return _entity_record_diagnostics_map(path, "OLEFRAME")
+
+
+@lru_cache(maxsize=16)
+def _ole2frame_record_map(path: str) -> dict[int, dict[str, object]]:
+    return _entity_record_diagnostics_map(path, "OLE2FRAME")
+
+
+def _entity_record_diagnostics_map(
+    path: str,
+    type_name: str,
+) -> dict[int, dict[str, object]]:
+    entity_handles = list(_entity_handles_by_type_name(path, type_name))
+    if not entity_handles:
+        return {}
+
+    try:
+        rows = raw.read_object_records_by_handle(path, entity_handles)
+    except Exception:
+        rows = []
+
+    header_map = _object_headers_with_type_map(path)
+    known_handles = set(header_map.keys())
+    out: dict[int, dict[str, object]] = {}
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) < 5:
+            continue
+        try:
+            handle = int(row[0])
+            offset = int(row[1])
+            data_size = int(row[2])
+            type_code = int(row[3])
+        except Exception:
+            continue
+        record_bytes = bytes(row[4]) if row[4] is not None else b""
+        likely_handle_refs = [
+            ref
+            for ref in _extract_likely_handle_refs(record_bytes, known_handles)
+            if ref != handle
+        ]
+        out[handle] = {
+            "record_offset": offset,
+            "record_data_size": data_size,
+            "record_type_code": type_code,
+            "record_size": len(record_bytes),
+            "ascii_preview": _extract_ascii_preview(record_bytes),
+            "likely_handle_refs": likely_handle_refs,
+            "likely_handle_ref_details": _handle_ref_details(likely_handle_refs, header_map),
+        }
+
+    for handle in entity_handles:
+        if handle in out:
+            continue
+        offset, data_size, type_code, _type_name, _type_class = header_map.get(
+            handle,
+            (0, 0, 0, "UNKNOWN", ""),
+        )
+        out[handle] = {
+            "record_offset": offset,
+            "record_data_size": data_size,
+            "record_type_code": type_code,
+            "record_size": None,
+            "ascii_preview": None,
+            "likely_handle_refs": [],
+            "likely_handle_ref_details": [],
+        }
 
     return out
 

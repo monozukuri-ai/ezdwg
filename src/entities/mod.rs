@@ -12,6 +12,7 @@ pub mod hatch;
 pub mod insert;
 pub mod leader;
 pub mod line;
+pub mod long_transaction;
 pub mod lwpolyline;
 pub mod minsert;
 pub mod mline;
@@ -85,6 +86,10 @@ pub use leader::{
 pub use line::{
     decode_line, decode_line_r14, decode_line_r2007, decode_line_r2010, decode_line_r2013,
     LineEntity,
+};
+pub use long_transaction::{
+    decode_long_transaction, decode_long_transaction_r14, decode_long_transaction_r2007,
+    decode_long_transaction_r2010, decode_long_transaction_r2013, LongTransactionEntity,
 };
 pub use lwpolyline::{
     decode_lwpolyline, decode_lwpolyline_r14, decode_lwpolyline_r2007, decode_lwpolyline_r2010,

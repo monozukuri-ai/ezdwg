@@ -164,6 +164,16 @@ type ShapeEntityRow = (
 );
 type ViewportEntityRow = (u64,);
 type OleFrameEntityRow = (u64,);
+type LongTransactionEntityRow = (
+    u64,
+    Option<u64>,
+    Vec<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Vec<u64>,
+);
 type RegionEntityRow = (u64, Vec<u64>);
 type Solid3dEntityRow = (u64, Vec<u64>);
 type BodyEntityRow = (u64, Vec<u64>);
@@ -1489,6 +1499,35 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
             ));
         } else if matches_type_name(header.type_code, 0x4A, "OLE2FRAME", &dynamic_types) {
             let entity = match decode_ole2frame_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
+            let layer_handle = layer_handle_remap
+                .get(&layer_handle)
+                .copied()
+                .unwrap_or(layer_handle);
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0x4C, "LONG_TRANSACTION", &dynamic_types) {
+            let entity = match decode_long_transaction_for_version(
                 &mut reader,
                 decoder.version(),
                 &header,
@@ -5220,6 +5259,61 @@ pub fn decode_ole2frame_entities(
 }
 
 #[pyfunction(signature = (path, limit=None))]
+pub fn decode_long_transaction_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<LongTransactionEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x4C, "LONG_TRANSACTION", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity = match decode_long_transaction_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(entity) => entity,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        result.push((
+            entity.handle,
+            entity.owner_handle,
+            entity.reactor_handles,
+            entity.xdic_obj_handle,
+            entity.ltype_handle,
+            entity.plotstyle_handle,
+            entity.material_handle,
+            entity.extra_handles,
+        ));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
 pub fn decode_region_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<RegionEntityRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
@@ -6412,6 +6506,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_viewport_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_oleframe_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_ole2frame_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_long_transaction_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_region_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_3dsolid_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_body_entities, module)?)?;
@@ -7120,6 +7215,27 @@ fn decode_ole2frame_for_version(
         }
         version::DwgVersion::R2007 => entities::decode_ole2frame_r2007(reader),
         _ => entities::decode_ole2frame(reader),
+    }
+}
+
+fn decode_long_transaction_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::LongTransactionEntity> {
+    match version {
+        version::DwgVersion::R14 => entities::decode_long_transaction_r14(reader, object_handle),
+        version::DwgVersion::R2010 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_long_transaction_r2010(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+            entities::decode_long_transaction_r2013(reader, object_data_end_bit, object_handle)
+        }
+        version::DwgVersion::R2007 => entities::decode_long_transaction_r2007(reader),
+        _ => entities::decode_long_transaction(reader),
     }
 }
 

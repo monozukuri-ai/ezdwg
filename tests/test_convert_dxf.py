@@ -222,6 +222,42 @@ def test_to_dxf_skips_oleframe_and_ole2frame_entities(monkeypatch, tmp_path: Pat
     assert len(dxf_entities_of_type(output, "OLE2FRAME")) == 0
 
 
+def test_to_dxf_skips_long_transaction_entity(monkeypatch, tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [(403, 10, 0, 0x4C, "LONG_TRANSACTION", "Entity")],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_long_transaction_entities",
+        lambda _path: [(403,)],
+    )
+
+    output = tmp_path / "long_transaction_out.dxf"
+    doc = document_module.Document(path="dummy_long_transaction.dwg", version="AC1021")
+    result = ezdwg.to_dxf(
+        doc,
+        str(output),
+        types="LONG_TRANSACTION",
+        dxf_version="R2010",
+    )
+
+    assert result.total_entities == 1
+    assert result.written_entities == 0
+    assert result.skipped_entities == 1
+    assert result.skipped_by_type == {"LONG_TRANSACTION": 1}
+    assert len(dxf_entities_of_type(output, "LONG_TRANSACTION")) == 0
+
+
 def test_to_dxf_default_query_skips_unsupported_types(monkeypatch, tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 
