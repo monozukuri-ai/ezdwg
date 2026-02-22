@@ -23,3 +23,10 @@ python-source = "src"
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
+
+[dependency-groups]
+dev = [
+    "mkdocs-glightbox>=0.5.2",
+    "mkdocs-material>=9.7.2",
+    "mkdocstrings[python]>=1.0.3",
+]

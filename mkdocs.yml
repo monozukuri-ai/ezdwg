@@ -1,0 +1,72 @@
+site_name: ezdwg
+site_url: https://monozukuri-ai.github.io/ezdwg/
+repo_url: https://github.com/monozukuri-ai/ezdwg
+repo_name: monozukuri-ai/ezdwg
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.tabs
+    - navigation.top
+    - navigation.indexes
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+  palette:
+    - scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+            members_order: source
+  - glightbox
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.highlight:
+      use_pygments: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+  - attr_list
+  - def_list
+  - tables
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quick Start: getting-started/quickstart.md
+  - User Guide:
+    - Reading Files: guide/reading-files.md
+    - Working with Entities: guide/entities.md
+    - Plotting: guide/plotting.md
+    - DWG to DXF Conversion: guide/convert.md
+    - CLI Reference: guide/cli.md
+  - API Reference:
+    - api/index.md
+    - Core Functions: api/core.md
+    - Document & Layout: api/document.md
+    - Entity: api/entity.md
+    - Raw API: api/raw.md
+  - Changelog: changelog.md

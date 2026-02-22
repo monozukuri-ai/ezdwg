@@ -4,6 +4,8 @@
 Minimal DWG (R14-R2018 / AC1014-AC1032) reader with a Python API inspired by ezdxf.
 This project is **DWG read-focused** today and focuses on a simple, friendly API.
 
+Documentation: https://monozukuri-ai.github.io/ezdwg/
+
 ## Status
 - High-level API (`ezdwg.read`): **R14 / AC1014** (experimental), **R2000 / AC1015**, **R2004 / AC1018**, **R2007 / AC1021**, **R2010 / AC1024**, **R2013 / AC1027**, **R2018 / AC1032**
 - Raw API (`ezdwg.raw`): **R14 / AC1014** (version detect + object headers), **R2000 / AC1015**, **R2004 / AC1018**, **R2007 / AC1021**, plus native **AC1024/AC1027/AC1032** support for object listing and `LINE`/`ARC`/`LWPOLYLINE` decode
