@@ -1694,6 +1694,7 @@ class Layout:
             # Some decoder builds return only LINEAR rows from the bulk API.
             # Merge subtype-specific decoders by handle to avoid silently
             # dropping DIM_* entities.
+            anonymous_block_name_map = _block_header_name_map(decode_path)
             rows_by_handle: dict[int, tuple[str, tuple]] = {}
 
             def _put_row(dimtype: str, row: tuple) -> None:
@@ -1787,6 +1788,15 @@ class Layout:
                     "angle": math.degrees(dim_rotation),
                 }
                 dim_dxf.update(common_dxf)
+                if anonymous_block_handle is not None:
+                    try:
+                        anonymous_block_name = anonymous_block_name_map.get(
+                            int(anonymous_block_handle)
+                        )
+                    except Exception:
+                        anonymous_block_name = None
+                    if isinstance(anonymous_block_name, str) and anonymous_block_name:
+                        dim_dxf["anonymous_block_name"] = anonymous_block_name
                 dim_dxf["common"] = dict(common_dxf)
                 yield Entity(
                     dxftype="DIMENSION",
@@ -2950,6 +2960,29 @@ def _block_and_endblk_name_maps(path: str) -> tuple[dict[int, str], dict[int, st
             endblk_map[handle] = name
 
     return block_map, endblk_map
+
+
+@lru_cache(maxsize=16)
+def _block_header_name_map(path: str) -> dict[int, str]:
+    try:
+        rows = raw.decode_block_header_names(path)
+    except Exception:
+        rows = []
+    mapping: dict[int, str] = {}
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) < 2:
+            continue
+        raw_handle, raw_name = row[0], row[1]
+        if not isinstance(raw_name, str):
+            continue
+        name = raw_name.strip()
+        if not name:
+            continue
+        try:
+            mapping[int(raw_handle)] = name
+        except Exception:
+            continue
+    return mapping
 
 
 @lru_cache(maxsize=16)

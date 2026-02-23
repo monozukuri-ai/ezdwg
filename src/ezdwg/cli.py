@@ -151,6 +151,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Keep DIMENSION entities instead of exploding them to primitive geometry.",
     )
+    convert_parser.add_argument(
+        "--flatten-inserts",
+        action="store_true",
+        help="Explode INSERT/MINSERT references into primitive geometry in modelspace.",
+    )
 
     write_parser = subparsers.add_parser(
         "write",
@@ -347,6 +352,7 @@ def _run_convert(
     preserve_colors: bool = True,
     modelspace_only: bool = False,
     explode_dimensions: bool = True,
+    flatten_inserts: bool = False,
 ) -> int:
     dwg_path = Path(input_path)
     if not dwg_path.exists():
@@ -364,6 +370,7 @@ def _run_convert(
             preserve_colors=preserve_colors,
             modelspace_only=modelspace_only,
             explode_dimensions=explode_dimensions,
+            flatten_inserts=flatten_inserts,
         )
     except Exception as exc:
         print(f"error: failed to convert DWG to DXF: {exc}", file=sys.stderr)
@@ -432,6 +439,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             preserve_colors=not bool(args.no_colors),
             modelspace_only=bool(args.modelspace_only),
             explode_dimensions=not bool(args.native_dimensions),
+            flatten_inserts=bool(args.flatten_inserts),
         )
     if args.command == "write":
         return _run_write(

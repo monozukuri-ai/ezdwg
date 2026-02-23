@@ -22,6 +22,8 @@ pub struct BitReader<'a> {
 }
 
 impl<'a> BitReader<'a> {
+    const MAX_TEXT_UNITS: usize = 1 << 20; // 1,048,576 chars
+
     pub fn new(data: &'a [u8]) -> Self {
         Self {
             data,
@@ -115,13 +117,18 @@ impl<'a> BitReader<'a> {
         if count == 0 {
             return Ok(Vec::new());
         }
+        let remaining = self.data.len().saturating_sub(self.byte_pos);
+        if count > remaining {
+            return Err(DwgError::new(
+                ErrorKind::Format,
+                format!(
+                    "raw byte length {count} exceeds remaining bytes {remaining} at bit offset {}",
+                    self.tell_bits()
+                ),
+            )
+            .with_offset(self.byte_pos as u64));
+        }
         if self.bit_pos == 0 {
-            if self.byte_pos + count > self.data.len() {
-                return Err(
-                    DwgError::new(ErrorKind::Io, "unexpected EOF while reading raw bytes")
-                        .with_offset(self.byte_pos as u64),
-                );
-            }
             let start = self.byte_pos;
             let end = start + count;
             self.byte_pos = end;
@@ -360,6 +367,21 @@ impl<'a> BitReader<'a> {
 
     pub fn read_tv(&mut self) -> Result<String> {
         let length = self.read_bs()? as usize;
+        if length > Self::MAX_TEXT_UNITS {
+            return Err(DwgError::new(
+                ErrorKind::Format,
+                format!("text length too large for TV string: {length}"),
+            )
+            .with_offset(self.byte_pos as u64));
+        }
+        let remaining_bytes = self.data.len().saturating_sub(self.byte_pos);
+        if length > remaining_bytes {
+            return Err(DwgError::new(
+                ErrorKind::Format,
+                format!("TV string length {length} exceeds remaining bytes {remaining_bytes}"),
+            )
+            .with_offset(self.byte_pos as u64));
+        }
         let mut text = Vec::with_capacity(length);
         for _ in 0..length {
             let mut ch = self.read_rc()?;
@@ -376,6 +398,26 @@ impl<'a> BitReader<'a> {
 
     pub fn read_tu(&mut self) -> Result<String> {
         let length = self.read_bs()? as usize;
+        if length > Self::MAX_TEXT_UNITS {
+            return Err(DwgError::new(
+                ErrorKind::Format,
+                format!("text length too large for TU string: {length}"),
+            )
+            .with_offset(self.byte_pos as u64));
+        }
+        let remaining_bytes = self.data.len().saturating_sub(self.byte_pos);
+        let required_bytes = length.saturating_mul(2);
+        if required_bytes > remaining_bytes {
+            return Err(
+                DwgError::new(
+                    ErrorKind::Format,
+                    format!(
+                        "TU string length {length} requires {required_bytes} bytes, but {remaining_bytes} remain"
+                    ),
+                )
+                .with_offset(self.byte_pos as u64),
+            );
+        }
         let mut units = Vec::with_capacity(length);
         for _ in 0..length {
             units.push(self.read_rs(Endian::Little)?);
@@ -422,5 +464,57 @@ mod tests {
         let bytes = writer.into_bytes();
         let mut reader = BitReader::new(&bytes);
         assert_eq!(reader.read_tu().expect("read tu"), "テストA");
+    }
+
+    #[test]
+    fn read_tv_rejects_length_exceeding_remaining_bytes() {
+        let mut writer = BitWriter::new();
+        writer.write_bs(4).expect("write len");
+        writer.write_rc(0x41).expect("write char");
+        writer.write_rc(0x42).expect("write char");
+
+        let bytes = writer.into_bytes();
+        let mut reader = BitReader::new(&bytes);
+        let err = reader.read_tv().expect_err("expected TV length overflow");
+        assert!(format!("{err}").contains("exceeds remaining bytes"));
+    }
+
+    #[test]
+    fn read_tu_rejects_length_exceeding_remaining_bytes() {
+        let mut writer = BitWriter::new();
+        writer.write_bs(3).expect("write len");
+        writer
+            .write_rs(Endian::Little, 'A' as u16)
+            .expect("write char");
+
+        let bytes = writer.into_bytes();
+        let mut reader = BitReader::new(&bytes);
+        let err = reader.read_tu().expect_err("expected TU length overflow");
+        assert!(format!("{err}").contains("requires"));
+    }
+
+    #[test]
+    fn read_tu_rejects_large_length_when_data_is_short() {
+        let mut writer = BitWriter::new();
+        writer.write_bs(65535).expect("write len");
+        writer
+            .write_rs(Endian::Little, 'A' as u16)
+            .expect("write char");
+
+        let bytes = writer.into_bytes();
+        let mut reader = BitReader::new(&bytes);
+        let err = reader
+            .read_tu()
+            .expect_err("expected TU length/remaining-bytes error");
+        assert!(format!("{err}").contains("requires"));
+    }
+
+    #[test]
+    fn read_rcs_rejects_overflow_when_unaligned() {
+        let data = [0xAA, 0xBB];
+        let mut reader = BitReader::new(&data);
+        let _ = reader.read_b().expect("consume one bit");
+        let err = reader.read_rcs(3).expect_err("expected raw-byte overflow");
+        assert!(format!("{err}").contains("exceeds remaining bytes"));
     }
 }

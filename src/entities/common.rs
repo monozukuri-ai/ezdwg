@@ -1,6 +1,9 @@
 use crate::bit::HandleRef;
 use crate::bit::{BitReader, Endian};
+use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
+
+const MAX_COMMON_ENTITY_REACTORS: u32 = 1 << 20;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CommonEntityColor {
@@ -116,6 +119,14 @@ fn parse_common_entity_header_impl(
 
     let entity_mode = reader.read_bb()?;
     let num_of_reactors = reader.read_bl()?;
+    if num_of_reactors > MAX_COMMON_ENTITY_REACTORS {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            format!(
+                "common entity reactor count too large: {num_of_reactors} (max {MAX_COMMON_ENTITY_REACTORS})"
+            ),
+        ));
+    }
     let xdic_missing_flag = reader.read_b()?;
     let has_ds_binary_data = if r2013_plus {
         reader.read_b()? != 0
@@ -201,6 +212,14 @@ fn parse_common_entity_header_r14_impl(
     let obj_size = reader.read_rl(Endian::Little)?;
     let entity_mode = reader.read_bb()?;
     let num_of_reactors = reader.read_bl()?;
+    if num_of_reactors > MAX_COMMON_ENTITY_REACTORS {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            format!(
+                "common entity reactor count too large: {num_of_reactors} (max {MAX_COMMON_ENTITY_REACTORS})"
+            ),
+        ));
+    }
     let xdic_missing_flag = reader.read_b()?;
     let has_ds_binary_data = if with_ds_binary_flag {
         reader.read_b()? != 0

@@ -65,6 +65,54 @@ def test_to_dxf_skips_insert_related_scans_when_no_inserts(
     assert len(dxf_entities_of_type(output, "LINE")) == 1
 
 
+def test_to_dxf_populates_blocks_for_dimension_anonymous_references(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("ezdxf")
+
+    captured: dict[str, int] = {"count": 0}
+
+    def _capture_populate(_doc, _layout, **kwargs):
+        refs = kwargs.get("reference_entities") or []
+        captured["count"] = sum(1 for entity in refs if entity.dxftype == "DIMENSION")
+
+    monkeypatch.setattr(convert_module, "_populate_block_definitions", _capture_populate)
+
+    class _DummyLayout:
+        doc = type("_Doc", (), {"path": "dummy.dwg", "decode_path": "dummy.dwg"})()
+
+    entity = Entity(
+        dxftype="DIMENSION",
+        handle=1,
+        dxf={
+            "dimtype": "DIM_LINEAR",
+            "anonymous_block_name": "*D1",
+            "defpoint": (0.0, 0.0, 0.0),
+            "defpoint2": (10.0, 0.0, 0.0),
+            "defpoint3": (10.0, 10.0, 0.0),
+        },
+    )
+    monkeypatch.setattr(
+        convert_module,
+        "_resolve_layout",
+        lambda _source: ("dummy.dwg", _DummyLayout()),
+    )
+    monkeypatch.setattr(
+        convert_module,
+        "_resolve_export_entities",
+        lambda *_args, **_kwargs: [entity],
+    )
+
+    output = tmp_path / "dim_ref_block_scan.dxf"
+    result = convert_module.to_dxf("dummy.dwg", str(output), dxf_version="R2010")
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+    assert captured["count"] == 1
+
+
 def test_to_dxf_without_color_resolution_skips_style_decoders(
     monkeypatch,
     tmp_path: Path,
@@ -571,6 +619,47 @@ def test_to_dxf_exports_block_definition_for_insert(tmp_path: Path) -> None:
     inserts = list(dxf_doc.modelspace().query("INSERT"))
     assert len(inserts) == 1
     assert inserts[0].dxf.name == "BLK1"
+
+
+def test_to_dxf_flatten_inserts_writes_primitives_to_modelspace(tmp_path: Path) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    output = tmp_path / "insert_block_flattened_out.dxf"
+    result = ezdwg.to_dxf(
+        str(SAMPLES / "insert_2004.dwg"),
+        str(output),
+        types="INSERT",
+        dxf_version="R2010",
+        flatten_inserts=True,
+    )
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+
+    dxf_doc = ezdxf.readfile(str(output))
+    assert len(list(dxf_doc.modelspace().query("INSERT"))) == 0
+    assert len(list(dxf_doc.modelspace().query("LINE"))) >= 1
+
+
+def test_cli_convert_flatten_inserts_flag(tmp_path: Path, capsys) -> None:
+    pytest.importorskip("ezdxf")
+
+    output = tmp_path / "insert_flatten_cli_out.dxf"
+    code = cli_module._run_convert(
+        str(SAMPLES / "insert_2004.dwg"),
+        str(output),
+        types="INSERT",
+        dxf_version="R2010",
+        strict=False,
+        flatten_inserts=True,
+    )
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "written_entities: 1" in captured.out
+    assert len(dxf_entities_of_type(output, "INSERT")) == 0
+    assert len(dxf_entities_of_type(output, "LINE")) >= 1
 
 
 def test_to_dxf_insert_writes_linked_attribs(monkeypatch, tmp_path: Path) -> None:
@@ -1270,6 +1359,94 @@ def test_collect_referenced_block_names_includes_minsert_references() -> None:
     assert selected == {"BLK_A", "BLK_B"}
 
 
+def test_collect_block_members_by_name_keeps_first_duplicate_definition() -> None:
+    rows = [
+        (100, 10, 0, 0x04, "BLOCK", "Entity"),
+        (101, 11, 0, 0x13, "LINE", "Entity"),
+        (102, 12, 0, 0x05, "ENDBLK", "Entity"),
+        (200, 20, 0, 0x04, "BLOCK", "Entity"),
+        (201, 21, 0, 0x13, "LINE", "Entity"),
+        (202, 22, 0, 0x05, "ENDBLK", "Entity"),
+    ]
+
+    members = convert_module._collect_block_members_by_name(
+        rows,
+        {
+            100: "BLK_DUP",
+            200: "BLK_DUP",
+        },
+    )
+
+    assert members == {"BLK_DUP": [(101, "LINE")]}
+
+
+def test_normalize_recursive_block_insert_remaps_dimension_self_reference() -> None:
+    entity = Entity(
+        dxftype="INSERT",
+        handle=10,
+        dxf={"name": "*D180", "insert": (0.0, 0.0, 0.0)},
+    )
+
+    normalized = convert_module._normalize_recursive_block_insert(
+        entity,
+        block_name="*D180",
+        known_block_names={"*D180", "_Small"},
+    )
+
+    assert normalized is not None
+    assert normalized.dxf["name"] == "_Small"
+
+
+def test_normalize_recursive_block_insert_prefers_open30_when_requested() -> None:
+    entity = Entity(
+        dxftype="INSERT",
+        handle=10,
+        dxf={"name": "*D180", "insert": (0.0, 0.0, 0.0)},
+    )
+
+    normalized = convert_module._normalize_recursive_block_insert(
+        entity,
+        block_name="*D180",
+        known_block_names={"*D180", "_Small", "_Open30"},
+        prefer_open30=True,
+    )
+
+    assert normalized is not None
+    assert normalized.dxf["name"] == "_Open30"
+
+
+def test_normalize_recursive_block_insert_skips_unresolved_self_reference() -> None:
+    entity = Entity(
+        dxftype="INSERT",
+        handle=10,
+        dxf={"name": "BLK_LOOP", "insert": (0.0, 0.0, 0.0)},
+    )
+
+    normalized = convert_module._normalize_recursive_block_insert(
+        entity,
+        block_name="BLK_LOOP",
+        known_block_names={"BLK_LOOP"},
+    )
+
+    assert normalized is None
+
+
+def test_block_prefers_open30_arrowhead_for_ch_dimension_text() -> None:
+    entities = [
+        Entity(dxftype="LINE", handle=1, dxf={}),
+        Entity(dxftype="MTEXT", handle=2, dxf={"text": r"\A1;CH3300"}),
+    ]
+    assert convert_module._block_prefers_open30_arrowhead(entities)
+
+
+def test_block_prefers_open30_arrowhead_ignores_non_ch_text() -> None:
+    entities = [
+        Entity(dxftype="TEXT", handle=1, dxf={"text": "W 3045"}),
+        Entity(dxftype="MTEXT", handle=2, dxf={"text": r"\A1;390"}),
+    ]
+    assert not convert_module._block_prefers_open30_arrowhead(entities)
+
+
 def test_filter_modelspace_entities_uses_block_boundaries(monkeypatch) -> None:
     monkeypatch.setattr(
         convert_module.raw,
@@ -1582,6 +1759,133 @@ def test_to_dxf_dimension_default_explodes_to_primitives(tmp_path: Path) -> None
     assert len(dxf_entities_of_type(output, "LINE")) > 0
 
 
+def test_write_dimension_native_falls_back_to_anonymous_block_insert() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    block = doc.blocks.new(name="*D1")
+    block.add_line((0.0, 0.0), (1.0, 0.0))
+    modelspace = doc.modelspace()
+
+    written = convert_module._write_entity_to_modelspace_unsafe(
+        modelspace,
+        Entity(
+            dxftype="DIMENSION",
+            handle=1,
+            dxf={
+                "dimtype": "ANG2LN",
+                "anonymous_block_name": "*D1",
+                "insert": (10.0, 20.0, 0.0),
+                "insert_scale": (2.0, 3.0, 1.0),
+                "insert_rotation": 15.0,
+            },
+        ),
+        explode_dimensions=True,
+    )
+
+    assert written is True
+    inserts = list(modelspace.query("INSERT"))
+    assert len(inserts) == 1
+    ref = inserts[0]
+    assert ref.dxf.name == "*D1"
+    assert tuple(ref.dxf.insert) == (10.0, 20.0, 0.0)
+    assert ref.dxf.xscale == 2.0
+    assert ref.dxf.yscale == 3.0
+    assert ref.dxf.zscale == 1.0
+    assert ref.dxf.rotation == 15.0
+
+
+def test_write_dimension_native_prefers_anonymous_block_for_linear_dimension() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    block = doc.blocks.new(name="*D3")
+    block.add_line((0.0, 0.0), (1.0, 0.0))
+    modelspace = doc.modelspace()
+
+    written = convert_module._write_entity_to_modelspace_unsafe(
+        modelspace,
+        Entity(
+            dxftype="DIMENSION",
+            handle=4,
+            dxf={
+                "dimtype": "DIM_LINEAR",
+                "anonymous_block_name": "*D3",
+                "defpoint": (0.0, 0.0, 0.0),
+                "defpoint2": (10.0, 0.0, 0.0),
+                "defpoint3": (10.0, 10.0, 0.0),
+                "text_midpoint": (5.0, 6.0, 0.0),
+            },
+        ),
+        explode_dimensions=True,
+    )
+
+    assert written is True
+    inserts = list(modelspace.query("INSERT"))
+    assert len(inserts) == 1
+    assert inserts[0].dxf.name == "*D3"
+
+
+def test_write_dimension_native_skips_placeholder_geometry_without_artifacts() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+    before_lines = len(list(modelspace.query("LINE")))
+
+    written = convert_module._write_entity_to_modelspace_unsafe(
+        modelspace,
+        Entity(
+            dxftype="DIMENSION",
+            handle=2,
+            dxf={
+                "dimtype": "ANG2LN",
+                "defpoint": (0.0, 0.0, 0.0),
+                "defpoint2": (0.0, 0.0, 0.0),
+                "defpoint3": (0.0, 0.0, 0.0),
+                "text_midpoint": (0.0, 0.0, 0.0),
+                "text": "",
+            },
+        ),
+        explode_dimensions=True,
+    )
+
+    assert written is True
+    after_lines = len(list(modelspace.query("LINE")))
+    assert after_lines == before_lines
+
+
+def test_write_dimension_native_placeholder_prefers_block_fallback() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    block = doc.blocks.new(name="*D2")
+    block.add_line((0.0, 0.0), (1.0, 0.0))
+    modelspace = doc.modelspace()
+
+    written = convert_module._write_entity_to_modelspace_unsafe(
+        modelspace,
+        Entity(
+            dxftype="DIMENSION",
+            handle=3,
+            dxf={
+                "dimtype": "ANG3PT",
+                "anonymous_block_name": "*D2",
+                "defpoint": (0.0, 0.0, 0.0),
+                "defpoint2": (0.0, 0.0, 0.0),
+                "defpoint3": (0.0, 0.0, 0.0),
+                "text_midpoint": (0.0, 0.0, 0.0),
+            },
+        ),
+        explode_dimensions=True,
+    )
+
+    assert written is True
+    inserts = list(modelspace.query("INSERT"))
+    assert len(inserts) == 1
+    assert inserts[0].dxf.name == "*D2"
+
+
 def test_to_dxf_vertex_filter_writes_owner_polyline(monkeypatch, tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 
@@ -1669,6 +1973,32 @@ def test_to_dxf_writes_polyline_2d_as_lwpolyline(monkeypatch, tmp_path: Path) ->
     assert len(entities) == 1
     points = dxf_lwpolyline_points(entities[0])
     assert points == [(0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (2.0, 1.0, 0.0)]
+
+
+def test_to_dxf_treats_empty_polyline_2d_as_placeholder(monkeypatch, tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_polyline_2d_with_vertex_data",
+        lambda _path: [(0x2D10, 0x0000, [])],
+    )
+
+    output = tmp_path / "polyline2d_empty_placeholder_out.dxf"
+    doc = document_module.Document(path="dummy_polyline2d_empty_placeholder.dwg", version="AC1018")
+    result = ezdwg.to_dxf(doc, str(output), types="POLYLINE_2D", dxf_version="R2010")
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+    assert result.skipped_entities == 0
+    assert len(dxf_entities_of_type(output, "LWPOLYLINE")) == 0
+    assert len(dxf_entities_of_type(output, "POINT")) == 0
 
 
 def test_to_dxf_preserves_explicit_closing_vertex_for_open_polyline_2d(

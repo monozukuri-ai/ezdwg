@@ -43,6 +43,7 @@ _POLYLINE_OWNER_TYPES = {
     "POLYLINE_MESH",
     "POLYLINE_PFACE",
 }
+_BLOCK_REFERENCE_ENTITY_TYPES = {"INSERT", "MINSERT", "DIMENSION"}
 _WRITABLE_ENTITY_TYPES = {
     "LINE",
     "RAY",
@@ -462,6 +463,7 @@ def to_dxf(
     preserve_colors: bool = True,
     modelspace_only: bool = False,
     explode_dimensions: bool = True,
+    flatten_inserts: bool = False,
 ) -> ConvertResult:
     ezdxf = _require_ezdxf()
     source_path, layout = _resolve_layout(source)
@@ -485,10 +487,16 @@ def to_dxf(
             except Exception:
                 continue
 
-    insert_reference_entities = [
-        entity for entity in source_entities if entity.dxftype in {"INSERT", "MINSERT"}
+    block_reference_entities = [
+        entity
+        for entity in source_entities
+        if entity.dxftype in _BLOCK_REFERENCE_ENTITY_TYPES
+        and _referenced_block_name_from_entity(entity) is not None
     ]
-    if insert_reference_entities:
+    insert_reference_entities = [
+        entity for entity in block_reference_entities if entity.dxftype in {"INSERT", "MINSERT"}
+    ]
+    if block_reference_entities:
         insert_attributes_by_owner = _insert_attributes_by_owner(
             layout,
             include_styles=preserve_colors,
@@ -501,7 +509,7 @@ def to_dxf(
             dxf_doc,
             layout,
             insert_attributes_by_owner=insert_attributes_by_owner,
-            reference_entities=insert_reference_entities,
+            reference_entities=block_reference_entities,
             cached_entities_by_handle=cached_entities_by_handle,
             include_styles=preserve_colors,
             explode_dimensions=explode_dimensions,
@@ -529,6 +537,9 @@ def to_dxf(
         )
         raise ValueError(f"failed to convert {skipped} entities ({summary})")
 
+    if flatten_inserts:
+        _flatten_modelspace_inserts(modelspace)
+
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     dxf_doc.saveas(str(out_path))
@@ -541,6 +552,27 @@ def to_dxf(
         skipped_entities=skipped,
         skipped_by_type=dict(sorted(skipped_by_type.items())),
     )
+
+
+def _flatten_modelspace_inserts(modelspace: Any, *, max_depth: int = 8) -> None:
+    # Flatten nested block references for CAD viewers that do not reliably
+    # evaluate deep INSERT hierarchies.
+    for _ in range(max_depth):
+        try:
+            inserts = list(modelspace.query("INSERT"))
+        except Exception:
+            return
+        if not inserts:
+            return
+        exploded = 0
+        for insert in inserts:
+            try:
+                insert.explode()
+                exploded += 1
+            except Exception:
+                continue
+        if exploded <= 0:
+            return
 
 
 def _resolve_export_entities(
@@ -854,20 +886,29 @@ def _populate_block_definitions(
     explode_dimensions: bool = True,
 ) -> None:
     if reference_entities is None:
+        reference_entities = []
         try:
             insert_entities = list(layout.query("INSERT"))
         except Exception:
             insert_entities = []
+        reference_entities.extend(insert_entities)
         try:
             minsert_entities = list(layout.query("MINSERT"))
         except Exception:
             minsert_entities = []
-        if not insert_entities and not minsert_entities:
+        reference_entities.extend(minsert_entities)
+        try:
+            dimension_entities = list(layout.query("DIMENSION"))
+        except Exception:
+            dimension_entities = []
+        reference_entities.extend(dimension_entities)
+        if not reference_entities:
             return
-        reference_entities = [*insert_entities, *minsert_entities]
     else:
         reference_entities = [
-            entity for entity in reference_entities if entity.dxftype in {"INSERT", "MINSERT"}
+            entity
+            for entity in reference_entities
+            if entity.dxftype in _BLOCK_REFERENCE_ENTITY_TYPES
         ]
         if not reference_entities:
             return
@@ -875,7 +916,7 @@ def _populate_block_definitions(
     referenced_names = {
         normalized_name
         for entity in reference_entities
-        for normalized_name in [_normalize_block_name(entity.dxf.get("name"))]
+        for normalized_name in [_referenced_block_name_from_entity(entity)]
         if normalized_name is not None
     }
     if not referenced_names:
@@ -897,36 +938,10 @@ def _populate_block_definitions(
         header_rows,
         key=lambda row: int(row[1]) if isinstance(row, tuple) and len(row) > 1 else 0,
     )
-
-    block_members_by_name: dict[str, list[tuple[int, str]]] = {}
-    current_block_name: str | None = None
-    for row in sorted_header_rows:
-        if not isinstance(row, tuple) or len(row) < 6:
-            continue
-        raw_handle, _offset, _size, _code, raw_type_name, raw_type_class = row
-        type_class = str(raw_type_class).strip().upper()
-        if type_class not in {"E", "ENTITY"}:
-            continue
-        try:
-            handle = int(raw_handle)
-        except Exception:
-            continue
-        type_name = str(raw_type_name).strip().upper()
-
-        if type_name == "BLOCK":
-            block_name = block_name_by_handle.get(handle)
-            if isinstance(block_name, str) and block_name.strip() != "":
-                current_block_name = block_name.strip()
-                block_members_by_name.setdefault(current_block_name, [])
-            else:
-                current_block_name = None
-            continue
-        if type_name == "ENDBLK":
-            current_block_name = None
-            continue
-        if current_block_name is None:
-            continue
-        block_members_by_name[current_block_name].append((handle, type_name))
+    block_members_by_name = _collect_block_members_by_name(
+        sorted_header_rows,
+        block_name_by_handle,
+    )
 
     if not block_members_by_name:
         return
@@ -1044,12 +1059,121 @@ def _populate_block_definitions(
             owners_by_handle=owner_entities_by_handle,
         )
         export_entities = _attach_insert_attributes(export_entities, insert_attributes_by_owner)
+        prefer_open30 = _block_prefers_open30_arrowhead(export_entities)
+        open30_consumed = False
         for entity in export_entities:
+            recursive_target_name = (
+                _normalize_block_name(entity.dxf.get("name"))
+                if entity.dxftype in {"INSERT", "MINSERT"}
+                else None
+            )
+            normalized_entity = _normalize_recursive_block_insert(
+                entity,
+                block_name=block_name,
+                known_block_names=selected_block_names,
+                prefer_open30=prefer_open30 and not open30_consumed,
+            )
+            if normalized_entity is None:
+                continue
+            if recursive_target_name == block_name:
+                normalized_target_name = _normalize_block_name(normalized_entity.dxf.get("name"))
+                if normalized_target_name == "_Open30":
+                    open30_consumed = True
             _write_entity_to_modelspace(
                 block_layout,
-                entity,
+                normalized_entity,
                 explode_dimensions=explode_dimensions,
             )
+
+
+def _collect_block_members_by_name(
+    sorted_header_rows: list[tuple[Any, ...]],
+    block_name_by_handle: dict[int, str],
+) -> dict[str, list[tuple[int, str]]]:
+    block_members_by_name: dict[str, list[tuple[int, str]]] = {}
+    defined_block_names: set[str] = set()
+    current_block_name: str | None = None
+    for row in sorted_header_rows:
+        if not isinstance(row, tuple) or len(row) < 6:
+            continue
+        raw_handle, _offset, _size, _code, raw_type_name, raw_type_class = row
+        if str(raw_type_class).strip().upper() not in {"E", "ENTITY"}:
+            continue
+        try:
+            handle = int(raw_handle)
+        except Exception:
+            continue
+        type_name = str(raw_type_name).strip().upper()
+
+        if type_name == "BLOCK":
+            block_name = block_name_by_handle.get(handle)
+            if isinstance(block_name, str) and block_name.strip() != "":
+                normalized_name = block_name.strip()
+                if normalized_name in defined_block_names:
+                    # Keep the first definition for each block name and ignore
+                    # later duplicates to avoid mixing unrelated block bodies.
+                    current_block_name = None
+                    continue
+                defined_block_names.add(normalized_name)
+                current_block_name = normalized_name
+                block_members_by_name.setdefault(normalized_name, [])
+            else:
+                current_block_name = None
+            continue
+
+        if type_name == "ENDBLK":
+            current_block_name = None
+            continue
+
+        if current_block_name is None:
+            continue
+        block_members_by_name[current_block_name].append((handle, type_name))
+    return block_members_by_name
+
+
+def _block_prefers_open30_arrowhead(entities: list[Entity]) -> bool:
+    for entity in entities:
+        if entity.dxftype not in {"TEXT", "MTEXT", "ATTRIB"}:
+            continue
+        text = str(entity.dxf.get("text") or "")
+        if "CH" in text.upper():
+            return True
+    return False
+
+
+def _normalize_recursive_block_insert(
+    entity: Entity,
+    *,
+    block_name: str,
+    known_block_names: set[str],
+    prefer_open30: bool = False,
+) -> Entity | None:
+    if entity.dxftype not in {"INSERT", "MINSERT"}:
+        return entity
+
+    target_name = _normalize_block_name(entity.dxf.get("name"))
+    if target_name != block_name:
+        return entity
+
+    fallback_names: tuple[str, ...]
+    if block_name.startswith("*D"):
+        # Anonymous dimension blocks often carry arrowhead INSERTs that can be
+        # mis-resolved to self-references in best-effort decoding paths.
+        if prefer_open30:
+            fallback_names = ("_Open30", "_Small", "_CLOSEDFILLED")
+        else:
+            fallback_names = ("_Small", "_Open30", "_CLOSEDFILLED")
+    else:
+        fallback_names = ()
+
+    for fallback in fallback_names:
+        if fallback in known_block_names and fallback != block_name:
+            remapped = dict(entity.dxf)
+            remapped["name"] = fallback
+            return Entity(dxftype=entity.dxftype, handle=entity.handle, dxf=remapped)
+
+    # Drop unresolved recursive INSERTs to avoid cyclic block graphs.
+    return None
 
 
 def _resolve_block_name_by_handle(
@@ -1238,6 +1362,23 @@ def _collect_referenced_block_names(
     return selected_block_names
 
 
+def _referenced_block_name_from_entity(entity: Entity) -> str | None:
+    if entity.dxftype in {"INSERT", "MINSERT"}:
+        return _normalize_block_name(entity.dxf.get("name"))
+    if entity.dxftype == "DIMENSION":
+        return _dimension_anonymous_block_name(entity.dxf)
+    return None
+
+
+def _dimension_anonymous_block_name(dxf: dict[str, Any]) -> str | None:
+    name = _normalize_block_name(dxf.get("anonymous_block_name"))
+    if name is None:
+        return None
+    if not name.upper().startswith("*D"):
+        return None
+    return name
+
+
 def _normalize_block_name(name: Any) -> str | None:
     if not isinstance(name, str):
         return None
@@ -1386,7 +1527,22 @@ def _write_entity_to_modelspace_unsafe(
 
         points = [_point3(point) for point in dxf.get("points", [])]
         if not points:
-            return False
+            interpolated_points = [
+                _point3(point) for point in list(dxf.get("interpolated_points") or [])
+            ]
+            if len(interpolated_points) >= 2:
+                modelspace.add_lwpolyline(
+                    [(point[0], point[1], 0.0, 0.0, 0.0) for point in interpolated_points],
+                    format="xyseb",
+                    close=bool(dxf.get("closed", False)),
+                    dxfattribs=dxfattribs,
+                )
+                return True
+            if len(interpolated_points) == 1:
+                modelspace.add_point(interpolated_points[0], dxfattribs=dxfattribs)
+                return True
+            # Keep placeholder POLYLINE records from being reported as hard skips.
+            return True
         bulges = list(dxf.get("bulges", []) or [])
         widths = list(dxf.get("widths", []) or [])
         closed = bool(dxf.get("closed", False))
@@ -2119,6 +2275,14 @@ def _write_dimension_native(
     explode_dimensions: bool = True,
 ) -> bool:
     dimtype = str(dxf.get("dimtype") or "").upper()
+    if dimtype.startswith("DIM_"):
+        dimtype = dimtype[4:]
+    if _write_dimension_block_fallback(modelspace, dxf, dxfattribs):
+        return True
+    if _is_placeholder_dimension_payload(dxf):
+        # Keep conversion stable for minimally decoded DIM placeholders:
+        # do not generate synthetic zero-length geometry.
+        return True
     text = _dimension_text(dxf.get("text"))
     text_mid = _point2_or_none(dxf.get("text_midpoint"))
 
@@ -2221,7 +2385,71 @@ def _write_dimension_native(
         # Keep conversion robust and avoid generating synthetic geometry lines.
         pass
 
+    if _write_dimension_block_fallback(modelspace, dxf, dxfattribs):
+        return True
     return _write_dimension_text_fallback(modelspace, dxf, dxfattribs)
+
+
+def _write_dimension_block_fallback(
+    modelspace: Any,
+    dxf: dict[str, Any],
+    dxfattribs: dict[str, Any],
+) -> bool:
+    name = _dimension_anonymous_block_name(dxf)
+    if name is None:
+        return False
+
+    insert_value = dxf.get("insert")
+    if insert_value is None:
+        insert_value = dxf.get("text_midpoint")
+    if insert_value is None:
+        insert_value = dxf.get("defpoint")
+    insert = _point3(insert_value)
+
+    try:
+        ref = modelspace.add_blockref(name, insert, dxfattribs=dxfattribs)
+    except Exception:
+        return False
+
+    scale = dxf.get("insert_scale")
+    if isinstance(scale, (list, tuple)) and len(scale) >= 3:
+        try:
+            ref.dxf.xscale = float(scale[0])
+            ref.dxf.yscale = float(scale[1])
+            ref.dxf.zscale = float(scale[2])
+        except Exception:
+            pass
+    rotation = dxf.get("insert_rotation")
+    if rotation is not None:
+        try:
+            ref.dxf.rotation = float(rotation)
+        except Exception:
+            pass
+    return True
+
+
+def _is_placeholder_dimension_payload(dxf: dict[str, Any]) -> bool:
+    zero = (0.0, 0.0, 0.0)
+    defpoint = _point3(dxf.get("defpoint"))
+    defpoint2 = _point3(dxf.get("defpoint2"))
+    defpoint3 = _point3(dxf.get("defpoint3"))
+    text_midpoint = _point3(dxf.get("text_midpoint"))
+    if not (
+        defpoint == zero
+        and defpoint2 == zero
+        and defpoint3 == zero
+        and text_midpoint == zero
+    ):
+        return False
+
+    insert_value = dxf.get("insert")
+    if insert_value is not None and _point3(insert_value) != zero:
+        return False
+
+    text = str(dxf.get("text") or "").strip()
+    if text not in {"", "<>"}:
+        return False
+    return dxf.get("actual_measurement") is None
 
 
 def _finalize_dimension(

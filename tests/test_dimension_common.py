@@ -154,6 +154,59 @@ def test_dimension_entity_merges_linear_and_diameter(monkeypatch) -> None:
     assert entities[2].dxf["dimtype"] == "LINEAR"
 
 
+def test_dimension_entity_resolves_anonymous_block_name(monkeypatch) -> None:
+    monkeypatch.setattr(document_module, "_entity_style_map", lambda _path: {})
+    monkeypatch.setattr(document_module, "_layer_color_map", lambda _path: {})
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_dimension_entities",
+        lambda _path: [
+            (
+                "ANG2LN",
+                (
+                    500,
+                    "",
+                    (0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0),
+                    None,
+                    ((0.0, 0.0, 1.0), (1.0, 1.0, 1.0)),
+                    (0.0, 0.0, 0.0, 0.0),
+                    (0, None, None, None, None, 0.0),
+                    (None, 0xABC),
+                ),
+            )
+        ],
+    )
+    monkeypatch.setattr(document_module.raw, "decode_dim_linear_entities", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_dim_ordinate_entities", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_dim_aligned_entities", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_dim_ang3pt_entities", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_dim_ang2ln_entities", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_dim_radius_entities", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_dim_diameter_entities", lambda _path: [])
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_block_header_names",
+        lambda _path: [(0xABC, "*D123")],
+    )
+    document_module._block_header_name_map.cache_clear()
+
+    doc = Document(
+        path="dummy_dim_anonymous_block.dwg",
+        version="AC1027",
+        decode_path="dummy_dim_anonymous_block.dwg",
+        decode_version="AC1027",
+    )
+    layout = Layout(doc=doc, name="MODELSPACE")
+    entities = list(layout.query("DIMENSION"))
+
+    assert len(entities) == 1
+    assert entities[0].dxf["dimtype"] == "ANG2LN"
+    assert entities[0].dxf["anonymous_block_name"] == "*D123"
+
+
 def test_dimension_value_reads_common_mapping() -> None:
     dxf = {"common": {"actual_measurement": 7.25}}
     assert render_module._dimension_value(dxf, "actual_measurement") == 7.25
