@@ -8,7 +8,7 @@ The high-level API is the recommended way to work with DWG files. It provides a 
 
 | Module | Description |
 |--------|-------------|
-| [Core Functions](core.md) | `ezdwg.read()`, `ezdwg.plot()`, `ezdwg.to_dxf()` |
+| [Core Functions](core.md) | `ezdwg.read()`, `ezdwg.plot()`, `ezdwg.to_dxf()`, `ezdwg.to_dwg()` |
 | [Document & Layout](document.md) | `Document` and `Layout` classes |
 | [Entity](entity.md) | `Entity` dataclass |
 

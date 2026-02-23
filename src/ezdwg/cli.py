@@ -7,7 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Sequence
 
-from .convert import to_dxf
+from .convert import to_dwg, to_dxf
 from .document import SUPPORTED_ENTITY_TYPES, read
 from . import raw
 
@@ -94,7 +94,7 @@ def _package_version() -> str:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ezdwg", description="Inspect DWG files.")
+    parser = argparse.ArgumentParser(prog="ezdwg", description="Inspect, convert, and write DWG files.")
     parser.add_argument(
         "--version",
         action="version",
@@ -135,6 +135,28 @@ def _build_parser() -> argparse.ArgumentParser:
         "--include-unsupported",
         action="store_true",
         help="Also query unsupported entity types (keeps legacy skip reporting behavior).",
+    )
+
+    write_parser = subparsers.add_parser(
+        "write",
+        help="Write a DWG file using the native AC1015 writer.",
+    )
+    write_parser.add_argument("input_path", help="Path to input DWG file.")
+    write_parser.add_argument("output_path", help="Path to output DWG file.")
+    write_parser.add_argument(
+        "--types",
+        default=None,
+        help='Entity filter passed to query(), e.g. "LINE ARC LWPOLYLINE".',
+    )
+    write_parser.add_argument(
+        "--dwg-version",
+        default="AC1015",
+        help="Output DWG version (currently AC1015 only).",
+    )
+    write_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail if any entity cannot be written.",
     )
     return parser
 
@@ -336,6 +358,42 @@ def _run_convert(
     return 0
 
 
+def _run_write(
+    input_path: str,
+    output_path: str,
+    *,
+    types: str | None = None,
+    dwg_version: str = "AC1015",
+    strict: bool = False,
+) -> int:
+    dwg_path = Path(input_path)
+    if not dwg_path.exists():
+        print(f"error: file not found: {dwg_path}", file=sys.stderr)
+        return 2
+
+    try:
+        result = to_dwg(
+            str(dwg_path),
+            output_path,
+            types=types,
+            version=dwg_version,
+            strict=strict,
+        )
+    except Exception as exc:
+        print(f"error: failed to write DWG: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"input: {result.source_path}")
+    print(f"output: {result.output_path}")
+    print(f"target_version: {result.target_version}")
+    print(f"total_entities: {result.total_entities}")
+    print(f"written_entities: {result.written_entities}")
+    print(f"skipped_entities: {result.skipped_entities}")
+    for dxftype, count in result.skipped_by_type.items():
+        print(f"skipped[{dxftype}]: {count}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -350,6 +408,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             dxf_version=args.dxf_version,
             strict=bool(args.strict),
             include_unsupported=bool(args.include_unsupported),
+        )
+    if args.command == "write":
+        return _run_write(
+            args.input_path,
+            args.output_path,
+            types=args.types,
+            dwg_version=args.dwg_version,
+            strict=bool(args.strict),
         )
 
     parser.print_help()

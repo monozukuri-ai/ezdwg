@@ -5,16 +5,17 @@
 
 **Minimal DWG (R14–R2018 / AC1014–AC1032) reader with a Python API inspired by ezdxf.**
 
-ezdwg is a read-only DWG file parser with a Rust core exposed to Python via PyO3. It provides a simple, friendly API for extracting geometry, text, dimensions, and other entities from DWG files.
+ezdwg is a DWG parser with a Rust core exposed to Python via PyO3. It provides a simple, friendly API for extracting geometry, text, dimensions, and other entities from DWG files, and includes a native AC1015 writer for basic entities.
 
 ## Key Features
 
-- **Read-only DWG parsing** — R14 (AC1014) through R2018 (AC1032)
+- **DWG parsing** — R14 (AC1014) through R2018 (AC1032)
 - **High-performance Rust core** — fast binary parsing via PyO3
 - **ezdxf-inspired API** — familiar `Document` / `Layout` / `Entity` pattern
 - **Plotting support** — render DWG files with matplotlib
 - **DXF export** — convert DWG to DXF using ezdxf as backend
-- **CLI tools** — inspect and convert DWG files from the command line
+- **Native DWG write (AC1015)** — write `LINE/RAY/XLINE/POINT/ARC/CIRCLE/LWPOLYLINE/TEXT/MTEXT`
+- **CLI tools** — inspect, convert, and write DWG files from the command line
 
 ## Quick Example
 

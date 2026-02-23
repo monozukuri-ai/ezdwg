@@ -97,3 +97,33 @@ INSERT, MINSERT, DIMENSION
 - Block definitions referenced by INSERT entities are reconstructed from the DWG source.
 - DIMENSION entities use native ezdxf dimension builders with a text fallback for unsupported subtypes.
 - Style, linetype, and layer properties may not be fully preserved.
+
+---
+
+## Native DWG Writer (AC1015)
+
+ezdwg also provides a native DWG writer for AC1015.
+
+```python
+import ezdwg
+
+result = ezdwg.to_dwg(
+    "input.dwg",
+    "output.dwg",
+    version="AC1015",
+    types="LINE ARC CIRCLE LWPOLYLINE TEXT MTEXT",
+)
+print(result.written_entities, result.skipped_by_type)
+```
+
+You can also call:
+
+```python
+doc = ezdwg.read("input.dwg")
+doc.export_dwg("output.dwg", version="AC1015")
+```
+
+Current native writer scope:
+
+- Version: `AC1015` only
+- Entities: `LINE`, `RAY`, `XLINE`, `POINT`, `ARC`, `CIRCLE`, `LWPOLYLINE`, `TEXT`, `MTEXT`

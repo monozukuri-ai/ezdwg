@@ -55,6 +55,14 @@ Document.export_dxf(output_path: str, **kwargs) -> ConvertResult
 
 Export the modelspace to a DXF file. Accepts the same keyword arguments as [`ezdwg.to_dxf()`](core.md#ezdwgto_dxf).
 
+#### export_dwg
+
+```python
+Document.export_dwg(output_path: str, **kwargs) -> WriteResult
+```
+
+Export the modelspace to a DWG file using the native writer. Accepts the same keyword arguments as [`ezdwg.to_dwg()`](core.md#ezdwgto_dwg).
+
 ---
 
 ## Layout
@@ -127,3 +135,11 @@ Layout.export_dxf(output_path: str, **kwargs) -> ConvertResult
 ```
 
 Export this layout to a DXF file. Accepts the same keyword arguments as [`ezdwg.to_dxf()`](core.md#ezdwgto_dxf).
+
+#### export_dwg
+
+```python
+Layout.export_dwg(output_path: str, **kwargs) -> WriteResult
+```
+
+Export this layout to a DWG file using the native writer. Accepts the same keyword arguments as [`ezdwg.to_dwg()`](core.md#ezdwgto_dwg).

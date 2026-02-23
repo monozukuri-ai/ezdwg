@@ -69,6 +69,22 @@ doc = ezdwg.read("input.dwg")
 doc.export_dxf("output.dxf")
 ```
 
+## DWG to DWG (Native AC1015 Writer)
+
+```python
+import ezdwg
+
+result = ezdwg.to_dwg("input.dwg", "output.dwg", version="AC1015")
+print(f"Written: {result.written_entities}/{result.total_entities} entities")
+```
+
+Or from an already opened document:
+
+```python
+doc = ezdwg.read("input.dwg")
+doc.export_dwg("output.dwg", version="AC1015")
+```
+
 ## CLI Usage
 
 ```bash
@@ -80,4 +96,7 @@ ezdwg inspect path/to/file.dwg
 
 # Convert DWG to DXF
 ezdwg convert input.dwg output.dxf
+
+# Write DWG (native AC1015 writer)
+ezdwg write input.dwg output.dwg --dwg-version AC1015
 ```

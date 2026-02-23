@@ -108,6 +108,49 @@ Convert a DWG file to DXF format.
 
 ---
 
+## ezdwg.to_dwg
+
+```python
+ezdwg.to_dwg(
+    source: str | Document | Layout,
+    output_path: str,
+    *,
+    types: str | Iterable[str] | None = None,
+    version: str = "AC1015",
+    strict: bool = False,
+) -> WriteResult
+```
+
+Write a DWG file using the native writer.
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `source` | `str \| Document \| Layout` | — | File path, Document, or Layout |
+| `output_path` | `str` | — | Output DWG file path |
+| `types` | `str \| Iterable[str] \| None` | `None` | Entity type filter |
+| `version` | `str` | `"AC1015"` | Output DWG version (currently AC1015 only) |
+| `strict` | `bool` | `False` | Fail on skipped entities |
+
+**Returns:** A `WriteResult` object.
+
+**Raises:** `ValueError` when an unsupported write version is requested, or in strict mode if entities are skipped.
+
+**Supported native write entities (v1):**
+
+- `LINE`
+- `RAY`
+- `XLINE`
+- `POINT`
+- `ARC`
+- `CIRCLE`
+- `LWPOLYLINE`
+- `TEXT`
+- `MTEXT`
+
+---
+
 ## ConvertResult
 
 ```python
@@ -127,6 +170,34 @@ Result of a DWG to DXF conversion.
 |-----------|------|-------------|
 | `source_path` | `str` | Input DWG path |
 | `output_path` | `str` | Output DXF path |
+| `total_entities` | `int` | Total entities processed |
+| `written_entities` | `int` | Successfully written |
+| `skipped_entities` | `int` | Skipped count |
+| `skipped_by_type` | `dict[str, int]` | Skipped by entity type |
+
+---
+
+## WriteResult
+
+```python
+@dataclass(frozen=True)
+class WriteResult:
+    source_path: str
+    output_path: str
+    target_version: str
+    total_entities: int
+    written_entities: int
+    skipped_entities: int
+    skipped_by_type: dict[str, int]
+```
+
+Result of a DWG write operation.
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `source_path` | `str` | Input DWG path |
+| `output_path` | `str` | Output DWG path |
+| `target_version` | `str` | Target DWG version |
 | `total_entities` | `int` | Total entities processed |
 | `written_entities` | `int` | Successfully written |
 | `skipped_entities` | `int` | Skipped count |

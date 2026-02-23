@@ -60,6 +60,8 @@ from ._core import (
     decode_vertex_pface_face_entities,
     decode_vertex_2d_entities,
     detect_version,
+    write_ac1015_dwg,
+    write_ac1015_line_dwg,
     list_object_headers,
     list_object_headers_by_type,
     list_object_headers_with_type,
@@ -144,4 +146,6 @@ __all__ = [
     "decode_vertex_pface_entities",
     "decode_vertex_pface_face_entities",
     "decode_vertex_2d_entities",
+    "write_ac1015_dwg",
+    "write_ac1015_line_dwg",
 ]

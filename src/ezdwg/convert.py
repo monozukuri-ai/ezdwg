@@ -72,6 +72,17 @@ _WRITABLE_ENTITY_TYPES = {
     "MINSERT",
     "DIMENSION",
 }
+_DWG_WRITABLE_ENTITY_TYPES = {
+    "LINE",
+    "RAY",
+    "XLINE",
+    "POINT",
+    "ARC",
+    "CIRCLE",
+    "LWPOLYLINE",
+    "TEXT",
+    "MTEXT",
+}
 
 
 @dataclass(frozen=True)
@@ -82,6 +93,361 @@ class ConvertResult:
     written_entities: int
     skipped_entities: int
     skipped_by_type: dict[str, int]
+
+
+@dataclass(frozen=True)
+class WriteResult:
+    source_path: str
+    output_path: str
+    target_version: str
+    total_entities: int
+    written_entities: int
+    skipped_entities: int
+    skipped_by_type: dict[str, int]
+
+
+def to_dwg(
+    source: str | Document | Layout,
+    output_path: str,
+    *,
+    types: str | Iterable[str] | None = None,
+    version: str = "AC1015",
+    strict: bool = False,
+) -> WriteResult:
+    if version != "AC1015":
+        raise ValueError(f"unsupported DWG write version: {version}")
+
+    source_path, layout = _resolve_layout(source)
+    source_entities = _resolve_dwg_export_entities(layout, types)
+
+    total = 0
+    written = 0
+    skipped_by_type: dict[str, int] = {}
+    line_rows: list[tuple[int, float, float, float, float, float, float]] = []
+    ray_rows: list[tuple[int, tuple[float, float, float], tuple[float, float, float]]] = []
+    xline_rows: list[tuple[int, tuple[float, float, float], tuple[float, float, float]]] = []
+    point_rows: list[tuple[int, float, float, float, float]] = []
+    arc_rows: list[tuple[int, float, float, float, float, float, float]] = []
+    circle_rows: list[tuple[int, float, float, float, float]] = []
+    lwpolyline_rows: list[
+        tuple[int, int, list[tuple[float, float]], list[float], list[tuple[float, float]], float | None]
+    ] = []
+    text_rows: list[tuple[int, str, tuple[float, float, float], float, float]] = []
+    mtext_rows: list[
+        tuple[
+            int,
+            str,
+            tuple[float, float, float],
+            tuple[float, float, float],
+            float,
+            float,
+            int,
+            int,
+        ]
+    ] = []
+
+    for entity in source_entities:
+        total += 1
+        if entity.dxftype == "LINE":
+            row = _as_line_row(entity)
+            if row is None:
+                skipped_by_type[entity.dxftype] = skipped_by_type.get(entity.dxftype, 0) + 1
+                continue
+            line_rows.append(row)
+            written += 1
+            continue
+        if entity.dxftype == "POINT":
+            row = _as_point_row(entity)
+            if row is None:
+                skipped_by_type[entity.dxftype] = skipped_by_type.get(entity.dxftype, 0) + 1
+                continue
+            point_rows.append(row)
+            written += 1
+            continue
+        if entity.dxftype == "RAY":
+            row = _as_ray_row(entity)
+            if row is None:
+                skipped_by_type[entity.dxftype] = skipped_by_type.get(entity.dxftype, 0) + 1
+                continue
+            ray_rows.append(row)
+            written += 1
+            continue
+        if entity.dxftype == "XLINE":
+            row = _as_xline_row(entity)
+            if row is None:
+                skipped_by_type[entity.dxftype] = skipped_by_type.get(entity.dxftype, 0) + 1
+                continue
+            xline_rows.append(row)
+            written += 1
+            continue
+        if entity.dxftype == "ARC":
+            row = _as_arc_row(entity)
+            if row is None:
+                skipped_by_type[entity.dxftype] = skipped_by_type.get(entity.dxftype, 0) + 1
+                continue
+            arc_rows.append(row)
+            written += 1
+            continue
+        if entity.dxftype == "CIRCLE":
+            row = _as_circle_row(entity)
+            if row is None:
+                skipped_by_type[entity.dxftype] = skipped_by_type.get(entity.dxftype, 0) + 1
+                continue
+            circle_rows.append(row)
+            written += 1
+            continue
+        if entity.dxftype == "LWPOLYLINE":
+            row = _as_lwpolyline_row(entity)
+            if row is None:
+                skipped_by_type[entity.dxftype] = skipped_by_type.get(entity.dxftype, 0) + 1
+                continue
+            lwpolyline_rows.append(row)
+            written += 1
+            continue
+        if entity.dxftype == "TEXT":
+            row = _as_text_row(entity)
+            if row is None:
+                skipped_by_type[entity.dxftype] = skipped_by_type.get(entity.dxftype, 0) + 1
+                continue
+            text_rows.append(row)
+            written += 1
+            continue
+        if entity.dxftype == "MTEXT":
+            row = _as_mtext_row(entity)
+            if row is None:
+                skipped_by_type[entity.dxftype] = skipped_by_type.get(entity.dxftype, 0) + 1
+                continue
+            mtext_rows.append(row)
+            written += 1
+            continue
+        skipped_by_type[entity.dxftype] = skipped_by_type.get(entity.dxftype, 0) + 1
+
+    skipped = total - written
+    if strict and skipped > 0:
+        summary = ", ".join(
+            f"{dxftype}:{count}" for dxftype, count in sorted(skipped_by_type.items())
+        )
+        raise ValueError(f"failed to write {skipped} entities ({summary})")
+
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_ac1015_dwg(
+        str(out_path),
+        line_rows,
+        arc_rows,
+        circle_rows,
+        lwpolyline_rows,
+        text_rows,
+        mtext_rows,
+        point_rows,
+        ray_rows,
+        xline_rows,
+    )
+
+    return WriteResult(
+        source_path=source_path,
+        output_path=str(out_path),
+        target_version=version,
+        total_entities=total,
+        written_entities=written,
+        skipped_entities=skipped,
+        skipped_by_type=dict(sorted(skipped_by_type.items())),
+    )
+
+
+def _as_line_row(entity: Entity) -> tuple[int, float, float, float, float, float, float] | None:
+    start = entity.dxf.get("start")
+    end = entity.dxf.get("end")
+    if not (
+        isinstance(start, tuple)
+        and len(start) == 3
+        and isinstance(end, tuple)
+        and len(end) == 3
+    ):
+        return None
+    return (
+        int(entity.handle),
+        float(start[0]),
+        float(start[1]),
+        float(start[2]),
+        float(end[0]),
+        float(end[1]),
+        float(end[2]),
+    )
+
+
+def _as_point_row(entity: Entity) -> tuple[int, float, float, float, float] | None:
+    location = entity.dxf.get("location")
+    x_axis_angle = entity.dxf.get("x_axis_angle", 0.0)
+    if not (
+        isinstance(location, tuple)
+        and len(location) == 3
+        and isinstance(x_axis_angle, (int, float))
+    ):
+        return None
+    return (
+        int(entity.handle),
+        float(location[0]),
+        float(location[1]),
+        float(location[2]),
+        float(x_axis_angle),
+    )
+
+
+def _as_ray_row(entity: Entity) -> tuple[int, tuple[float, float, float], tuple[float, float, float]] | None:
+    start = entity.dxf.get("start")
+    unit_vector = entity.dxf.get("unit_vector")
+    if not (
+        isinstance(start, tuple)
+        and len(start) == 3
+        and isinstance(unit_vector, tuple)
+        and len(unit_vector) == 3
+    ):
+        return None
+    return (
+        int(entity.handle),
+        (float(start[0]), float(start[1]), float(start[2])),
+        (float(unit_vector[0]), float(unit_vector[1]), float(unit_vector[2])),
+    )
+
+
+def _as_xline_row(entity: Entity) -> tuple[int, tuple[float, float, float], tuple[float, float, float]] | None:
+    return _as_ray_row(entity)
+
+
+def _as_arc_row(entity: Entity) -> tuple[int, float, float, float, float, float, float] | None:
+    center = entity.dxf.get("center")
+    radius = entity.dxf.get("radius")
+    start_angle = entity.dxf.get("start_angle")
+    end_angle = entity.dxf.get("end_angle")
+    if not (
+        isinstance(center, tuple)
+        and len(center) == 3
+        and isinstance(radius, (int, float))
+        and isinstance(start_angle, (int, float))
+        and isinstance(end_angle, (int, float))
+    ):
+        return None
+    return (
+        int(entity.handle),
+        float(center[0]),
+        float(center[1]),
+        float(center[2]),
+        float(radius),
+        math.radians(float(start_angle)),
+        math.radians(float(end_angle)),
+    )
+
+
+def _as_circle_row(entity: Entity) -> tuple[int, float, float, float, float] | None:
+    center = entity.dxf.get("center")
+    radius = entity.dxf.get("radius")
+    if not (isinstance(center, tuple) and len(center) == 3 and isinstance(radius, (int, float))):
+        return None
+    return (
+        int(entity.handle),
+        float(center[0]),
+        float(center[1]),
+        float(center[2]),
+        float(radius),
+    )
+
+
+def _as_lwpolyline_row(
+    entity: Entity,
+) -> tuple[int, int, list[tuple[float, float]], list[float], list[tuple[float, float]], float | None] | None:
+    points = entity.dxf.get("points")
+    flags = entity.dxf.get("flags", 0)
+    bulges = entity.dxf.get("bulges") or []
+    widths = entity.dxf.get("widths") or []
+    const_width = entity.dxf.get("const_width")
+    if not isinstance(points, list):
+        return None
+    points2d: list[tuple[float, float]] = []
+    for point in points:
+        if not (isinstance(point, tuple) and len(point) >= 2):
+            return None
+        points2d.append((float(point[0]), float(point[1])))
+    out_bulges = [float(value) for value in list(bulges)]
+    out_widths: list[tuple[float, float]] = []
+    for width in list(widths):
+        if not (isinstance(width, tuple) and len(width) == 2):
+            continue
+        out_widths.append((float(width[0]), float(width[1])))
+    out_const_width = float(const_width) if isinstance(const_width, (int, float)) else None
+    return (
+        int(entity.handle),
+        int(flags),
+        points2d,
+        out_bulges,
+        out_widths,
+        out_const_width,
+    )
+
+
+def _as_text_row(entity: Entity) -> tuple[int, str, tuple[float, float, float], float, float] | None:
+    text = entity.dxf.get("text")
+    insert = entity.dxf.get("insert")
+    height = entity.dxf.get("height")
+    rotation = entity.dxf.get("rotation", 0.0)
+    if not (
+        isinstance(text, str)
+        and isinstance(insert, tuple)
+        and len(insert) == 3
+        and isinstance(height, (int, float))
+        and isinstance(rotation, (int, float))
+    ):
+        return None
+    return (
+        int(entity.handle),
+        text,
+        (float(insert[0]), float(insert[1]), float(insert[2])),
+        float(height),
+        math.radians(float(rotation)),
+    )
+
+
+def _as_mtext_row(
+    entity: Entity,
+) -> tuple[int, str, tuple[float, float, float], tuple[float, float, float], float, float, int, int] | None:
+    text = entity.dxf.get("raw_text")
+    if not isinstance(text, str):
+        text = entity.dxf.get("text")
+    insert = entity.dxf.get("insert")
+    text_direction = entity.dxf.get("text_direction")
+    if not (
+        isinstance(insert, tuple)
+        and len(insert) == 3
+        and isinstance(text, str)
+    ):
+        return None
+
+    if isinstance(text_direction, tuple) and len(text_direction) == 3:
+        direction = (
+            float(text_direction[0]),
+            float(text_direction[1]),
+            float(text_direction[2]),
+        )
+    else:
+        rotation = float(entity.dxf.get("rotation", 0.0))
+        angle = math.radians(rotation)
+        direction = (math.cos(angle), math.sin(angle), 0.0)
+
+    rect_width = float(entity.dxf.get("rect_width", 0.0))
+    char_height = float(entity.dxf.get("char_height", entity.dxf.get("height", 1.0)))
+    attachment_point = int(entity.dxf.get("attachment_point", 1))
+    drawing_direction = int(entity.dxf.get("drawing_direction", 1))
+
+    return (
+        int(entity.handle),
+        text,
+        (float(insert[0]), float(insert[1]), float(insert[2])),
+        direction,
+        rect_width,
+        char_height,
+        attachment_point,
+        drawing_direction,
+    )
 
 
 def to_dxf(
@@ -162,6 +528,20 @@ def _resolve_export_entities(
     selected_entities = list(layout.query(query_types))
     export_entities = _materialize_export_entities(layout, selected_entities)
     return _attach_insert_attributes(export_entities, insert_attributes_by_owner)
+
+
+def _resolve_dwg_export_entities(
+    layout: Layout,
+    types: str | Iterable[str] | None,
+) -> list[Entity]:
+    query_types: str | Iterable[str] | None
+    if types is not None:
+        query_types = types
+    else:
+        present_types = set(_present_supported_types(layout.doc.decode_path))
+        query_types = tuple(sorted(present_types & _DWG_WRITABLE_ENTITY_TYPES))
+    selected_entities = list(layout.query(query_types))
+    return _materialize_export_entities(layout, selected_entities)
 
 
 def _materialize_export_entities(

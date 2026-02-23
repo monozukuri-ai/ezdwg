@@ -1,6 +1,6 @@
 # CLI Reference
 
-ezdwg provides a command-line interface for inspecting and converting DWG files.
+ezdwg provides a command-line interface for inspecting, converting, and writing DWG files.
 
 ## Version
 
@@ -83,4 +83,45 @@ total_entities: 15
 written_entities: 12
 skipped_entities: 3
 skipped[VIEWPORT]: 3
+```
+
+## Write
+
+Write a DWG file using the native AC1015 writer:
+
+```bash
+ezdwg write input.dwg output.dwg
+```
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--types` | Entity filter (e.g. `"LINE ARC LWPOLYLINE"`) |
+| `--dwg-version` | Output DWG version (default: `AC1015`, currently only supported value) |
+| `--strict` | Fail if any entity cannot be written |
+
+### Examples
+
+```bash
+# Write only selected entity types
+ezdwg write input.dwg output.dwg --types "LINE MTEXT"
+
+# Explicit target version
+ezdwg write input.dwg output.dwg --dwg-version AC1015
+
+# Strict mode
+ezdwg write input.dwg output.dwg --strict
+```
+
+### Example Output
+
+```
+input: input.dwg
+output: output.dwg
+target_version: AC1015
+total_entities: 8
+written_entities: 7
+skipped_entities: 1
+skipped[POINT]: 1
 ```

@@ -123,6 +123,11 @@ class Document:
 
         return to_dxf(self, output_path, **kwargs)
 
+    def export_dwg(self, output_path: str, **kwargs):
+        from .convert import to_dwg
+
+        return to_dwg(self, output_path, **kwargs)
+
     @property
     def raw(self):
         return raw
@@ -153,6 +158,11 @@ class Layout:
         from .convert import to_dxf
 
         return to_dxf(self, output_path, **kwargs)
+
+    def export_dwg(self, output_path: str, **kwargs):
+        from .convert import to_dwg
+
+        return to_dwg(self, output_path, **kwargs)
 
     def _iter_type(
         self,
