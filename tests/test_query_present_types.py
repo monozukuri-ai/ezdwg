@@ -26,6 +26,21 @@ def test_normalize_types_uses_present_entity_types_when_types_none(monkeypatch) 
     assert "LWPOLYLINE" not in types
 
 
+def test_normalize_types_explicit_tokens_do_not_require_present_scan(monkeypatch) -> None:
+    document_module._present_supported_types.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("present-type scan should not be called for explicit tokens")
+        ),
+    )
+
+    types = document_module._normalize_types("LINE ARC", "dummy.dwg")
+    assert types == ["LINE", "ARC"]
+
+
 def test_query_none_skips_absent_entity_decoders(monkeypatch) -> None:
     document_module._present_supported_types.cache_clear()
 

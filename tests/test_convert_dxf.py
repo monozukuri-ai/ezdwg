@@ -36,6 +36,67 @@ def test_to_dxf_writes_line_entity(tmp_path: Path) -> None:
     assert len(dxf_entities_of_type(output, "LINE")) == 1
 
 
+def test_to_dxf_skips_insert_related_scans_when_no_inserts(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("ezdxf")
+
+    def _unexpected_attrs_call(_layout):
+        raise AssertionError("_insert_attributes_by_owner should not be called")
+
+    def _unexpected_block_populate(_doc, _layout, **_kwargs):
+        raise AssertionError("_populate_block_definitions should not be called")
+
+    monkeypatch.setattr(convert_module, "_insert_attributes_by_owner", _unexpected_attrs_call)
+    monkeypatch.setattr(convert_module, "_populate_block_definitions", _unexpected_block_populate)
+
+    output = tmp_path / "line_out_fastpath.dxf"
+    result = ezdwg.to_dxf(
+        str(SAMPLES / "line_2007.dwg"),
+        str(output),
+        types="LINE",
+        dxf_version="R2010",
+    )
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+    assert len(dxf_entities_of_type(output, "LINE")) == 1
+
+
+def test_to_dxf_without_color_resolution_skips_style_decoders(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("ezdxf")
+
+    def _unexpected_style_decode(_path):
+        raise AssertionError("decode_entity_styles should not be called")
+
+    def _unexpected_layer_decode(_path):
+        raise AssertionError("decode_layer_colors should not be called")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", _unexpected_style_decode)
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", _unexpected_layer_decode)
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    output = tmp_path / "line_no_color_resolve.dxf"
+    result = ezdwg.to_dxf(
+        str(SAMPLES / "line_2007.dwg"),
+        str(output),
+        types="LINE",
+        dxf_version="R2010",
+        preserve_colors=False,
+    )
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+    assert len(dxf_entities_of_type(output, "LINE")) == 1
+
+
 def test_document_export_dxf_writes_arc_angles(tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 
@@ -1170,6 +1231,78 @@ def test_collect_referenced_block_names_includes_minsert_references() -> None:
     )
 
     assert selected == {"BLK_A", "BLK_B"}
+
+
+def test_filter_modelspace_entities_uses_block_boundaries(monkeypatch) -> None:
+    monkeypatch.setattr(
+        convert_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [
+            (10, 100, 0, 0x04, "BLOCK", "Entity"),
+            (11, 110, 0, 0x13, "LINE", "Entity"),
+            (12, 120, 0, 0x05, "ENDBLK", "Entity"),
+            (20, 200, 0, 0x04, "BLOCK", "Entity"),
+            (21, 210, 0, 0x13, "LINE", "Entity"),
+            (22, 220, 0, 0x07, "INSERT", "Entity"),
+            (23, 230, 0, 0x05, "ENDBLK", "Entity"),
+        ],
+    )
+    monkeypatch.setattr(
+        convert_module.raw,
+        "decode_block_header_names",
+        lambda _path, _limit=None: [
+            (10, "*Paper_Space"),
+            (20, "*Model_Space"),
+        ],
+    )
+
+    selected = [
+        Entity(dxftype="LINE", handle=11, dxf={}),
+        Entity(dxftype="LINE", handle=21, dxf={}),
+        Entity(dxftype="INSERT", handle=22, dxf={"name": "BLK1"}),
+    ]
+    filtered = convert_module._filter_modelspace_entities("dummy_modelspace_filter.dwg", selected)
+
+    assert [int(entity.handle) for entity in filtered] == [21, 22]
+
+
+def test_resolve_export_entities_does_not_filter_modelspace_by_default(
+    monkeypatch,
+) -> None:
+    _source_path, layout = convert_module._resolve_layout(str(SAMPLES / "line_2007.dwg"))
+    called = False
+
+    def _spy_filter(_decode_path: str | None, entities: list[Entity]) -> list[Entity]:
+        nonlocal called
+        called = True
+        return entities
+
+    monkeypatch.setattr(convert_module, "_filter_modelspace_entities", _spy_filter)
+    entities = convert_module._resolve_export_entities(layout, "LINE", include_styles=False)
+
+    assert len(entities) == 1
+    assert called is False
+
+
+def test_resolve_export_entities_filters_modelspace_when_enabled(monkeypatch) -> None:
+    _source_path, layout = convert_module._resolve_layout(str(SAMPLES / "line_2007.dwg"))
+    called = False
+
+    def _spy_filter(_decode_path: str | None, entities: list[Entity]) -> list[Entity]:
+        nonlocal called
+        called = True
+        return entities
+
+    monkeypatch.setattr(convert_module, "_filter_modelspace_entities", _spy_filter)
+    entities = convert_module._resolve_export_entities(
+        layout,
+        "LINE",
+        include_styles=False,
+        modelspace_only=True,
+    )
+
+    assert len(entities) == 1
+    assert called is True
 
 
 def test_to_dxf_block_export_trims_insert_block_name(monkeypatch, tmp_path: Path) -> None:

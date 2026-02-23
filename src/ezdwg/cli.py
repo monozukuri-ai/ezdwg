@@ -136,6 +136,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also query unsupported entity types (keeps legacy skip reporting behavior).",
     )
+    convert_parser.add_argument(
+        "--no-colors",
+        action="store_true",
+        help="Skip DWG color resolution for faster conversion.",
+    )
+    convert_parser.add_argument(
+        "--modelspace-only",
+        action="store_true",
+        help="Limit export to entities directly owned by *MODEL_SPACE.",
+    )
 
     write_parser = subparsers.add_parser(
         "write",
@@ -329,6 +339,8 @@ def _run_convert(
     dxf_version: str = "R2010",
     strict: bool = False,
     include_unsupported: bool = False,
+    preserve_colors: bool = True,
+    modelspace_only: bool = False,
 ) -> int:
     dwg_path = Path(input_path)
     if not dwg_path.exists():
@@ -343,6 +355,8 @@ def _run_convert(
             dxf_version=dxf_version,
             strict=strict,
             include_unsupported=include_unsupported,
+            preserve_colors=preserve_colors,
+            modelspace_only=modelspace_only,
         )
     except Exception as exc:
         print(f"error: failed to convert DWG to DXF: {exc}", file=sys.stderr)
@@ -408,6 +422,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             dxf_version=args.dxf_version,
             strict=bool(args.strict),
             include_unsupported=bool(args.include_unsupported),
+            preserve_colors=not bool(args.no_colors),
+            modelspace_only=bool(args.modelspace_only),
         )
     if args.command == "write":
         return _run_write(

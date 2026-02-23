@@ -8,12 +8,14 @@ use crate::dwg::r2007;
 use crate::dwg::version::{detect_version, DwgVersion};
 use crate::objects::{ObjectIndex, ObjectRecord};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Decoder<'a> {
     bytes: &'a [u8],
     version: DwgVersion,
     config: ParseConfig,
+    objects_section_cache: OnceLock<Vec<u8>>,
 }
 
 impl<'a> Decoder<'a> {
@@ -23,6 +25,7 @@ impl<'a> Decoder<'a> {
             bytes,
             version,
             config,
+            objects_section_cache: OnceLock::new(),
         })
     }
 
@@ -104,9 +107,13 @@ impl<'a> Decoder<'a> {
         match self.version {
             DwgVersion::R14 | DwgVersion::R2000 => r2000::parse_object_record(self.bytes, offset),
             DwgVersion::R2004 | DwgVersion::R2010 | DwgVersion::R2013 | DwgVersion::R2018 => {
-                r2004::parse_object_record(self.bytes, offset, &self.config)
+                let data = self.load_objects_section_data()?;
+                r2004::parse_object_record_from_section_data(data, offset)
             }
-            DwgVersion::R2007 => r2007::parse_object_record(self.bytes, offset, &self.config),
+            DwgVersion::R2007 => {
+                let data = self.load_objects_section_data()?;
+                r2007::parse_object_record_from_section_data(data, offset)
+            }
             DwgVersion::Unknown(_) => Err(DwgError::new(
                 ErrorKind::Unsupported,
                 format!("unsupported DWG version: {}", self.version.as_str()),
@@ -131,5 +138,32 @@ impl<'a> Decoder<'a> {
                 format!("unsupported DWG version: {}", self.version.as_str()),
             )),
         }
+    }
+
+    fn load_objects_section_data(&self) -> Result<&[u8]> {
+        if let Some(data) = self.objects_section_cache.get() {
+            return Ok(data.as_slice());
+        }
+
+        let loaded = match self.version {
+            DwgVersion::R2004 | DwgVersion::R2010 | DwgVersion::R2013 | DwgVersion::R2018 => {
+                r2004::load_objects_section_data(self.bytes, &self.config)?
+            }
+            DwgVersion::R2007 => r2007::load_objects_section_data(self.bytes, &self.config)?,
+            _ => {
+                return Err(DwgError::new(
+                    ErrorKind::Unsupported,
+                    format!("unsupported DWG version: {}", self.version.as_str()),
+                ))
+            }
+        };
+        let _ = self.objects_section_cache.set(loaded);
+        let data = self.objects_section_cache.get().ok_or_else(|| {
+            DwgError::new(
+                ErrorKind::Decode,
+                "failed to initialize objects section cache",
+            )
+        })?;
+        Ok(data.as_slice())
     }
 }

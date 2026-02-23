@@ -138,16 +138,34 @@ class Layout:
     doc: Document
     name: str
 
-    def iter_entities(self, types: str | Iterable[str] | None = None) -> Iterator[Entity]:
-        return self.query(types)
+    def iter_entities(
+        self,
+        types: str | Iterable[str] | None = None,
+        *,
+        include_styles: bool = True,
+    ) -> Iterator[Entity]:
+        return self.query(types, include_styles=include_styles)
 
-    def query(self, types: str | Iterable[str] | None = None) -> Iterator[Entity]:
+    def query(
+        self,
+        types: str | Iterable[str] | None = None,
+        *,
+        include_styles: bool = True,
+    ) -> Iterator[Entity]:
         type_set = _normalize_types(types, self.doc.decode_path)
         bulk_rows = None
         if sum(1 for dxftype in type_set if dxftype in _BULK_PRIMITIVE_TYPES) >= 2:
             bulk_rows = _line_arc_circle_rows(self.doc.decode_path)
+        insert_minsert_rows = None
+        if "INSERT" in type_set and "MINSERT" in type_set:
+            insert_minsert_rows = _insert_minsert_rows(self.doc.decode_path)
         for dxftype in type_set:
-            yield from self._iter_type(dxftype, bulk_rows=bulk_rows)
+            yield from self._iter_type(
+                dxftype,
+                bulk_rows=bulk_rows,
+                insert_minsert_rows=insert_minsert_rows,
+                include_styles=include_styles,
+            )
 
     def plot(self, *args, **kwargs):
         from .render import plot
@@ -174,13 +192,20 @@ class Layout:
             list[tuple[int, float, float, float, float]],
         ]
         | None = None,
+        insert_minsert_rows: tuple[list[tuple], list[tuple]] | None = None,
+        include_styles: bool = True,
     ) -> Iterator[Entity]:
         decode_path = self.doc.decode_path
-        entity_style_map = _entity_style_map(decode_path)
-        layer_color_map = _layer_color_map(decode_path)
-        layer_color_overrides = _layer_color_overrides(
-            self.doc.decode_version, entity_style_map, layer_color_map
-        )
+        if include_styles:
+            entity_style_map = _entity_style_map(decode_path)
+            layer_color_map = _layer_color_map(decode_path)
+            layer_color_overrides = _layer_color_overrides(
+                self.doc.decode_version, entity_style_map, layer_color_map
+            )
+        else:
+            entity_style_map = {}
+            layer_color_map = {}
+            layer_color_overrides = None
         if dxftype == "LINE":
             if bulk_rows is not None:
                 line_rows = bulk_rows[0]
@@ -1507,7 +1532,12 @@ class Layout:
             return
 
         if dxftype == "MINSERT":
-            for row in raw.decode_minsert_entities(decode_path):
+            rows = (
+                insert_minsert_rows[1]
+                if insert_minsert_rows is not None
+                else raw.decode_minsert_entities(decode_path)
+            )
+            for row in rows:
                 if len(row) == 9 and isinstance(row[8], tuple):
                     (
                         handle,
@@ -1626,7 +1656,12 @@ class Layout:
             return
 
         if dxftype == "INSERT":
-            for row in raw.decode_insert_entities(decode_path):
+            rows = (
+                insert_minsert_rows[0]
+                if insert_minsert_rows is not None
+                else raw.decode_insert_entities(decode_path)
+            )
+            for row in rows:
                 if len(row) == 8:
                     handle, px, py, pz, sx, sy, sz, rotation = row
                     name = None
@@ -2016,14 +2051,8 @@ def _canonical_entity_type_name(raw_name: object) -> str | None:
 
 
 def _normalize_types(types: str | Iterable[str] | None, path: str | None = None) -> list[str]:
-    default_types = list(_present_supported_types(path))
-    candidate_types = (
-        list(_present_supported_types(path, include_explicit_only=True))
-        if path is not None
-        else list(SUPPORTED_ENTITY_TYPES)
-    )
     if types is None:
-        return default_types
+        return list(_present_supported_types(path))
     if isinstance(types, str):
         tokens = re.split(r"[,\s]+", types.strip())
     else:
@@ -2032,10 +2061,17 @@ def _normalize_types(types: str | Iterable[str] | None, path: str | None = None)
     normalized = [token.strip().upper() for token in tokens if token and token.strip()]
     normalized = [TYPE_ALIASES.get(token, token) for token in normalized]
     if not normalized:
-        return default_types
+        return list(_present_supported_types(path))
 
     if any(token in {"*", "ALL"} for token in normalized):
-        return default_types
+        return list(_present_supported_types(path))
+
+    needs_glob_match = any(any(ch in token for ch in "*?[]") for token in normalized)
+    candidate_types = (
+        list(_present_supported_types(path, include_explicit_only=True))
+        if (needs_glob_match and path is not None)
+        else list(SUPPORTED_ENTITY_TYPES)
+    )
 
     selected: list[str] = []
     seen = set()
@@ -2909,6 +2945,19 @@ def _line_arc_circle_rows(
             list(raw.decode_arc_entities(path)),
             list(raw.decode_circle_entities(path)),
         )
+
+
+def _insert_minsert_rows(
+    path: str,
+) -> tuple[list[tuple], list[tuple]]:
+    decode_both = getattr(raw, "decode_insert_minsert_entities", None)
+    if callable(decode_both):
+        try:
+            insert_rows, minsert_rows = decode_both(path)
+            return list(insert_rows), list(minsert_rows)
+        except Exception:
+            pass
+    return list(raw.decode_insert_entities(path)), list(raw.decode_minsert_entities(path))
 
 
 @lru_cache(maxsize=16)

@@ -64,12 +64,12 @@ doc.plot()
 
 ## CLI
 ```bash
-ezdwg --version
-ezdwg inspect examples/data/line_2000.dwg
-ezdwg inspect examples/data/line_2000.dwg --verbose
-ezdwg convert examples/data/line_2000.dwg /tmp/line_2000_out.dxf
-ezdwg convert examples/data/arc_2000.dwg /tmp/arc_2000_out.dxf --types "ARC" --dxf-version R2010
-ezdwg write examples/data/line_2000.dwg /tmp/line_2000_out.dwg --types "LINE" --dwg-version AC1015
+uvx ezdwg --version
+uvx ezdwg inspect examples/data/line_2000.dwg
+uvx ezdwg inspect examples/data/line_2000.dwg --verbose
+uvx --from "ezdwg[dxf]" ezdwg convert examples/data/line_2000.dwg /tmp/line_2000_out.dxf
+uvx --from "ezdwg[dxf]" ezdwg convert examples/data/arc_2000.dwg /tmp/arc_2000_out.dxf --types "ARC" --dxf-version R2010
+uvx ezdwg write examples/data/line_2000.dwg /tmp/line_2000_out.dwg --types "LINE" --dwg-version AC1015
 ```
 
 ## DWG to DXF

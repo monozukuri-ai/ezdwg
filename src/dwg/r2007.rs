@@ -151,19 +151,44 @@ pub fn load_section_by_index<'a>(
 
 pub fn build_object_index(bytes: &[u8], config: &ParseConfig) -> Result<ObjectIndex> {
     let handles_data = load_named_section_data(bytes, config, "AcDb:Handles")?;
-    let objects_data = load_named_section_data(bytes, config, "AcDb:AcDbObjects")?;
+    let objects_data = load_objects_section_data(bytes, config)?;
     let index = parse_object_map_handles(&handles_data, config)?;
 
-    let mut valid_objects = Vec::with_capacity(index.objects.len());
-    for object in index.objects {
-        if crate::objects::object_record::parse_object_record_owned(&objects_data, object.offset)
+    if config.strict {
+        let mut valid_objects = Vec::with_capacity(index.objects.len());
+        for object in index.objects {
+            if crate::objects::object_record::parse_object_record_owned(
+                &objects_data,
+                object.offset,
+            )
             .is_ok()
-        {
-            valid_objects.push(object);
+            {
+                valid_objects.push(object);
+            }
         }
+        return Ok(ObjectIndex::from_objects(valid_objects));
     }
 
-    Ok(ObjectIndex::from_objects(valid_objects))
+    // Performance path for permissive mode: keep object-index construction linear
+    // and avoid eagerly reparsing every record here.
+    let max_offset = objects_data.len();
+    let objects = index
+        .objects
+        .into_iter()
+        .filter(|object| (object.offset as usize) < max_offset)
+        .collect();
+    Ok(ObjectIndex::from_objects(objects))
+}
+
+pub fn load_objects_section_data(bytes: &[u8], config: &ParseConfig) -> Result<Vec<u8>> {
+    load_named_section_data(bytes, config, "AcDb:AcDbObjects")
+}
+
+pub fn parse_object_record_from_section_data(
+    data: &[u8],
+    offset: u32,
+) -> Result<ObjectRecord<'static>> {
+    crate::objects::object_record::parse_object_record_owned(data, offset)
 }
 
 pub fn parse_object_record<'a>(
@@ -171,8 +196,8 @@ pub fn parse_object_record<'a>(
     offset: u32,
     config: &ParseConfig,
 ) -> Result<ObjectRecord<'a>> {
-    let data = load_named_section_data(bytes, config, "AcDb:AcDbObjects")?;
-    crate::objects::object_record::parse_object_record_owned(&data, offset)
+    let data = load_objects_section_data(bytes, config)?;
+    parse_object_record_from_section_data(&data, offset)
 }
 
 pub fn load_dynamic_type_map(bytes: &[u8], config: &ParseConfig) -> Result<HashMap<u16, String>> {
@@ -430,22 +455,36 @@ fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<Object
         let mut last_offset: i64 = 0;
 
         while (reader.tell() - start) < (section_size as u64 - 2) {
+            let prev_handle = last_handle;
+            let prev_offset = last_offset;
             last_handle += read_modular_char(&mut reader)?;
             last_offset += read_modular_char(&mut reader)?;
 
             if last_handle < 0 || last_offset < 0 {
-                return Err(DwgError::new(
-                    ErrorKind::Format,
-                    "AcDb:Handles contains negative handle or offset",
-                )
-                .with_offset(reader.tell()));
+                if config.strict {
+                    return Err(DwgError::new(
+                        ErrorKind::Format,
+                        "AcDb:Handles contains negative handle or offset",
+                    )
+                    .with_offset(reader.tell()));
+                }
+                // Keep decoding in permissive mode; corrupted deltas are observed in
+                // the wild and pydwg continues scanning the stream.
+                last_handle = prev_handle;
+                last_offset = prev_offset;
+                continue;
             }
             if last_offset > u32::MAX as i64 {
-                return Err(DwgError::new(
-                    ErrorKind::Format,
-                    "AcDb:Handles offset exceeds u32 range",
-                )
-                .with_offset(reader.tell()));
+                if config.strict {
+                    return Err(DwgError::new(
+                        ErrorKind::Format,
+                        "AcDb:Handles offset exceeds u32 range",
+                    )
+                    .with_offset(reader.tell()));
+                }
+                last_handle = prev_handle;
+                last_offset = prev_offset;
+                continue;
             }
 
             objects.push(ObjectRef {
@@ -1509,5 +1548,44 @@ mod tests {
         }
 
         assert_eq!(decoded_count, 1);
+    }
+
+    #[test]
+    fn parse_object_map_handles_skips_negative_deltas_in_permissive_mode() {
+        // One handles block with three entries:
+        // 1) (+5, +10) -> valid
+        // 2) (-20, +1) -> cumulative handle becomes negative (skip in permissive mode)
+        // 3) (+30, +5) -> cumulative values become valid again
+        let bytes = vec![
+            0x00, 0x08, // section_size = 8 (2 bytes header + 6 bytes payload)
+            0x05, 0x0A, // +5, +10
+            0x54, 0x01, // -20, +1  (0x40 sign bit on final byte)
+            0x1E, 0x05, // +30, +5
+            0x00, 0x00, // crc
+            0x00, 0x02, // terminator section
+        ];
+        let index = parse_object_map_handles(&bytes, &ParseConfig::default()).expect("index");
+        assert_eq!(index.objects.len(), 2);
+        assert_eq!(index.objects[0].handle.0, 5);
+        assert_eq!(index.objects[0].offset, 10);
+        assert_eq!(index.objects[1].handle.0, 35);
+        assert_eq!(index.objects[1].offset, 15);
+    }
+
+    #[test]
+    fn parse_object_map_handles_rejects_negative_deltas_in_strict_mode() {
+        let bytes = vec![
+            0x00, 0x06, // section_size = 6 (2 bytes header + 4 bytes payload)
+            0x05, 0x0A, // +5, +10
+            0x54, 0x01, // -20, +1 -> cumulative handle negative
+            0x00, 0x00, // crc
+            0x00, 0x02, // terminator section
+        ];
+        let mut config = ParseConfig::default();
+        config.strict = true;
+        let err = parse_object_map_handles(&bytes, &config).expect_err("strict error");
+        assert!(err
+            .to_string()
+            .contains("AcDb:Handles contains negative handle or offset"));
     }
 }

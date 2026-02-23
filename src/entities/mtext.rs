@@ -30,17 +30,17 @@ pub struct MTextEntity {
 
 pub fn decode_mtext(reader: &mut BitReader<'_>) -> Result<MTextEntity> {
     let header = parse_common_entity_header(reader)?;
-    decode_mtext_with_header(reader, header, false, false)
+    decode_mtext_with_header(reader, header, false, false, false, false)
 }
 
 pub fn decode_mtext_r2004(reader: &mut BitReader<'_>) -> Result<MTextEntity> {
     let header = parse_common_entity_header(reader)?;
-    decode_mtext_with_header(reader, header, false, true)
+    decode_mtext_with_header(reader, header, false, true, false, false)
 }
 
 pub fn decode_mtext_r2007(reader: &mut BitReader<'_>) -> Result<MTextEntity> {
     let header = parse_common_entity_header_r2007(reader)?;
-    decode_mtext_with_header(reader, header, true, true)
+    decode_mtext_with_header(reader, header, true, true, true, true)
 }
 
 pub fn decode_mtext_r2010(
@@ -50,7 +50,7 @@ pub fn decode_mtext_r2010(
 ) -> Result<MTextEntity> {
     let mut header = parse_common_entity_header_r2010(reader, object_data_end_bit)?;
     header.handle = object_handle;
-    decode_mtext_with_header(reader, header, true, true)
+    decode_mtext_with_header(reader, header, true, true, true, true)
 }
 
 pub fn decode_mtext_r2013(
@@ -60,7 +60,7 @@ pub fn decode_mtext_r2013(
 ) -> Result<MTextEntity> {
     let mut header = parse_common_entity_header_r2013(reader, object_data_end_bit)?;
     header.handle = object_handle;
-    decode_mtext_with_header(reader, header, true, true)
+    decode_mtext_with_header(reader, header, true, true, true, true)
 }
 
 fn decode_mtext_with_header(
@@ -68,17 +68,26 @@ fn decode_mtext_with_header(
     header: CommonEntityHeader,
     allow_handle_decode_failure: bool,
     has_background_data: bool,
+    use_unicode_text: bool,
+    has_rect_height: bool,
 ) -> Result<MTextEntity> {
     let insertion = reader.read_3bd()?;
     let extrusion = reader.read_3bd()?;
     let x_axis_dir = reader.read_3bd()?;
     let rect_width = reader.read_bd()?;
+    if has_rect_height {
+        let _rect_height = reader.read_bd()?;
+    }
     let text_height = reader.read_bd()?;
     let attachment = reader.read_bs()?;
     let drawing_dir = reader.read_bs()?;
     let _extents_height = reader.read_bd()?;
     let _extents_width = reader.read_bd()?;
-    let text = reader.read_tv()?;
+    let text = if use_unicode_text {
+        reader.read_tu()?
+    } else {
+        reader.read_tv()?
+    };
     let _linespacing_style = reader.read_bs()?;
     let _linespacing_factor = reader.read_bd()?;
     let _unknown_bit = reader.read_b()?;
@@ -98,10 +107,18 @@ fn decode_mtext_with_header(
                 let color_rgb = reader.read_bl()?;
                 let color_byte = reader.read_rc()?;
                 if (color_byte & 0x01) != 0 {
-                    let _color_name = reader.read_tv()?;
+                    let _color_name = if use_unicode_text {
+                        reader.read_tu()?
+                    } else {
+                        reader.read_tv()?
+                    };
                 }
                 if (color_byte & 0x02) != 0 {
-                    let _book_name = reader.read_tv()?;
+                    let _book_name = if use_unicode_text {
+                        reader.read_tu()?
+                    } else {
+                        reader.read_tv()?
+                    };
                 }
                 let transparency = reader.read_bl()?;
                 Ok((

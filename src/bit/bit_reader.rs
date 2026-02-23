@@ -370,6 +370,15 @@ impl<'a> BitReader<'a> {
         Ok(String::from_utf8_lossy(&text).to_string())
     }
 
+    pub fn read_tu(&mut self) -> Result<String> {
+        let length = self.read_bs()? as usize;
+        let mut units = Vec::with_capacity(length);
+        for _ in 0..length {
+            units.push(self.read_rs(Endian::Little)?);
+        }
+        Ok(String::from_utf16_lossy(&units))
+    }
+
     pub fn read_crc(&mut self) -> Result<u16> {
         if self.bit_pos > 0 {
             self.set_pos(self.byte_pos + 1, 0);
@@ -381,5 +390,33 @@ impl<'a> BitReader<'a> {
         let pos_end = self.bit_pos as u16 + bits as u16;
         self.byte_pos += (pos_end / 8) as usize;
         self.bit_pos = (pos_end % 8) as u8;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BitReader, Endian};
+    use crate::bit::BitWriter;
+
+    #[test]
+    fn read_tu_decodes_utf16_string() {
+        let mut writer = BitWriter::new();
+        writer.write_bs(4).expect("write len");
+        writer
+            .write_rs(Endian::Little, 'テ' as u16)
+            .expect("write char");
+        writer
+            .write_rs(Endian::Little, 'ス' as u16)
+            .expect("write char");
+        writer
+            .write_rs(Endian::Little, 'ト' as u16)
+            .expect("write char");
+        writer
+            .write_rs(Endian::Little, 'A' as u16)
+            .expect("write char");
+
+        let bytes = writer.into_bytes();
+        let mut reader = BitReader::new(&bytes);
+        assert_eq!(reader.read_tu().expect("read tu"), "テストA");
     }
 }

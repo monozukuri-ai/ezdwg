@@ -156,3 +156,61 @@ def test_query_insert_maps_transform_parameters(monkeypatch) -> None:
     assert dxf["zscale"] == 1.0
     assert abs(dxf["rotation"] - 30.0) < 1.0e-9
     assert dxf["name"] == "BLOCK_A"
+
+
+def test_query_insert_and_minsert_uses_combined_decoder(monkeypatch) -> None:
+    _patch_empty_color_maps(monkeypatch)
+    calls = {"combined": 0, "insert": 0, "minsert": 0}
+
+    def _decode_combined(_path: str):
+        calls["combined"] += 1
+        return (
+            [
+                (
+                    0x501,
+                    1.0,
+                    2.0,
+                    0.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    0.0,
+                    "BLOCK_A",
+                )
+            ],
+            [
+                (
+                    0x502,
+                    3.0,
+                    4.0,
+                    0.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    0.0,
+                    (2, 3, 5.0, 6.0, "BLOCK_B"),
+                )
+            ],
+        )
+
+    def _decode_insert(_path: str):
+        calls["insert"] += 1
+        return []
+
+    def _decode_minsert(_path: str):
+        calls["minsert"] += 1
+        return []
+
+    monkeypatch.setattr(document_module.raw, "decode_insert_minsert_entities", _decode_combined)
+    monkeypatch.setattr(document_module.raw, "decode_insert_entities", _decode_insert)
+    monkeypatch.setattr(document_module.raw, "decode_minsert_entities", _decode_minsert)
+
+    doc = document_module.Document(path="dummy_insert_minsert.dwg", version="AC1021")
+    entities = list(doc.modelspace().query("INSERT MINSERT"))
+
+    assert len(entities) == 2
+    assert entities[0].dxftype == "INSERT"
+    assert entities[1].dxftype == "MINSERT"
+    assert calls["combined"] == 1
+    assert calls["insert"] == 0
+    assert calls["minsert"] == 0

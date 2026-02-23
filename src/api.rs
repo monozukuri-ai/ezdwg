@@ -121,6 +121,7 @@ type DimEntityRow = (
 type DimTypedEntityRow = (String, DimEntityRow);
 type InsertEntityRow = (u64, f64, f64, f64, f64, f64, f64, f64, Option<String>);
 type MInsertEntityRow = (u64, f64, f64, f64, f64, f64, f64, f64, MInsertArrayRow);
+type InsertMInsertRows = (Vec<InsertEntityRow>, Vec<MInsertEntityRow>);
 type BlockHeaderNameRow = (u64, String);
 type BlockEntityNameRow = (u64, String, String);
 type Polyline2dEntityRow = (u64, u16, u16, f64, f64, f64, f64);
@@ -454,12 +455,20 @@ pub fn list_object_map_entries(
 pub fn list_object_headers(path: &str, limit: Option<usize>) -> PyResult<Vec<ObjectHeaderRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
     let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
-        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
-        let header =
-            parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
+        let record = match decoder.parse_object_record(obj.offset) {
+            Ok(record) => record,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        let header = match parse_object_header_for_version(&record, decoder.version()) {
+            Ok(header) => header,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
         result.push((obj.handle.0, obj.offset, header.data_size, header.type_code));
         if let Some(limit) = limit {
             if result.len() >= limit {
@@ -477,13 +486,21 @@ pub fn list_object_headers_with_type(
 ) -> PyResult<Vec<ObjectHeaderWithTypeRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
     let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
     let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
-        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
-        let header =
-            parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
+        let record = match decoder.parse_object_record(obj.offset) {
+            Ok(record) => record,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        let header = match parse_object_header_for_version(&record, decoder.version()) {
+            Ok(header) => header,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
         let type_name = resolved_type_name(header.type_code, &dynamic_types);
         let type_class = resolved_type_class(header.type_code, &type_name);
         result.push((
@@ -514,14 +531,22 @@ pub fn list_object_headers_by_type(
     }
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
     let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
     let filter: HashSet<u16> = type_codes.into_iter().collect();
     let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
-        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
-        let header =
-            parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
+        let record = match decoder.parse_object_record(obj.offset) {
+            Ok(record) => record,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        let header = match parse_object_header_for_version(&record, decoder.version()) {
+            Ok(header) => header,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
         let type_name = resolved_type_name(header.type_code, &dynamic_types);
         if !matches_type_filter(&filter, header.type_code, &type_name) {
             continue;
@@ -2819,12 +2844,25 @@ pub fn decode_mtext_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<M
             }
             return Err(to_py_err(err));
         }
-        let entity =
+        let reader_after_prefix = reader.clone();
+        let mut entity =
             match decode_mtext_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
                 Ok(entity) => entity,
                 Err(err) if best_effort => continue,
                 Err(err) => return Err(to_py_err(err)),
             };
+        if matches!(
+            decoder.version(),
+            version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
+        ) {
+            if let Some(recovered_text) = recover_r2010_mtext_text(
+                &reader_after_prefix,
+                &header,
+                entity.text.as_str(),
+            ) {
+                entity.text = recovered_text;
+            }
+        }
         result.push((
             entity.handle,
             entity.text,
@@ -3386,15 +3424,20 @@ fn dim_entity_row_from_linear_like(entity: &entities::DimLinearEntity) -> DimEnt
     )
 }
 
-#[pyfunction(signature = (path, limit=None))]
-pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<InsertEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+struct InsertNameResolutionState {
+    known_block_handles: HashSet<u64>,
+    block_header_names: HashMap<u64, String>,
+    named_block_handles: HashSet<u64>,
+}
+
+fn prepare_insert_name_resolution_state(
+    decoder: &decoder::Decoder<'_>,
+    dynamic_types: &HashMap<u16, String>,
+    index: &objects::ObjectIndex,
+    best_effort: bool,
+) -> PyResult<InsertNameResolutionState> {
     let block_header_entries =
-        collect_block_header_name_entries_in_order(&decoder, &dynamic_types, &index, best_effort)?;
+        collect_block_header_name_entries_in_order(decoder, dynamic_types, index, best_effort)?;
     let mut known_block_handles: HashSet<u64> = HashSet::new();
     let mut block_header_names: HashMap<u64, String> = HashMap::new();
     let mut block_header_decoded_by_raw: HashMap<u64, u64> = HashMap::new();
@@ -3411,9 +3454,9 @@ pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
         block_header_names.entry(decoded_handle).or_insert(name);
     }
     let (block_name_aliases, recovered_header_names) = collect_block_name_aliases_in_order(
-        &decoder,
-        &dynamic_types,
-        &index,
+        decoder,
+        dynamic_types,
+        index,
         best_effort,
         &block_header_names,
     )?;
@@ -3435,9 +3478,9 @@ pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
         block_header_names.entry(alias_handle).or_insert(name);
     }
     let block_record_aliases = collect_block_record_handle_aliases_in_order(
-        &decoder,
-        &dynamic_types,
-        &index,
+        decoder,
+        dynamic_types,
+        index,
         best_effort,
         &block_header_names,
     )?;
@@ -3445,15 +3488,15 @@ pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
         known_block_handles.insert(alias_handle);
         block_header_names.entry(alias_handle).or_insert(name);
     }
-    let object_type_codes = collect_object_type_codes(&decoder, &index, best_effort)?;
+    let object_type_codes = collect_object_type_codes(decoder, index, best_effort)?;
     let known_layer_handles: HashSet<u64> =
-        collect_known_layer_handles_in_order(&decoder, &dynamic_types, &index, best_effort)?
+        collect_known_layer_handles_in_order(decoder, dynamic_types, index, best_effort)?
             .into_iter()
             .collect();
     let stream_aliases = collect_block_header_stream_aliases_in_order(
-        &decoder,
-        &dynamic_types,
-        &index,
+        decoder,
+        dynamic_types,
+        index,
         best_effort,
         &block_header_names,
         &object_type_codes,
@@ -3464,14 +3507,29 @@ pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
         block_header_names.entry(alias_handle).or_insert(name);
     }
     let named_block_handles: HashSet<u64> = block_header_names.keys().copied().collect();
+    Ok(InsertNameResolutionState {
+        known_block_handles,
+        block_header_names,
+        named_block_handles,
+    })
+}
+
+fn decode_insert_entities_with_state(
+    decoder: &decoder::Decoder<'_>,
+    dynamic_types: &HashMap<u16, String>,
+    index: &objects::ObjectIndex,
+    best_effort: bool,
+    state: &mut InsertNameResolutionState,
+    limit: Option<usize>,
+) -> PyResult<Vec<InsertEntityRow>> {
     let mut decoded_rows: Vec<(u64, f64, f64, f64, f64, f64, f64, f64, Option<u64>)> = Vec::new();
     let mut unresolved_insert_candidates: HashMap<u64, Vec<u64>> = HashMap::new();
     for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x07, "INSERT", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x07, "INSERT", dynamic_types) {
             continue;
         }
         let mut reader = record.bit_reader();
@@ -3497,8 +3555,8 @@ pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
             &header,
             obj.handle.0,
             entity.block_header_handle,
-            &known_block_handles,
-            &named_block_handles,
+            &state.known_block_handles,
+            &state.named_block_handles,
         );
         decoded_rows.push((
             entity.handle,
@@ -3520,20 +3578,20 @@ pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
     let unresolved_handles: HashSet<u64> = decoded_rows
         .iter()
         .filter_map(|row| row.8)
-        .filter(|handle| !block_header_names.contains_key(handle))
+        .filter(|handle| !state.block_header_names.contains_key(handle))
         .collect();
     if !unresolved_handles.is_empty() {
         let targeted_aliases = collect_block_header_targeted_aliases_in_order(
-            &decoder,
-            &dynamic_types,
-            &index,
+            decoder,
+            dynamic_types,
+            index,
             best_effort,
-            &block_header_names,
+            &state.block_header_names,
             &unresolved_handles,
         )?;
         for (alias_handle, name) in targeted_aliases {
-            known_block_handles.insert(alias_handle);
-            block_header_names.entry(alias_handle).or_insert(name);
+            state.known_block_handles.insert(alias_handle);
+            state.block_header_names.entry(alias_handle).or_insert(name);
         }
     }
     let unresolved_insert_handles: HashSet<u64> = decoded_rows
@@ -3541,7 +3599,7 @@ pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
         .filter_map(|row| {
             let missing = row
                 .8
-                .and_then(|handle| block_header_names.get(&handle))
+                .and_then(|handle| state.block_header_names.get(&handle))
                 .is_none();
             if missing {
                 Some(row.0)
@@ -3556,12 +3614,11 @@ pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
             if !unresolved_insert_handles.contains(&obj.handle.0) {
                 continue;
             }
-            let Some((record, header)) =
-                parse_record_and_header(&decoder, obj.offset, best_effort)?
+            let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
             else {
                 continue;
             };
-            if !matches_type_name(header.type_code, 0x07, "INSERT", &dynamic_types) {
+            if !matches_type_name(header.type_code, 0x07, "INSERT", dynamic_types) {
                 continue;
             }
             let mut reader = record.bit_reader();
@@ -3579,14 +3636,14 @@ pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
                 &header,
                 obj.handle.0,
                 entity.block_header_handle,
-                Some(&known_block_handles),
+                Some(&state.known_block_handles),
                 8,
             );
             if candidates.is_empty() {
                 continue;
             }
             for candidate in candidates.iter().copied().take(4) {
-                if !block_header_names.contains_key(&candidate) {
+                if !state.block_header_names.contains_key(&candidate) {
                     extra_targets.insert(candidate);
                 }
             }
@@ -3594,38 +3651,39 @@ pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
         }
         if !extra_targets.is_empty() {
             let targeted_aliases = collect_block_header_targeted_aliases_in_order(
-                &decoder,
-                &dynamic_types,
-                &index,
+                decoder,
+                dynamic_types,
+                index,
                 best_effort,
-                &block_header_names,
+                &state.block_header_names,
                 &extra_targets,
             )?;
             for (alias_handle, name) in targeted_aliases {
-                known_block_handles.insert(alias_handle);
-                block_header_names.entry(alias_handle).or_insert(name);
+                state.known_block_handles.insert(alias_handle);
+                state.block_header_names.entry(alias_handle).or_insert(name);
             }
         }
     }
 
-    let available_named_handles: Vec<u64> = block_header_names.keys().copied().collect();
+    let available_named_handles: Vec<u64> = state.block_header_names.keys().copied().collect();
     let mut result = Vec::with_capacity(decoded_rows.len());
     let debug_insert_names = std::env::var("EZDWG_DEBUG_INSERT_NAMES")
         .ok()
         .is_some_and(|v| v != "0");
     for (handle, px, py, pz, sx, sy, sz, rotation, block_handle) in decoded_rows {
-        let mut resolved_name = block_handle.and_then(|h| block_header_names.get(&h).cloned());
+        let mut resolved_name =
+            block_handle.and_then(|h| state.block_header_names.get(&h).cloned());
         if resolved_name.is_none() {
             if let Some(candidates) = unresolved_insert_candidates.get(&handle) {
                 resolved_name = candidates
                     .iter()
-                    .find_map(|candidate| block_header_names.get(candidate).cloned());
+                    .find_map(|candidate| state.block_header_names.get(candidate).cloned());
                 if resolved_name.is_none() {
                     let mut nearby_names: HashSet<String> = HashSet::new();
                     for candidate in candidates {
                         for known in &available_named_handles {
                             if known.abs_diff(*candidate) <= 8 {
-                                if let Some(name) = block_header_names.get(known) {
+                                if let Some(name) = state.block_header_names.get(known) {
                                     nearby_names.insert(name.clone());
                                 }
                             }
@@ -3649,87 +3707,14 @@ pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
     Ok(result)
 }
 
-#[pyfunction(signature = (path, limit=None))]
-pub fn decode_minsert_entities(
-    path: &str,
+fn decode_minsert_entities_with_state(
+    decoder: &decoder::Decoder<'_>,
+    dynamic_types: &HashMap<u16, String>,
+    index: &objects::ObjectIndex,
+    best_effort: bool,
+    state: &mut InsertNameResolutionState,
     limit: Option<usize>,
 ) -> PyResult<Vec<MInsertEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let block_header_entries =
-        collect_block_header_name_entries_in_order(&decoder, &dynamic_types, &index, best_effort)?;
-    let mut known_block_handles: HashSet<u64> = HashSet::new();
-    let mut block_header_names: HashMap<u64, String> = HashMap::new();
-    let mut block_header_decoded_by_raw: HashMap<u64, u64> = HashMap::new();
-    for (raw_handle, decoded_handle, name) in block_header_entries {
-        block_header_decoded_by_raw.insert(raw_handle, decoded_handle);
-        known_block_handles.insert(raw_handle);
-        known_block_handles.insert(decoded_handle);
-        if name.is_empty() {
-            continue;
-        }
-        block_header_names
-            .entry(raw_handle)
-            .or_insert_with(|| name.clone());
-        block_header_names.entry(decoded_handle).or_insert(name);
-    }
-    let (block_name_aliases, recovered_header_names) = collect_block_name_aliases_in_order(
-        &decoder,
-        &dynamic_types,
-        &index,
-        best_effort,
-        &block_header_names,
-    )?;
-    for (header_handle, name) in recovered_header_names {
-        if name.is_empty() {
-            continue;
-        }
-        known_block_handles.insert(header_handle);
-        block_header_names
-            .entry(header_handle)
-            .or_insert_with(|| name.clone());
-        if let Some(decoded_handle) = block_header_decoded_by_raw.get(&header_handle).copied() {
-            known_block_handles.insert(decoded_handle);
-            block_header_names.entry(decoded_handle).or_insert(name);
-        }
-    }
-    for (alias_handle, name) in block_name_aliases {
-        known_block_handles.insert(alias_handle);
-        block_header_names.entry(alias_handle).or_insert(name);
-    }
-    let block_record_aliases = collect_block_record_handle_aliases_in_order(
-        &decoder,
-        &dynamic_types,
-        &index,
-        best_effort,
-        &block_header_names,
-    )?;
-    for (alias_handle, name) in block_record_aliases {
-        known_block_handles.insert(alias_handle);
-        block_header_names.entry(alias_handle).or_insert(name);
-    }
-    let object_type_codes = collect_object_type_codes(&decoder, &index, best_effort)?;
-    let known_layer_handles: HashSet<u64> =
-        collect_known_layer_handles_in_order(&decoder, &dynamic_types, &index, best_effort)?
-            .into_iter()
-            .collect();
-    let stream_aliases = collect_block_header_stream_aliases_in_order(
-        &decoder,
-        &dynamic_types,
-        &index,
-        best_effort,
-        &block_header_names,
-        &object_type_codes,
-        &known_layer_handles,
-    )?;
-    for (alias_handle, name) in stream_aliases {
-        known_block_handles.insert(alias_handle);
-        block_header_names.entry(alias_handle).or_insert(name);
-    }
-    let named_block_handles: HashSet<u64> = block_header_names.keys().copied().collect();
     let mut decoded_rows: Vec<(
         u64,
         f64,
@@ -3747,11 +3732,11 @@ pub fn decode_minsert_entities(
     )> = Vec::new();
     let mut unresolved_minsert_candidates: HashMap<u64, Vec<u64>> = HashMap::new();
     for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x08, "MINSERT", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x08, "MINSERT", dynamic_types) {
             continue;
         }
         let mut reader = record.bit_reader();
@@ -3772,8 +3757,8 @@ pub fn decode_minsert_entities(
             &header,
             obj.handle.0,
             None,
-            &known_block_handles,
-            &named_block_handles,
+            &state.known_block_handles,
+            &state.named_block_handles,
         );
         decoded_rows.push((
             entity.handle,
@@ -3800,20 +3785,20 @@ pub fn decode_minsert_entities(
     let unresolved_handles: HashSet<u64> = decoded_rows
         .iter()
         .filter_map(|row| row.12)
-        .filter(|handle| !block_header_names.contains_key(handle))
+        .filter(|handle| !state.block_header_names.contains_key(handle))
         .collect();
     if !unresolved_handles.is_empty() {
         let targeted_aliases = collect_block_header_targeted_aliases_in_order(
-            &decoder,
-            &dynamic_types,
-            &index,
+            decoder,
+            dynamic_types,
+            index,
             best_effort,
-            &block_header_names,
+            &state.block_header_names,
             &unresolved_handles,
         )?;
         for (alias_handle, name) in targeted_aliases {
-            known_block_handles.insert(alias_handle);
-            block_header_names.entry(alias_handle).or_insert(name);
+            state.known_block_handles.insert(alias_handle);
+            state.block_header_names.entry(alias_handle).or_insert(name);
         }
     }
     let unresolved_minsert_handles: HashSet<u64> = decoded_rows
@@ -3821,7 +3806,7 @@ pub fn decode_minsert_entities(
         .filter_map(|row| {
             let missing = row
                 .12
-                .and_then(|handle| block_header_names.get(&handle))
+                .and_then(|handle| state.block_header_names.get(&handle))
                 .is_none();
             if missing {
                 Some(row.0)
@@ -3836,12 +3821,11 @@ pub fn decode_minsert_entities(
             if !unresolved_minsert_handles.contains(&obj.handle.0) {
                 continue;
             }
-            let Some((record, header)) =
-                parse_record_and_header(&decoder, obj.offset, best_effort)?
+            let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
             else {
                 continue;
             };
-            if !matches_type_name(header.type_code, 0x08, "MINSERT", &dynamic_types) {
+            if !matches_type_name(header.type_code, 0x08, "MINSERT", dynamic_types) {
                 continue;
             }
             let mut reader = record.bit_reader();
@@ -3857,14 +3841,14 @@ pub fn decode_minsert_entities(
                 &header,
                 obj.handle.0,
                 None,
-                Some(&known_block_handles),
+                Some(&state.known_block_handles),
                 8,
             );
             if candidates.is_empty() {
                 continue;
             }
             for candidate in candidates.iter().copied().take(4) {
-                if !block_header_names.contains_key(&candidate) {
+                if !state.block_header_names.contains_key(&candidate) {
                     extra_targets.insert(candidate);
                 }
             }
@@ -3872,21 +3856,21 @@ pub fn decode_minsert_entities(
         }
         if !extra_targets.is_empty() {
             let targeted_aliases = collect_block_header_targeted_aliases_in_order(
-                &decoder,
-                &dynamic_types,
-                &index,
+                decoder,
+                dynamic_types,
+                index,
                 best_effort,
-                &block_header_names,
+                &state.block_header_names,
                 &extra_targets,
             )?;
             for (alias_handle, name) in targeted_aliases {
-                known_block_handles.insert(alias_handle);
-                block_header_names.entry(alias_handle).or_insert(name);
+                state.known_block_handles.insert(alias_handle);
+                state.block_header_names.entry(alias_handle).or_insert(name);
             }
         }
     }
 
-    let available_named_handles: Vec<u64> = block_header_names.keys().copied().collect();
+    let available_named_handles: Vec<u64> = state.block_header_names.keys().copied().collect();
     let mut result = Vec::with_capacity(decoded_rows.len());
     for (
         handle,
@@ -3904,18 +3888,19 @@ pub fn decode_minsert_entities(
         block_handle,
     ) in decoded_rows
     {
-        let mut resolved_name = block_handle.and_then(|h| block_header_names.get(&h).cloned());
+        let mut resolved_name =
+            block_handle.and_then(|h| state.block_header_names.get(&h).cloned());
         if resolved_name.is_none() {
             if let Some(candidates) = unresolved_minsert_candidates.get(&handle) {
                 resolved_name = candidates
                     .iter()
-                    .find_map(|candidate| block_header_names.get(candidate).cloned());
+                    .find_map(|candidate| state.block_header_names.get(candidate).cloned());
                 if resolved_name.is_none() {
                     let mut nearby_names: HashSet<String> = HashSet::new();
                     for candidate in candidates {
                         for known in &available_named_handles {
                             if known.abs_diff(*candidate) <= 8 {
-                                if let Some(name) = block_header_names.get(known) {
+                                if let Some(name) = state.block_header_names.get(known) {
                                     nearby_names.insert(name.clone());
                                 }
                             }
@@ -3947,6 +3932,78 @@ pub fn decode_minsert_entities(
     }
 
     Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<InsertEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut state =
+        prepare_insert_name_resolution_state(&decoder, &dynamic_types, &index, best_effort)?;
+    decode_insert_entities_with_state(
+        &decoder,
+        &dynamic_types,
+        &index,
+        best_effort,
+        &mut state,
+        limit,
+    )
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_minsert_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<MInsertEntityRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut state =
+        prepare_insert_name_resolution_state(&decoder, &dynamic_types, &index, best_effort)?;
+    decode_minsert_entities_with_state(
+        &decoder,
+        &dynamic_types,
+        &index,
+        best_effort,
+        &mut state,
+        limit,
+    )
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_insert_minsert_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<InsertMInsertRows> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut state =
+        prepare_insert_name_resolution_state(&decoder, &dynamic_types, &index, best_effort)?;
+    let inserts = decode_insert_entities_with_state(
+        &decoder,
+        &dynamic_types,
+        &index,
+        best_effort,
+        &mut state,
+        limit,
+    )?;
+    let minserts = decode_minsert_entities_with_state(
+        &decoder,
+        &dynamic_types,
+        &index,
+        best_effort,
+        &mut state,
+        limit,
+    )?;
+    Ok((inserts, minserts))
 }
 
 #[pyfunction(signature = (path, limit=None))]
@@ -6115,20 +6172,36 @@ pub fn decode_vertex_2d_entities(
 ) -> PyResult<Vec<Vertex2dEntityRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
     let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
     let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
-        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
-        let header =
-            parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
+        let record = match decoder.parse_object_record(obj.offset) {
+            Ok(record) => record,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        let header = match parse_object_header_for_version(&record, decoder.version()) {
+            Ok(header) => header,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
         if !matches_type_name(header.type_code, 0x0A, "VERTEX_2D", &dynamic_types) {
             continue;
         }
         let mut reader = record.bit_reader();
-        let _type_code =
-            skip_object_type_prefix(&mut reader, decoder.version()).map_err(to_py_err)?;
-        let vertex = entities::decode_vertex_2d(&mut reader).map_err(to_py_err)?;
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let vertex = match entities::decode_vertex_2d(&mut reader) {
+            Ok(vertex) => vertex,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
         result.push((
             vertex.handle,
             vertex.flags,
@@ -6193,19 +6266,33 @@ fn decode_polyline_2d_vertex_rows(
 ) -> PyResult<Vec<PolylineVertexRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
     let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
     let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut sorted = index.objects.clone();
     sorted.sort_by_key(|obj| obj.offset);
 
-    let vertex_map = build_vertex_2d_map(&decoder, &sorted, &dynamic_types)?;
+    let vertex_map = build_vertex_2d_map(&decoder, &sorted, &dynamic_types, best_effort)?;
     let mut result = Vec::new();
     let mut i = 0usize;
     while i < sorted.len() {
         let obj = sorted[i];
-        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
-        let header =
-            parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
+        let record = match decoder.parse_object_record(obj.offset) {
+            Ok(record) => record,
+            Err(err) if best_effort => {
+                i += 1;
+                continue;
+            }
+            Err(err) => return Err(to_py_err(err)),
+        };
+        let header = match parse_object_header_for_version(&record, decoder.version()) {
+            Ok(header) => header,
+            Err(err) if best_effort => {
+                i += 1;
+                continue;
+            }
+            Err(err) => return Err(to_py_err(err)),
+        };
         let declared_match =
             matches_type_name(header.type_code, 0x0F, "POLYLINE_2D", &dynamic_types);
         if !declared_match
@@ -6216,11 +6303,22 @@ fn decode_polyline_2d_vertex_rows(
         }
 
         let mut reader = record.bit_reader();
-        let _type_code =
-            skip_object_type_prefix(&mut reader, decoder.version()).map_err(to_py_err)?;
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                i += 1;
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
         let poly = if declared_match {
-            decode_polyline_2d_for_version(&mut reader, decoder.version(), obj.handle.0)
-                .map_err(to_py_err)?
+            match decode_polyline_2d_for_version(&mut reader, decoder.version(), obj.handle.0) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => {
+                    i += 1;
+                    continue;
+                }
+                Err(err) => return Err(to_py_err(err)),
+            }
         } else {
             match decode_polyline_2d_for_version(&mut reader, decoder.version(), obj.handle.0) {
                 Ok(entity) => entity,
@@ -6252,8 +6350,15 @@ fn decode_polyline_2d_vertex_rows(
             i += 1;
             continue;
         }
-        let (vertices, next_i) =
-            collect_polyline_vertices(&decoder, &sorted, &dynamic_types, &vertex_map, &poly, i)?;
+        let (vertices, next_i) = collect_polyline_vertices(
+            &decoder,
+            &sorted,
+            &dynamic_types,
+            &vertex_map,
+            &poly,
+            i,
+            best_effort,
+        )?;
         i = next_i;
 
         result.push(PolylineVertexRow {
@@ -6278,19 +6383,35 @@ fn build_vertex_2d_map(
     decoder: &decoder::Decoder<'_>,
     sorted: &[objects::ObjectRef],
     dynamic_types: &HashMap<u16, String>,
+    best_effort: bool,
 ) -> PyResult<HashMap<u64, entities::Vertex2dEntity>> {
     let mut vertex_map = HashMap::new();
     for obj in sorted {
-        let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
-        let header =
-            parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
+        let record = match decoder.parse_object_record(obj.offset) {
+            Ok(record) => record,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        let header = match parse_object_header_for_version(&record, decoder.version()) {
+            Ok(header) => header,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
         if !matches_type_name(header.type_code, 0x0A, "VERTEX_2D", dynamic_types) {
             continue;
         }
         let mut reader = record.bit_reader();
-        let _type_code =
-            skip_object_type_prefix(&mut reader, decoder.version()).map_err(to_py_err)?;
-        let vertex = entities::decode_vertex_2d(&mut reader).map_err(to_py_err)?;
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let vertex = match entities::decode_vertex_2d(&mut reader) {
+            Ok(vertex) => vertex,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
         vertex_map.insert(vertex.handle, vertex);
     }
     Ok(vertex_map)
@@ -6303,6 +6424,7 @@ fn collect_polyline_vertices(
     vertex_map: &HashMap<u64, entities::Vertex2dEntity>,
     poly: &entities::Polyline2dEntity,
     start_index: usize,
+    best_effort: bool,
 ) -> PyResult<(Vec<entities::Vertex2dEntity>, usize)> {
     let mut vertices = Vec::new();
 
@@ -6318,24 +6440,58 @@ fn collect_polyline_vertices(
     let mut next_i = start_index + 1;
     while next_i < sorted.len() {
         let next = sorted[next_i];
-        let next_record = decoder
-            .parse_object_record(next.offset)
-            .map_err(to_py_err)?;
-        let next_header =
-            parse_object_header_for_version(&next_record, decoder.version()).map_err(to_py_err)?;
+        let next_record = match decoder.parse_object_record(next.offset) {
+            Ok(record) => record,
+            Err(err) if best_effort => {
+                next_i += 1;
+                continue;
+            }
+            Err(err) => return Err(to_py_err(err)),
+        };
+        let next_header = match parse_object_header_for_version(&next_record, decoder.version()) {
+            Ok(header) => header,
+            Err(err) if best_effort => {
+                next_i += 1;
+                continue;
+            }
+            Err(err) => return Err(to_py_err(err)),
+        };
         let mut next_reader = next_record.bit_reader();
         if matches_type_name(next_header.type_code, 0x0A, "VERTEX_2D", dynamic_types) {
-            let _next_type =
-                skip_object_type_prefix(&mut next_reader, decoder.version()).map_err(to_py_err)?;
-            let vertex = entities::decode_vertex_2d(&mut next_reader).map_err(to_py_err)?;
+            if let Err(err) = skip_object_type_prefix(&mut next_reader, decoder.version()) {
+                if best_effort {
+                    next_i += 1;
+                    continue;
+                }
+                return Err(to_py_err(err));
+            }
+            let vertex = match entities::decode_vertex_2d(&mut next_reader) {
+                Ok(vertex) => vertex,
+                Err(err) if best_effort => {
+                    next_i += 1;
+                    continue;
+                }
+                Err(err) => return Err(to_py_err(err)),
+            };
             vertices.push(vertex);
             next_i += 1;
             continue;
         }
         if matches_type_name(next_header.type_code, 0x06, "SEQEND", dynamic_types) {
-            let _next_type =
-                skip_object_type_prefix(&mut next_reader, decoder.version()).map_err(to_py_err)?;
-            let _seqend = entities::decode_seqend(&mut next_reader).map_err(to_py_err)?;
+            if let Err(err) = skip_object_type_prefix(&mut next_reader, decoder.version()) {
+                if best_effort {
+                    next_i += 1;
+                    continue;
+                }
+                return Err(to_py_err(err));
+            }
+            if let Err(err) = entities::decode_seqend(&mut next_reader) {
+                if best_effort {
+                    next_i += 1;
+                    continue;
+                }
+                return Err(to_py_err(err));
+            }
             next_i += 1;
         }
         break;
@@ -6694,6 +6850,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_dim_radius_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_insert_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_minsert_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_insert_minsert_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_block_header_names, module)?)?;
     module.add_function(wrap_pyfunction!(decode_block_entity_names, module)?)?;
     module.add_function(wrap_pyfunction!(decode_polyline_2d_entities, module)?)?;
@@ -9692,6 +9849,156 @@ fn scan_block_header_name_in_string_stream(
         tried = tried.saturating_add(1);
     }
     best.map(|(_, name)| name)
+}
+
+fn recover_r2010_mtext_text(
+    reader_after_prefix: &BitReader<'_>,
+    header: &ApiObjectHeader,
+    inline_text: &str,
+) -> Option<String> {
+    let total_bits = header.data_size.saturating_mul(8);
+    let start_bit = reader_after_prefix.tell_bits() as u32;
+    if total_bits <= start_bit.saturating_add(16) {
+        return None;
+    }
+
+    let mut end_bit_candidates = resolve_r2010_object_data_end_bit_candidates(header);
+    end_bit_candidates.push(total_bits);
+    end_bit_candidates.retain(|candidate| *candidate > start_bit && *candidate <= total_bits);
+    end_bit_candidates.sort_unstable();
+    end_bit_candidates.dedup();
+    if end_bit_candidates.is_empty() {
+        return None;
+    }
+
+    let current_score = score_mtext_text_quality(inline_text);
+    let canonical_end_bit = resolve_r2010_object_data_end_bit(header).ok();
+    let mut best: Option<(u64, String)> = None;
+    for end_bit in end_bit_candidates {
+        for (stream_start_bit, stream_end_bit) in
+            resolve_r2010_string_stream_ranges(reader_after_prefix, end_bit)
+        {
+            if let Some((mut score, text)) =
+                scan_mtext_text_in_string_stream(reader_after_prefix, stream_start_bit, stream_end_bit)
+            {
+                if let Some(canonical) = canonical_end_bit {
+                    score = score.saturating_add(canonical.abs_diff(end_bit) as u64);
+                }
+                match &best {
+                    Some((best_score, _)) if score >= *best_score => {}
+                    _ => best = Some((score, text)),
+                }
+            }
+        }
+    }
+    let Some((best_score, best_text)) = best else {
+        return None;
+    };
+    if best_score.saturating_add(32) < current_score {
+        Some(best_text)
+    } else {
+        None
+    }
+}
+
+fn scan_mtext_text_in_string_stream(
+    base_reader: &BitReader<'_>,
+    start_bit: u32,
+    end_bit: u32,
+) -> Option<(u64, String)> {
+    if start_bit >= end_bit {
+        return None;
+    }
+    let mut best: Option<(u64, String)> = None;
+    let mut bit = start_bit;
+    let mut tried = 0u32;
+    let max_tries = end_bit
+        .saturating_sub(start_bit)
+        .saturating_div(8)
+        .saturating_add(2)
+        .min(65_536);
+    while bit + 16 <= end_bit && tried < max_tries {
+        let mut candidate_reader = base_reader.clone();
+        candidate_reader.set_bit_pos(bit);
+        let Ok(candidate) = read_tu(&mut candidate_reader) else {
+            bit = bit.saturating_add(8);
+            tried = tried.saturating_add(1);
+            continue;
+        };
+        if candidate_reader.tell_bits() > end_bit as u64 || !is_plausible_mtext_text(&candidate) {
+            bit = bit.saturating_add(8);
+            tried = tried.saturating_add(1);
+            continue;
+        }
+
+        let trailing_gap_bits = end_bit as u64 - candidate_reader.tell_bits();
+        let score = score_mtext_text_quality(&candidate).saturating_add(trailing_gap_bits / 64);
+        match &best {
+            Some((best_score, _)) if score >= *best_score => {}
+            _ => best = Some((score, candidate)),
+        }
+        bit = bit.saturating_add(8);
+        tried = tried.saturating_add(1);
+    }
+    best
+}
+
+fn is_plausible_mtext_text(text: &str) -> bool {
+    let len = text.chars().count();
+    if !(2..=4096).contains(&len) {
+        return false;
+    }
+    if text.contains('\u{0000}') || text.contains('\u{fffd}') {
+        return false;
+    }
+    let mut has_meaningful = false;
+    for ch in text.chars() {
+        if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
+            return false;
+        }
+        if ch.is_alphanumeric() || ch.is_whitespace() || ch.is_ascii_punctuation() {
+            has_meaningful = true;
+        }
+    }
+    has_meaningful
+}
+
+fn score_mtext_text_quality(text: &str) -> u64 {
+    if text.is_empty() {
+        return 1_000_000;
+    }
+    let len = text.chars().count() as u64;
+    let mut score = 0u64;
+    if len <= 1 {
+        score = score.saturating_add(50_000);
+    } else if len == 2 {
+        score = score.saturating_add(5_000);
+    }
+    if len > 4096 {
+        score = score.saturating_add((len - 4096) * 10);
+    }
+
+    let mut meaningful = 0u64;
+    for ch in text.chars() {
+        if ch == '\u{fffd}' || ch == '\u{0000}' {
+            score = score.saturating_add(10_000);
+            continue;
+        }
+        if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
+            score = score.saturating_add(5_000);
+            continue;
+        }
+        if ch.is_alphanumeric() || ch.is_whitespace() || ch.is_ascii_punctuation() {
+            meaningful = meaningful.saturating_add(1);
+        } else if !ch.is_control() {
+            // Treat non-ASCII printable glyphs (e.g. CJK, symbols) as meaningful.
+            meaningful = meaningful.saturating_add(1);
+        }
+    }
+    if meaningful == 0 {
+        score = score.saturating_add(25_000);
+    }
+    score
 }
 
 fn decode_layer_color_record(

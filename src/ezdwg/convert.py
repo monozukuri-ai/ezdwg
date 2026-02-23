@@ -458,25 +458,51 @@ def to_dxf(
     dxf_version: str = "R2010",
     strict: bool = False,
     include_unsupported: bool = False,
+    preserve_colors: bool = True,
+    modelspace_only: bool = False,
 ) -> ConvertResult:
     ezdxf = _require_ezdxf()
     source_path, layout = _resolve_layout(source)
-    insert_attributes_by_owner = _insert_attributes_by_owner(layout)
 
     dxf_doc = ezdxf.new(dxfversion=dxf_version)
     modelspace = dxf_doc.modelspace()
-    _populate_block_definitions(
-        dxf_doc,
-        layout,
-        insert_attributes_by_owner=insert_attributes_by_owner,
-    )
 
     source_entities = _resolve_export_entities(
         layout,
         types,
         include_unsupported=include_unsupported,
-        insert_attributes_by_owner=insert_attributes_by_owner,
+        include_styles=preserve_colors,
+        modelspace_only=modelspace_only,
     )
+    cached_entities_by_handle: dict[int, Entity] | None = None
+    if types is None and not include_unsupported:
+        cached_entities_by_handle = {}
+        for entity in source_entities:
+            try:
+                cached_entities_by_handle[int(entity.handle)] = entity
+            except Exception:
+                continue
+
+    insert_reference_entities = [
+        entity for entity in source_entities if entity.dxftype in {"INSERT", "MINSERT"}
+    ]
+    if insert_reference_entities:
+        insert_attributes_by_owner = _insert_attributes_by_owner(
+            layout,
+            include_styles=preserve_colors,
+        )
+        if insert_attributes_by_owner:
+            source_entities = _attach_insert_attributes(
+                source_entities, insert_attributes_by_owner
+            )
+        _populate_block_definitions(
+            dxf_doc,
+            layout,
+            insert_attributes_by_owner=insert_attributes_by_owner,
+            reference_entities=insert_reference_entities,
+            cached_entities_by_handle=cached_entities_by_handle,
+            include_styles=preserve_colors,
+        )
 
     total = 0
     written = 0
@@ -515,7 +541,8 @@ def _resolve_export_entities(
     types: str | Iterable[str] | None,
     *,
     include_unsupported: bool = False,
-    insert_attributes_by_owner: dict[int, list[Entity]] | None = None,
+    include_styles: bool = True,
+    modelspace_only: bool = False,
 ) -> list[Entity]:
     query_types: str | Iterable[str] | None
     if types is not None:
@@ -525,9 +552,10 @@ def _resolve_export_entities(
     else:
         present_types = set(_present_supported_types(layout.doc.decode_path))
         query_types = tuple(sorted(present_types & _WRITABLE_ENTITY_TYPES))
-    selected_entities = list(layout.query(query_types))
-    export_entities = _materialize_export_entities(layout, selected_entities)
-    return _attach_insert_attributes(export_entities, insert_attributes_by_owner)
+    selected_entities = list(layout.query(query_types, include_styles=include_styles))
+    if modelspace_only:
+        selected_entities = _filter_modelspace_entities(layout.doc.decode_path, selected_entities)
+    return _materialize_export_entities(layout, selected_entities)
 
 
 def _resolve_dwg_export_entities(
@@ -542,6 +570,87 @@ def _resolve_dwg_export_entities(
         query_types = tuple(sorted(present_types & _DWG_WRITABLE_ENTITY_TYPES))
     selected_entities = list(layout.query(query_types))
     return _materialize_export_entities(layout, selected_entities)
+
+
+def _filter_modelspace_entities(
+    decode_path: str | None,
+    entities: list[Entity],
+) -> list[Entity]:
+    if not decode_path or not entities:
+        return entities
+    modelspace_handles = _resolve_modelspace_entity_handles(decode_path)
+    if modelspace_handles is None:
+        return entities
+    filtered: list[Entity] = []
+    for entity in entities:
+        try:
+            if int(entity.handle) in modelspace_handles:
+                filtered.append(entity)
+        except Exception:
+            continue
+    if not filtered and entities:
+        # Some drawings store modelspace ownership in ways this heuristic
+        # cannot recover reliably yet. Keep behavior non-destructive.
+        return entities
+    return filtered
+
+
+def _resolve_modelspace_entity_handles(decode_path: str) -> set[int] | None:
+    try:
+        header_rows = raw.list_object_headers_with_type(decode_path)
+    except Exception:
+        return None
+    if not header_rows:
+        return None
+
+    block_name_by_handle = _resolve_block_name_by_handle(
+        decode_path,
+        header_rows,
+    )
+    if not block_name_by_handle:
+        return None
+
+    modelspace_block_handles = {
+        int(handle)
+        for handle, name in block_name_by_handle.items()
+        if _is_modelspace_block_name(name)
+    }
+    if not modelspace_block_handles:
+        return None
+
+    sorted_rows = sorted(
+        header_rows,
+        key=lambda row: int(row[1]) if isinstance(row, tuple) and len(row) > 1 else 0,
+    )
+    current_block_handle: int | None = None
+    handles: set[int] = set()
+    for row in sorted_rows:
+        if not isinstance(row, tuple) or len(row) < 6:
+            continue
+        raw_handle, _offset, _size, _code, raw_type_name, raw_type_class = row
+        if str(raw_type_class).strip().upper() not in {"E", "ENTITY"}:
+            continue
+        try:
+            handle = int(raw_handle)
+        except Exception:
+            continue
+        type_name = str(raw_type_name).strip().upper()
+        if type_name == "BLOCK":
+            current_block_handle = handle
+            continue
+        if type_name == "ENDBLK":
+            current_block_handle = None
+            continue
+        if current_block_handle in modelspace_block_handles:
+            handles.add(handle)
+    return handles
+
+
+def _is_modelspace_block_name(name: str | None) -> bool:
+    if not isinstance(name, str):
+        return False
+    token = name.strip().upper()
+    return token in {"*MODEL_SPACE", "*MODEL SPACE", "MODELSPACE"}
 
 
 def _materialize_export_entities(
@@ -620,9 +729,13 @@ def _materialize_export_entities(
     return export_entities
 
 
-def _insert_attributes_by_owner(layout: Layout) -> dict[int, list[Entity]]:
+def _insert_attributes_by_owner(
+    layout: Layout,
+    *,
+    include_styles: bool = True,
+) -> dict[int, list[Entity]]:
     try:
-        attrib_entities = list(layout.query("ATTRIB"))
+        attrib_entities = list(layout.query("ATTRIB", include_styles=include_styles))
     except Exception:
         return {}
     if not attrib_entities:
@@ -696,18 +809,28 @@ def _populate_block_definitions(
     layout: Layout,
     *,
     insert_attributes_by_owner: dict[int, list[Entity]] | None = None,
+    reference_entities: list[Entity] | None = None,
+    cached_entities_by_handle: dict[int, Entity] | None = None,
+    include_styles: bool = True,
 ) -> None:
-    try:
-        insert_entities = list(layout.query("INSERT"))
-    except Exception:
-        insert_entities = []
-    try:
-        minsert_entities = list(layout.query("MINSERT"))
-    except Exception:
-        minsert_entities = []
-    if not insert_entities and not minsert_entities:
-        return
-    reference_entities = [*insert_entities, *minsert_entities]
+    if reference_entities is None:
+        try:
+            insert_entities = list(layout.query("INSERT"))
+        except Exception:
+            insert_entities = []
+        try:
+            minsert_entities = list(layout.query("MINSERT"))
+        except Exception:
+            minsert_entities = []
+        if not insert_entities and not minsert_entities:
+            return
+        reference_entities = [*insert_entities, *minsert_entities]
+    else:
+        reference_entities = [
+            entity for entity in reference_entities if entity.dxftype in {"INSERT", "MINSERT"}
+        ]
+        if not reference_entities:
+            return
 
     referenced_names = {
         normalized_name
@@ -726,15 +849,7 @@ def _populate_block_definitions(
     if not header_rows:
         return
 
-    try:
-        block_name_by_handle = {
-            int(entity.handle): normalized_name
-            for entity in layout.query("BLOCK")
-            for normalized_name in [_normalize_block_name(entity.dxf.get("name"))]
-            if normalized_name is not None
-        }
-    except Exception:
-        return
+    block_name_by_handle = _resolve_block_name_by_handle(decode_path, header_rows)
     if not block_name_by_handle:
         return
 
@@ -771,11 +886,33 @@ def _populate_block_definitions(
     if not block_members_by_name:
         return
 
-    # Include blocks referenced by INSERT; expand transitively if blocks contain INSERT.
-    insert_entities_by_handle = _entities_by_handle(layout, {"INSERT", "MINSERT"})
+    # Start from directly referenced block names.
+    selected_block_names = {
+        name for name in referenced_names if name in block_members_by_name
+    }
+    if not selected_block_names:
+        return
+
+    has_member_candidates = any(block_members_by_name.get(name) for name in selected_block_names)
+    insert_entities_by_handle: dict[int, Entity] = {}
+    if has_member_candidates:
+        if cached_entities_by_handle is not None:
+            insert_entities_by_handle = {
+                handle: entity
+                for handle, entity in cached_entities_by_handle.items()
+                if entity.dxftype in {"INSERT", "MINSERT"}
+            }
+        if not insert_entities_by_handle:
+            if include_styles:
+                insert_entities_by_handle = _entities_by_handle(layout, {"INSERT", "MINSERT"})
+            else:
+                insert_entities_by_handle = _entities_by_handle_no_styles(
+                    layout,
+                    {"INSERT", "MINSERT"},
+                )
     selected_block_names = _collect_referenced_block_names(
         block_members_by_name,
-        referenced_names,
+        selected_block_names,
         insert_entities_by_handle,
     )
 
@@ -791,7 +928,20 @@ def _populate_block_definitions(
     if not all_member_types:
         return
 
-    entities_by_handle = _entities_by_handle(layout, all_member_types)
+    entities_by_handle: dict[int, Entity] = {}
+    missing_member_types = set(all_member_types)
+    if cached_entities_by_handle is not None:
+        for handle, entity in cached_entities_by_handle.items():
+            if entity.dxftype in all_member_types:
+                entities_by_handle[handle] = entity
+                missing_member_types.discard(entity.dxftype)
+    if missing_member_types:
+        if include_styles:
+            entities_by_handle.update(_entities_by_handle(layout, missing_member_types))
+        else:
+            entities_by_handle.update(
+                _entities_by_handle_no_styles(layout, missing_member_types)
+            )
     if not entities_by_handle:
         return
     owner_entities_by_handle = {
@@ -812,7 +962,21 @@ def _populate_block_definitions(
             if owner_type_token in _POLYLINE_OWNER_TYPES:
                 owner_type_hints.add(owner_type_token)
     if owner_type_hints:
-        owner_entities_by_handle.update(_entities_by_handle(layout, owner_type_hints))
+        missing_owner_types = set(owner_type_hints)
+        if cached_entities_by_handle is not None:
+            for handle, entity in cached_entities_by_handle.items():
+                if entity.dxftype in owner_type_hints:
+                    owner_entities_by_handle[handle] = entity
+                    missing_owner_types.discard(entity.dxftype)
+        if missing_owner_types:
+            if include_styles:
+                owner_entities_by_handle.update(
+                    _entities_by_handle(layout, missing_owner_types)
+                )
+            else:
+                owner_entities_by_handle.update(
+                    _entities_by_handle_no_styles(layout, missing_owner_types)
+                )
 
     block_layouts: dict[str, Any] = {}
     for block_name in sorted(selected_block_names):
@@ -839,11 +1003,151 @@ def _populate_block_definitions(
             _write_entity_to_modelspace(block_layout, entity)
 
 
+def _resolve_block_name_by_handle(
+    decode_path: str,
+    header_rows: list[tuple[Any, ...]],
+) -> dict[int, str]:
+    # For smaller drawings, prefer exact BLOCK<->name mapping.
+    if len(header_rows) <= 2048:
+        exact_map = _resolve_block_name_by_handle_exact(decode_path)
+        if exact_map:
+            return exact_map
+
+    block_handles_in_order: list[int] = []
+    for row in header_rows:
+        if not isinstance(row, tuple) or len(row) < 6:
+            continue
+        raw_handle, _offset, _size, _code, raw_type_name, raw_type_class = row
+        if str(raw_type_class).strip().upper() not in {"E", "ENTITY"}:
+            continue
+        if str(raw_type_name).strip().upper() != "BLOCK":
+            continue
+        try:
+            block_handles_in_order.append(int(raw_handle))
+        except Exception:
+            continue
+    if not block_handles_in_order:
+        return {}
+
+    try:
+        rows = raw.decode_block_header_names(decode_path, len(block_handles_in_order))
+    except TypeError:
+        # Backward compatibility for extension builds without optional limit support.
+        try:
+            rows = raw.decode_block_header_names(decode_path)
+        except Exception:
+            rows = []
+    except Exception:
+        rows = []
+
+    by_header_handle: dict[int, str] = {}
+    ordered_names: list[str] = []
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) < 2:
+            continue
+        raw_handle, raw_name = row[0], row[1]
+        normalized_name = _normalize_block_name(raw_name)
+        if normalized_name is None:
+            continue
+        ordered_names.append(normalized_name)
+        try:
+            by_header_handle[int(raw_handle)] = normalized_name
+        except Exception:
+            continue
+
+    block_name_by_handle: dict[int, str] = {}
+    for handle in block_handles_in_order:
+        name = by_header_handle.get(handle)
+        if name is not None:
+            block_name_by_handle[handle] = name
+
+    fallback_index = 0
+    for handle in block_handles_in_order:
+        if handle in block_name_by_handle:
+            continue
+        if fallback_index >= len(ordered_names):
+            break
+        block_name_by_handle[handle] = ordered_names[fallback_index]
+        fallback_index += 1
+
+    if block_name_by_handle:
+        return block_name_by_handle
+
+    # Fallback for environments that mock only decode_block_entity_names.
+    return _resolve_block_name_by_handle_exact(decode_path)
+
+
+def _resolve_block_name_by_handle_exact(decode_path: str) -> dict[int, str]:
+    try:
+        entity_rows = raw.decode_block_entity_names(decode_path)
+    except Exception:
+        return {}
+    if not entity_rows:
+        return {}
+
+    result: dict[int, str] = {}
+    for row in entity_rows:
+        if not isinstance(row, tuple) or len(row) < 3:
+            continue
+        raw_handle, raw_type_name, raw_name = row[0], row[1], row[2]
+        if str(raw_type_name).strip().upper() != "BLOCK":
+            continue
+        normalized_name = _normalize_block_name(raw_name)
+        if normalized_name is None:
+            continue
+        try:
+            result[int(raw_handle)] = normalized_name
+        except Exception:
+            continue
+    return result
+
+
 def _entities_by_handle(layout: Layout, types: set[str]) -> dict[int, Entity]:
+    return _entities_by_handle_impl(layout, types, include_styles=True)
+
+
+def _entities_by_handle_no_styles(layout: Layout, types: set[str]) -> dict[int, Entity]:
+    return _entities_by_handle_impl(layout, types, include_styles=False)
+
+
+def _entities_by_handle_impl(
+    layout: Layout,
+    types: set[str],
+    *,
+    include_styles: bool,
+) -> dict[int, Entity]:
     result: dict[int, Entity] = {}
+
+    # INSERT/MINSERT has a shared fast-path in Layout.query().
+    if types == {"INSERT", "MINSERT"}:
+        try:
+            entities = layout.query("INSERT MINSERT", include_styles=include_styles)
+        except TypeError:
+            try:
+                entities = layout.query("INSERT MINSERT")
+            except Exception:
+                entities = []
+        except Exception:
+            entities = []
+        try:
+            for entity in entities:
+                try:
+                    result[int(entity.handle)] = entity
+                except Exception:
+                    continue
+        except Exception:
+            return result
+        return result
+
     for dxftype in sorted(types):
         try:
-            entities = layout.query(dxftype)
+            entities = layout.query(dxftype, include_styles=include_styles)
+        except TypeError:
+            # Backward compatibility for tests/mocks that expose query(dxftype) only.
+            try:
+                entities = layout.query(dxftype)
+            except Exception:
+                continue
         except Exception:
             continue
         try:
