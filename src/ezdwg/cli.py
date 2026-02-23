@@ -146,6 +146,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Limit export to entities directly owned by *MODEL_SPACE.",
     )
+    convert_parser.add_argument(
+        "--native-dimensions",
+        action="store_true",
+        help="Keep DIMENSION entities instead of exploding them to primitive geometry.",
+    )
 
     write_parser = subparsers.add_parser(
         "write",
@@ -341,6 +346,7 @@ def _run_convert(
     include_unsupported: bool = False,
     preserve_colors: bool = True,
     modelspace_only: bool = False,
+    explode_dimensions: bool = True,
 ) -> int:
     dwg_path = Path(input_path)
     if not dwg_path.exists():
@@ -357,6 +363,7 @@ def _run_convert(
             include_unsupported=include_unsupported,
             preserve_colors=preserve_colors,
             modelspace_only=modelspace_only,
+            explode_dimensions=explode_dimensions,
         )
     except Exception as exc:
         print(f"error: failed to convert DWG to DXF: {exc}", file=sys.stderr)
@@ -424,6 +431,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             include_unsupported=bool(args.include_unsupported),
             preserve_colors=not bool(args.no_colors),
             modelspace_only=bool(args.modelspace_only),
+            explode_dimensions=not bool(args.native_dimensions),
         )
     if args.command == "write":
         return _run_write(

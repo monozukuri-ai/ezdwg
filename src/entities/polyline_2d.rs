@@ -1,8 +1,11 @@
 use crate::bit::BitReader;
+use crate::core::error::ErrorKind;
 use crate::core::result::Result;
 use crate::entities::common::{
     parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r14,
-    read_handle_reference, CommonEntityHeader,
+    parse_common_entity_header_r2007, parse_common_entity_header_r2010,
+    parse_common_entity_header_r2013, parse_common_entity_layer_handle, read_handle_reference,
+    CommonEntityHeader,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -79,7 +82,7 @@ pub struct Polyline2dEntity {
 
 pub fn decode_polyline_2d(reader: &mut BitReader<'_>) -> Result<Polyline2dEntity> {
     let header = parse_common_entity_header(reader)?;
-    decode_polyline_2d_with_header(reader, header)
+    decode_polyline_2d_with_header(reader, header, false)
 }
 
 pub fn decode_polyline_2d_r14(
@@ -90,12 +93,38 @@ pub fn decode_polyline_2d_r14(
     if header.handle == 0 {
         header.handle = object_handle;
     }
-    decode_polyline_2d_with_header(reader, header)
+    decode_polyline_2d_with_header(reader, header, false)
+}
+
+pub fn decode_polyline_2d_r2007(reader: &mut BitReader<'_>) -> Result<Polyline2dEntity> {
+    let header = parse_common_entity_header_r2007(reader)?;
+    decode_polyline_2d_with_header(reader, header, true)
+}
+
+pub fn decode_polyline_2d_r2010(
+    reader: &mut BitReader<'_>,
+    object_data_end_bit: u32,
+    object_handle: u64,
+) -> Result<Polyline2dEntity> {
+    let mut header = parse_common_entity_header_r2010(reader, object_data_end_bit)?;
+    header.handle = object_handle;
+    decode_polyline_2d_with_header(reader, header, true)
+}
+
+pub fn decode_polyline_2d_r2013(
+    reader: &mut BitReader<'_>,
+    object_data_end_bit: u32,
+    object_handle: u64,
+) -> Result<Polyline2dEntity> {
+    let mut header = parse_common_entity_header_r2013(reader, object_data_end_bit)?;
+    header.handle = object_handle;
+    decode_polyline_2d_with_header(reader, header, true)
 }
 
 fn decode_polyline_2d_with_header(
     reader: &mut BitReader<'_>,
     header: CommonEntityHeader,
+    allow_handle_decode_failure: bool,
 ) -> Result<Polyline2dEntity> {
     let flags = reader.read_bs()?;
     let curve_type = reader.read_bs()?;
@@ -109,12 +138,29 @@ fn decode_polyline_2d_with_header(
     let owned_obj_count = reader.read_bl()? as usize;
     // Handles are stored in the handle stream at obj_size bit offset.
     reader.set_bit_pos(header.obj_size);
-    let _common_handles = parse_common_entity_handles(reader, &header)?;
-
-    let mut owned_handles = Vec::with_capacity(owned_obj_count);
-    for _ in 0..owned_obj_count {
-        owned_handles.push(read_handle_reference(reader, header.handle)?);
-    }
+    let handles_pos = reader.get_pos();
+    let owned_handles = match (|| -> Result<Vec<u64>> {
+        let _common_handles = parse_common_entity_handles(reader, &header)?;
+        let mut owned_handles = Vec::with_capacity(owned_obj_count);
+        for _ in 0..owned_obj_count {
+            owned_handles.push(read_handle_reference(reader, header.handle)?);
+        }
+        Ok(owned_handles)
+    })() {
+        Ok(owned_handles) => owned_handles,
+        Err(err)
+            if allow_handle_decode_failure
+                && matches!(
+                    err.kind,
+                    ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
+                ) =>
+        {
+            reader.set_pos(handles_pos.0, handles_pos.1);
+            let _ = parse_common_entity_layer_handle(reader, &header);
+            Vec::new()
+        }
+        Err(err) => return Err(err),
+    };
 
     Ok(Polyline2dEntity {
         handle: header.handle,

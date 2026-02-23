@@ -6,9 +6,6 @@ use crate::entities::common::{
     parse_common_entity_header_r2007, parse_common_entity_header_r2010,
     parse_common_entity_header_r2013, parse_common_entity_layer_handle, CommonEntityHeader,
 };
-use std::sync::atomic::{AtomicU32, Ordering};
-
-static R14_LINE_PREFERRED_DELTA: AtomicU32 = AtomicU32::new(64);
 
 #[derive(Debug, Clone)]
 pub struct LineEntity {
@@ -84,14 +81,10 @@ fn decode_line_r14_fallback(reader: &mut BitReader<'_>, object_handle: u64) -> R
     let mut debug_candidates: Vec<(u64, u64, (f64, f64, f64), (f64, f64, f64), (f64, f64, f64))> =
         Vec::new();
 
-    let preferred_delta = R14_LINE_PREFERRED_DELTA.load(Ordering::Relaxed) as i64;
-    let preferred_start = preferred_delta.saturating_sub(6).max(0) as u64;
-    let preferred_end = preferred_delta.saturating_add(6).max(0) as u64;
-
-    let mut consider_delta = |delta: u64| -> Option<LineEntity> {
+    let mut consider_delta = |delta: u64| {
         let target = base_bit.saturating_add(delta);
         let Ok(target_u32) = u32::try_from(target) else {
-            return None;
+            return;
         };
         for parser_kind in 0..3u8 {
             let mut probe = reader.clone();
@@ -130,36 +123,18 @@ fn decode_line_r14_fallback(reader: &mut BitReader<'_>, object_handle: u64) -> R
                 end,
             };
 
-            if is_high_confidence_line_candidate(delta, start, end, extrusion, score) {
-                R14_LINE_PREFERRED_DELTA.store(delta as u32, Ordering::Relaxed);
-                return Some(candidate);
-            }
-
             match &best {
                 Some((best_score, _, _)) if *best_score <= score => {}
                 _ => best = Some((score, delta, candidate)),
             }
         }
-        None
     };
 
-    for delta in preferred_start..=preferred_end.min(256) {
-        if let Some(entity) = consider_delta(delta) {
-            return Ok(entity);
-        }
-    }
-
     for delta in 0..=256u64 {
-        if delta >= preferred_start && delta <= preferred_end {
-            continue;
-        }
-        if let Some(entity) = consider_delta(delta) {
-            return Ok(entity);
-        }
+        consider_delta(delta);
     }
 
-    if let Some((_, best_delta, entity)) = best {
-        R14_LINE_PREFERRED_DELTA.store(best_delta as u32, Ordering::Relaxed);
+    if let Some((_, _best_delta, entity)) = best {
         if debug_enabled {
             debug_candidates.sort_by_key(|item| item.0);
             for (idx, (score, delta, start, end, extrusion)) in
@@ -269,7 +244,7 @@ fn score_line_candidate(
     }
 
     let max_abs = values.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
-    if max_abs > 1.0e9 {
+    if max_abs > 1.0e8 {
         return None;
     }
 
@@ -326,40 +301,6 @@ fn score_line_candidate(
     }
 
     Some(score)
-}
-
-fn is_high_confidence_line_candidate(
-    delta: u64,
-    start: (f64, f64, f64),
-    end: (f64, f64, f64),
-    extrusion: (f64, f64, f64),
-    score: u64,
-) -> bool {
-    if delta < 24 || score > 96 {
-        return false;
-    }
-
-    let geom_max_abs = [start.0, start.1, start.2, end.0, end.1, end.2]
-        .iter()
-        .fold(0.0_f64, |acc, v| acc.max(v.abs()));
-    if geom_max_abs < 2.0 {
-        return false;
-    }
-
-    let dx = start.0 - end.0;
-    let dy = start.1 - end.1;
-    let dz = start.2 - end.2;
-    let length2 = dx * dx + dy * dy + dz * dz;
-    if length2 < 1.0 {
-        return false;
-    }
-
-    if start.2.abs() > 1.0e-6 || end.2.abs() > 1.0e-6 {
-        return false;
-    }
-
-    let extrusion_err = extrusion.0.abs() + extrusion.1.abs() + (extrusion.2 - 1.0).abs();
-    extrusion_err < 1.0e-6
 }
 
 pub fn decode_line_r2010(

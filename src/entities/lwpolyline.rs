@@ -199,7 +199,27 @@ fn decode_lwpolyline_with_header(
     r2007_layer_only: bool,
     r13_r14_vertex_mode: bool,
 ) -> Result<LwPolylineEntity> {
-    let body = decode_lwpolyline_body(reader, r13_r14_vertex_mode)?;
+    let body_start_bit = reader.tell_bits() as u32;
+    let body = decode_lwpolyline_body(reader, r13_r14_vertex_mode).or_else(|err| {
+        recover_lwpolyline_body_by_scan(
+            reader,
+            body_start_bit,
+            header.obj_size,
+            r13_r14_vertex_mode,
+        )
+        .ok_or(err)
+    })?;
+    let body = if body.vertices.is_empty() {
+        recover_lwpolyline_body_by_scan(
+            reader,
+            body_start_bit,
+            header.obj_size,
+            r13_r14_vertex_mode,
+        )
+        .unwrap_or(body)
+    } else {
+        body
+    };
     let layer_handle = decode_lwpolyline_layer_handle(
         reader,
         &header,
@@ -218,6 +238,130 @@ fn decode_lwpolyline_with_header(
         bulges: body.bulges,
         widths: body.widths,
     })
+}
+
+fn recover_lwpolyline_body_by_scan(
+    reader: &BitReader<'_>,
+    body_start_bit: u32,
+    body_end_bit: u32,
+    primary_vertex_mode: bool,
+) -> Option<LwPolylineBody> {
+    let total_bits = reader.total_bits().min(u64::from(u32::MAX)) as u32;
+    if total_bits <= 16 {
+        return None;
+    }
+    let body_end_valid = body_end_bit > body_start_bit && body_end_bit <= total_bits;
+
+    // Keep scan bounded to avoid accidental quadratic behavior on malformed records.
+    let scan_start = body_start_bit.saturating_sub(1024);
+    let mut scan_end = body_start_bit
+        .saturating_add(2048)
+        .min(total_bits.saturating_sub(16));
+    if body_end_valid {
+        scan_end = scan_end.max(body_end_bit.min(total_bits.saturating_sub(16)));
+    }
+    if scan_end < scan_start {
+        return None;
+    }
+
+    let fallback_modes = if primary_vertex_mode {
+        [true, false]
+    } else {
+        [false, true]
+    };
+    let mut best: Option<(u64, LwPolylineBody)> = None;
+
+    for start_bit in scan_start..=scan_end {
+        for (mode_index, vertex_mode) in fallback_modes.iter().enumerate() {
+            let mut probe = reader.clone();
+            probe.set_bit_pos(start_bit);
+            let Ok(candidate) = decode_lwpolyline_body(&mut probe, *vertex_mode) else {
+                continue;
+            };
+            if candidate.flags > 0x07FF {
+                continue;
+            }
+            if !is_plausible_lwpolyline_vertices(&candidate.vertices) {
+                continue;
+            }
+            let end_bit = probe.tell_bits() as u32;
+            if end_bit > total_bits {
+                continue;
+            }
+            let end_score = if body_end_valid {
+                let diff = body_end_bit.abs_diff(end_bit);
+                if diff > 1024 {
+                    continue;
+                }
+                u64::from(diff)
+            } else {
+                0
+            };
+
+            let start_score = u64::from(body_start_bit.abs_diff(start_bit)) * 4;
+            let mode_score = if mode_index == 0 { 0 } else { 8 };
+            let quality_penalty = lwpolyline_candidate_penalty(&candidate.vertices);
+            let score = start_score + end_score + mode_score + quality_penalty;
+
+            // Prefer candidates with more vertices when scores tie.
+            let tie_break = candidate.vertices.len();
+            match &best {
+                Some((best_score, best_body))
+                    if *best_score < score
+                        || (*best_score == score && best_body.vertices.len() >= tie_break) => {}
+                _ => best = Some((score, candidate)),
+            }
+        }
+    }
+
+    best.map(|(_, body)| body)
+}
+
+fn lwpolyline_candidate_penalty(vertices: &[(f64, f64)]) -> u64 {
+    if vertices.is_empty() {
+        return 1_000_000;
+    }
+
+    let mut penalty = 0u64;
+    if vertices.len() < 2 {
+        penalty = penalty.saturating_add(512);
+    } else if vertices.len() < 4 {
+        penalty = penalty.saturating_add(48);
+    }
+
+    let mut min_abs_nonzero = f64::INFINITY;
+    let mut max_abs = 0.0f64;
+    let mut unique = 0usize;
+    let mut seen: Vec<(f64, f64)> = Vec::new();
+    for &(x, y) in vertices {
+        let abs_x = x.abs();
+        let abs_y = y.abs();
+        if abs_x > 0.0 {
+            min_abs_nonzero = min_abs_nonzero.min(abs_x);
+        }
+        if abs_y > 0.0 {
+            min_abs_nonzero = min_abs_nonzero.min(abs_y);
+        }
+        max_abs = max_abs.max(abs_x).max(abs_y);
+
+        let duplicate = seen
+            .iter()
+            .any(|&(sx, sy)| (sx - x).abs() < 1.0e-9 && (sy - y).abs() < 1.0e-9);
+        if !duplicate {
+            unique += 1;
+            seen.push((x, y));
+        }
+    }
+    if unique < 2 {
+        penalty = penalty.saturating_add(512);
+    } else if unique < vertices.len() {
+        penalty = penalty.saturating_add(24);
+    }
+
+    if max_abs > 1.0e3 && min_abs_nonzero.is_finite() && min_abs_nonzero < 1.0e-20 {
+        penalty = penalty.saturating_add(512);
+    }
+    penalty
 }
 
 fn decode_lwpolyline_r14_attempt(

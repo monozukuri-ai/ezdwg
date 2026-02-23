@@ -222,10 +222,12 @@ def test_dimension_entity_merges_extended_variants(monkeypatch) -> None:
     ]
 
 
-def test_dimension_entity_uses_bulk_decoder_when_available(monkeypatch) -> None:
+def test_dimension_entity_bulk_decoder_merges_legacy_subtypes_without_duplicates(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(document_module, "_entity_style_map", lambda _path: {})
     monkeypatch.setattr(document_module, "_layer_color_map", lambda _path: {})
-    row = (
+    row_linear = (
         321,
         "<>",
         (1.0, 1.0, 0.0),
@@ -238,18 +240,35 @@ def test_dimension_entity_uses_bulk_decoder_when_available(monkeypatch) -> None:
         (0, 2.0, None, None, None, 0.0),
         (None, None),
     )
+    row_ang3pt = (
+        400,
+        "<>",
+        (2.0, 2.0, 0.0),
+        (1.0, 1.0, 0.0),
+        (3.0, 1.0, 0.0),
+        (2.0, 1.5, 0.0),
+        None,
+        ((0.0, 0.0, 1.0), (1.0, 1.0, 1.0)),
+        (0.0, 0.0, 0.0, 0.0),
+        (0, 2.0, None, None, None, 0.0),
+        (None, None),
+    )
     monkeypatch.setattr(
         document_module.raw,
         "decode_dimension_entities",
-        lambda _path: [("LINEAR", row)],
+        lambda _path: [("LINEAR", row_linear)],
     )
     monkeypatch.setattr(
         document_module.raw,
         "decode_dim_linear_entities",
-        lambda _path: (_ for _ in ()).throw(
-            AssertionError("legacy decoder should not be called")
-        ),
+        lambda _path: [row_linear],  # duplicate by handle should be deduplicated
     )
+    monkeypatch.setattr(document_module.raw, "decode_dim_ordinate_entities", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_dim_aligned_entities", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_dim_ang3pt_entities", lambda _path: [row_ang3pt])
+    monkeypatch.setattr(document_module.raw, "decode_dim_ang2ln_entities", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_dim_radius_entities", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_dim_diameter_entities", lambda _path: [])
 
     doc = Document(
         path="dummy.dwg",
@@ -259,6 +278,6 @@ def test_dimension_entity_uses_bulk_decoder_when_available(monkeypatch) -> None:
     )
     layout = Layout(doc=doc, name="MODELSPACE")
     entities = list(layout.query("DIMENSION"))
-    assert len(entities) == 1
-    assert entities[0].handle == 321
-    assert entities[0].dxf["dimtype"] == "LINEAR"
+    assert len(entities) == 2
+    assert [entity.handle for entity in entities] == [321, 400]
+    assert [entity.dxf["dimtype"] for entity in entities] == ["LINEAR", "ANG3PT"]

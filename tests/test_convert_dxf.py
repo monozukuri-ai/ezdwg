@@ -458,6 +458,43 @@ def test_to_dxf_writes_r14_lwpolyline_vertices(tmp_path: Path) -> None:
     assert abs(points[2][1] - 50.0) < 1.0e-6
 
 
+def test_to_dxf_lwpolyline_flag_0x200_is_treated_as_closed(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_lwpolyline_entities",
+        lambda _path: [
+            (
+                0x2200,
+                0x0200,
+                [(0.0, 0.0), (2.0, 0.0), (2.0, 1.0), (0.0, 1.0)],
+                [],
+                [],
+                None,
+            )
+        ],
+    )
+
+    doc = document_module.Document(path="dummy_lwpolyline_0x200.dwg", version="AC1021")
+    output = tmp_path / "lwpolyline_0x200_closed_out.dxf"
+    result = ezdwg.to_dxf(doc, str(output), types="LWPOLYLINE", dxf_version="R2010")
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+    entities = dxf_entities_of_type(output, "LWPOLYLINE")
+    assert len(entities) == 1
+    assert group_float(entities[0], "70") == 1.0
+
+
 def test_to_dxf_writes_r14_ellipse(tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 
@@ -1266,6 +1303,82 @@ def test_filter_modelspace_entities_uses_block_boundaries(monkeypatch) -> None:
     assert [int(entity.handle) for entity in filtered] == [21, 22]
 
 
+def test_resolve_block_name_by_handle_prefers_exact_mapping(monkeypatch) -> None:
+    header_rows = [
+        (100, 10, 0, 0x04, "BLOCK", "Entity"),
+        (101, 11, 0, 0x05, "ENDBLK", "Entity"),
+        (200, 20, 0, 0x04, "BLOCK", "Entity"),
+        (201, 21, 0, 0x05, "ENDBLK", "Entity"),
+    ]
+
+    monkeypatch.setattr(
+        convert_module,
+        "_resolve_block_name_by_handle_exact",
+        lambda _path: {100: "BLK_A", 200: "BLK_B"},
+    )
+    monkeypatch.setattr(
+        convert_module.raw,
+        "decode_block_header_names",
+        lambda _path, _limit=None: [(100, "WRONG_A"), (200, "WRONG_B")],
+    )
+
+    resolved = convert_module._resolve_block_name_by_handle("dummy.dwg", header_rows)
+    assert resolved[100] == "BLK_A"
+    assert resolved[200] == "BLK_B"
+
+
+def test_resolve_block_name_by_handle_does_not_use_positional_fallback(monkeypatch) -> None:
+    header_rows = [
+        (100, 10, 0, 0x04, "BLOCK", "Entity"),
+        (101, 11, 0, 0x05, "ENDBLK", "Entity"),
+        (200, 20, 0, 0x04, "BLOCK", "Entity"),
+        (201, 21, 0, 0x05, "ENDBLK", "Entity"),
+    ]
+
+    monkeypatch.setattr(convert_module, "_resolve_block_name_by_handle_exact", lambda _path: {})
+    monkeypatch.setattr(
+        convert_module.raw,
+        "decode_block_header_names",
+        lambda _path, _limit=None: [(100, "BLK_A")],
+    )
+
+    resolved = convert_module._resolve_block_name_by_handle("dummy.dwg", header_rows)
+    assert resolved == {100: "BLK_A"}
+
+
+def test_materialize_export_entities_dedup_skips_only_identical_rows() -> None:
+    doc = ezdwg.read(str(SAMPLES / "line_2007.dwg"))
+    layout = doc.modelspace()
+    selected = [
+        Entity(dxftype="LINE", handle=10, dxf={"start": (0.0, 0.0, 0.0), "end": (1.0, 0.0, 0.0)}),
+        Entity(dxftype="LINE", handle=10, dxf={"start": (0.0, 0.0, 0.0), "end": (1.0, 0.0, 0.0)}),
+    ]
+    out = convert_module._materialize_export_entities(layout, selected)
+    assert len(out) == 1
+
+
+def test_materialize_export_entities_keeps_same_handle_when_geometry_differs() -> None:
+    doc = ezdwg.read(str(SAMPLES / "line_2007.dwg"))
+    layout = doc.modelspace()
+    selected = [
+        Entity(dxftype="LINE", handle=10, dxf={"start": (0.0, 0.0, 0.0), "end": (1.0, 0.0, 0.0)}),
+        Entity(dxftype="LINE", handle=10, dxf={"start": (0.0, 0.0, 0.0), "end": (2.0, 0.0, 0.0)}),
+    ]
+    out = convert_module._materialize_export_entities(layout, selected)
+    assert len(out) == 2
+
+
+def test_materialize_export_entities_keeps_same_handle_across_types() -> None:
+    doc = ezdwg.read(str(SAMPLES / "line_2007.dwg"))
+    layout = doc.modelspace()
+    selected = [
+        Entity(dxftype="LINE", handle=10, dxf={"start": (0.0, 0.0, 0.0), "end": (1.0, 0.0, 0.0)}),
+        Entity(dxftype="DIMENSION", handle=10, dxf={"dimtype": "DIM_LINEAR", "text": "1"}),
+    ]
+    out = convert_module._materialize_export_entities(layout, selected)
+    assert len(out) == 2
+
+
 def test_resolve_export_entities_does_not_filter_modelspace_by_default(
     monkeypatch,
 ) -> None:
@@ -1360,6 +1473,60 @@ def test_to_dxf_block_export_trims_insert_block_name(monkeypatch, tmp_path: Path
     assert len(list(block.query("LINE"))) == 1
 
 
+def test_to_dxf_block_export_uses_offset_order_for_block_members(
+    monkeypatch, tmp_path: Path
+) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_handles_by_type_name.cache_clear()
+    document_module._block_and_endblk_name_maps.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    # Header rows are intentionally out of sequence by handle:
+    # member LINE appears after ENDBLK in this list, but its offset is inside the block.
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [
+            (100, 100, 0, 0x04, "BLOCK", "Entity"),
+            (101, 300, 0, 0x05, "ENDBLK", "Entity"),
+            (110, 200, 0, 0x13, "LINE", "Entity"),
+            (200, 400, 0, 0x07, "INSERT", "Entity"),
+        ],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_block_entity_names",
+        lambda _path: [(100, "BLOCK", "BLK_OFS"), (101, "ENDBLK", "BLK_OFS")],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_line_entities",
+        lambda _path: [(110, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0)],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_insert_entities",
+        lambda _path: [(200, 5.0, 5.0, 0.0, 1.0, 1.0, 1.0, 0.0, "BLK_OFS")],
+    )
+
+    output = tmp_path / "insert_offset_order_out.dxf"
+    doc = document_module.Document(path="dummy_insert_offset_order.dwg", version="AC1018")
+    result = ezdwg.to_dxf(doc, str(output), types="INSERT", dxf_version="R2010")
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+
+    dxf_doc = ezdxf.readfile(str(output))
+    block = dxf_doc.blocks.get("BLK_OFS")
+    assert len(list(block.query("LINE"))) == 1
+
+
 def test_read_insert_exposes_block_name() -> None:
     doc = ezdwg.read(str(SAMPLES / "insert_2004.dwg"))
     entities = list(doc.modelspace().query("INSERT"))
@@ -1386,13 +1553,33 @@ def test_to_dxf_dimension_writes_native_dimension_without_line_fallback(tmp_path
 
     source = ROOT / "examples" / "data" / "mechanical_example-imperial.dwg"
     output = tmp_path / "mechanical_dim_out.dxf"
-    result = ezdwg.to_dxf(str(source), str(output), types="DIMENSION", dxf_version="R2010")
+    result = ezdwg.to_dxf(
+        str(source),
+        str(output),
+        types="DIMENSION",
+        dxf_version="R2010",
+        explode_dimensions=False,
+    )
 
     assert output.exists()
     assert result.total_entities > 0
     assert result.written_entities == result.total_entities
     assert len(dxf_entities_of_type(output, "DIMENSION")) > 0
     assert len(dxf_entities_of_type(output, "LINE")) == 0
+
+
+def test_to_dxf_dimension_default_explodes_to_primitives(tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    source = ROOT / "examples" / "data" / "mechanical_example-imperial.dwg"
+    output = tmp_path / "mechanical_dim_exploded_out.dxf"
+    result = ezdwg.to_dxf(str(source), str(output), types="DIMENSION", dxf_version="R2010")
+
+    assert output.exists()
+    assert result.total_entities > 0
+    assert result.written_entities == result.total_entities
+    assert len(dxf_entities_of_type(output, "DIMENSION")) == 0
+    assert len(dxf_entities_of_type(output, "LINE")) > 0
 
 
 def test_to_dxf_vertex_filter_writes_owner_polyline(monkeypatch, tmp_path: Path) -> None:
@@ -1482,6 +1669,55 @@ def test_to_dxf_writes_polyline_2d_as_lwpolyline(monkeypatch, tmp_path: Path) ->
     assert len(entities) == 1
     points = dxf_lwpolyline_points(entities[0])
     assert points == [(0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (2.0, 1.0, 0.0)]
+
+
+def test_to_dxf_preserves_explicit_closing_vertex_for_open_polyline_2d(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_polyline_2d_with_vertex_data",
+        lambda _path: [
+            (
+                0x2D04,
+                0x0000,
+                [
+                    (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0),
+                    (2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0),
+                    (2.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0),
+                    (0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0),
+                    (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0),
+                ],
+            )
+        ],
+    )
+
+    output = tmp_path / "polyline2d_open_explicit_close_out.dxf"
+    doc = document_module.Document(path="dummy_polyline2d_open_explicit_close.dwg", version="AC1018")
+    result = ezdwg.to_dxf(doc, str(output), types="POLYLINE_2D", dxf_version="R2010")
+
+    assert output.exists()
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+    entities = dxf_entities_of_type(output, "LWPOLYLINE")
+    assert len(entities) == 1
+    points = dxf_lwpolyline_points(entities[0])
+    assert points == [
+        (0.0, 0.0, 0.0),
+        (2.0, 0.0, 0.0),
+        (2.0, 1.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 0.0),
+    ]
+    assert group_float(entities[0], "70") == 0.0
 
 
 def test_to_dxf_writes_polyline_2d_curve_fit_as_spline(monkeypatch, tmp_path: Path) -> None:

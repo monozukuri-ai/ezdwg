@@ -34,6 +34,10 @@ impl<'a> BitReader<'a> {
         (self.byte_pos as u64) * 8 + self.bit_pos as u64
     }
 
+    pub fn total_bits(&self) -> u64 {
+        (self.data.len() as u64) * 8
+    }
+
     pub fn get_pos(&self) -> (usize, u8) {
         (self.byte_pos, self.bit_pos)
     }

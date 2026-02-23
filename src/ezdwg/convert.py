@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -460,6 +461,7 @@ def to_dxf(
     include_unsupported: bool = False,
     preserve_colors: bool = True,
     modelspace_only: bool = False,
+    explode_dimensions: bool = True,
 ) -> ConvertResult:
     ezdxf = _require_ezdxf()
     source_path, layout = _resolve_layout(source)
@@ -502,6 +504,7 @@ def to_dxf(
             reference_entities=insert_reference_entities,
             cached_entities_by_handle=cached_entities_by_handle,
             include_styles=preserve_colors,
+            explode_dimensions=explode_dimensions,
         )
 
     total = 0
@@ -510,7 +513,11 @@ def to_dxf(
 
     for entity in source_entities:
         total += 1
-        if _write_entity_to_modelspace(modelspace, entity):
+        if _write_entity_to_modelspace(
+            modelspace,
+            entity,
+            explode_dimensions=explode_dimensions,
+        ):
             written += 1
             continue
         skipped_by_type[entity.dxftype] = skipped_by_type.get(entity.dxftype, 0) + 1
@@ -664,7 +671,7 @@ def _materialize_export_entities(
         return []
 
     export_entities: list[Entity] = []
-    seen_handles: set[int] = set()
+    seen_entity_keys: set[tuple[str, int, str]] = set()
     owner_requests: list[tuple[int, str | None]] = []
 
     for entity in selected_entities:
@@ -691,9 +698,10 @@ def _materialize_export_entities(
                     )
                 )
             continue
-        if handle in seen_handles:
+        dedup_key = _entity_dedup_key(entity)
+        if dedup_key in seen_entity_keys:
             continue
-        seen_handles.add(handle)
+        seen_entity_keys.add(dedup_key)
         export_entities.append(entity)
 
     if not owner_requests:
@@ -719,14 +727,45 @@ def _materialize_export_entities(
         if owner_entity.dxftype in _BLOCK_EXCLUDED_ENTITY_TYPES:
             continue
         handle = int(owner_entity.handle)
-        if handle in seen_handles:
+        dedup_key = _entity_dedup_key(owner_entity)
+        if dedup_key in seen_entity_keys:
             continue
         if allowed_owner_handles is not None and handle not in allowed_owner_handles:
             continue
-        seen_handles.add(handle)
+        seen_entity_keys.add(dedup_key)
         export_entities.append(owner_entity)
 
     return export_entities
+
+
+def _entity_dedup_key(entity: Entity) -> tuple[str, int, str]:
+    return (
+        str(entity.dxftype).strip().upper(),
+        int(entity.handle),
+        _freeze_dxf_value(entity.dxf),
+    )
+
+
+def _freeze_dxf_value(value: Any) -> str:
+    normalized = _normalize_dxf_value_for_dedup(value)
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _normalize_dxf_value_for_dedup(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key in sorted(value, key=lambda item: str(item)):
+            out[str(key)] = _normalize_dxf_value_for_dedup(value[key])
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_normalize_dxf_value_for_dedup(item) for item in value]
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return str(value)
+        return round(value, 12)
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    return str(value)
 
 
 def _insert_attributes_by_owner(
@@ -812,6 +851,7 @@ def _populate_block_definitions(
     reference_entities: list[Entity] | None = None,
     cached_entities_by_handle: dict[int, Entity] | None = None,
     include_styles: bool = True,
+    explode_dimensions: bool = True,
 ) -> None:
     if reference_entities is None:
         try:
@@ -853,9 +893,14 @@ def _populate_block_definitions(
     if not block_name_by_handle:
         return
 
+    sorted_header_rows = sorted(
+        header_rows,
+        key=lambda row: int(row[1]) if isinstance(row, tuple) and len(row) > 1 else 0,
+    )
+
     block_members_by_name: dict[str, list[tuple[int, str]]] = {}
     current_block_name: str | None = None
-    for row in header_rows:
+    for row in sorted_header_rows:
         if not isinstance(row, tuple) or len(row) < 6:
             continue
         raw_handle, _offset, _size, _code, raw_type_name, raw_type_class = row
@@ -1000,19 +1045,17 @@ def _populate_block_definitions(
         )
         export_entities = _attach_insert_attributes(export_entities, insert_attributes_by_owner)
         for entity in export_entities:
-            _write_entity_to_modelspace(block_layout, entity)
+            _write_entity_to_modelspace(
+                block_layout,
+                entity,
+                explode_dimensions=explode_dimensions,
+            )
 
 
 def _resolve_block_name_by_handle(
     decode_path: str,
     header_rows: list[tuple[Any, ...]],
 ) -> dict[int, str]:
-    # For smaller drawings, prefer exact BLOCK<->name mapping.
-    if len(header_rows) <= 2048:
-        exact_map = _resolve_block_name_by_handle_exact(decode_path)
-        if exact_map:
-            return exact_map
-
     block_handles_in_order: list[int] = []
     for row in header_rows:
         if not isinstance(row, tuple) or len(row) < 6:
@@ -1029,6 +1072,18 @@ def _resolve_block_name_by_handle(
     if not block_handles_in_order:
         return {}
 
+    block_handles_set = set(block_handles_in_order)
+
+    # Prefer exact BLOCK<->name mapping from BLOCK entity names.
+    exact_map = _resolve_block_name_by_handle_exact(decode_path)
+    block_name_by_handle: dict[int, str] = {
+        handle: name
+        for handle, name in exact_map.items()
+        if handle in block_handles_set
+    }
+    if len(block_name_by_handle) >= len(block_handles_in_order):
+        return block_name_by_handle
+
     try:
         rows = raw.decode_block_header_names(decode_path, len(block_handles_in_order))
     except TypeError:
@@ -1041,7 +1096,6 @@ def _resolve_block_name_by_handle(
         rows = []
 
     by_header_handle: dict[int, str] = {}
-    ordered_names: list[str] = []
     for row in rows:
         if not isinstance(row, tuple) or len(row) < 2:
             continue
@@ -1049,32 +1103,23 @@ def _resolve_block_name_by_handle(
         normalized_name = _normalize_block_name(raw_name)
         if normalized_name is None:
             continue
-        ordered_names.append(normalized_name)
         try:
             by_header_handle[int(raw_handle)] = normalized_name
         except Exception:
             continue
 
-    block_name_by_handle: dict[int, str] = {}
-    for handle in block_handles_in_order:
-        name = by_header_handle.get(handle)
-        if name is not None:
-            block_name_by_handle[handle] = name
-
-    fallback_index = 0
     for handle in block_handles_in_order:
         if handle in block_name_by_handle:
             continue
-        if fallback_index >= len(ordered_names):
-            break
-        block_name_by_handle[handle] = ordered_names[fallback_index]
-        fallback_index += 1
+        name = by_header_handle.get(handle)
+        if name is not None:
+            block_name_by_handle[handle] = name
 
     if block_name_by_handle:
         return block_name_by_handle
 
     # Fallback for environments that mock only decode_block_entity_names.
-    return _resolve_block_name_by_handle_exact(decode_path)
+    return exact_map
 
 
 def _resolve_block_name_by_handle_exact(decode_path: str) -> dict[int, str]:
@@ -1219,14 +1264,28 @@ def _canonical_entity_type(raw_type_name: str) -> str:
     return TYPE_ALIASES.get(token, token)
 
 
-def _write_entity_to_modelspace(modelspace: Any, entity: Entity) -> bool:
+def _write_entity_to_modelspace(
+    modelspace: Any,
+    entity: Entity,
+    *,
+    explode_dimensions: bool = True,
+) -> bool:
     try:
-        return _write_entity_to_modelspace_unsafe(modelspace, entity)
+        return _write_entity_to_modelspace_unsafe(
+            modelspace,
+            entity,
+            explode_dimensions=explode_dimensions,
+        )
     except Exception:
         return False
 
 
-def _write_entity_to_modelspace_unsafe(modelspace: Any, entity: Entity) -> bool:
+def _write_entity_to_modelspace_unsafe(
+    modelspace: Any,
+    entity: Entity,
+    *,
+    explode_dimensions: bool = True,
+) -> bool:
     dxftype = entity.dxftype
     dxf = entity.dxf
     dxfattribs = _entity_dxfattribs(dxf)
@@ -1330,7 +1389,11 @@ def _write_entity_to_modelspace_unsafe(modelspace: Any, entity: Entity) -> bool:
             return False
         bulges = list(dxf.get("bulges", []) or [])
         widths = list(dxf.get("widths", []) or [])
-        if len(points) > 1 and points[0] == points[-1]:
+        closed = bool(dxf.get("closed", False))
+        # Keep explicit terminal duplicate vertices for open polylines:
+        # some drawings represent the last segment this way even when the
+        # closed flag is not set.
+        if closed and len(points) > 1 and points[0] == points[-1]:
             points = points[:-1]
             if bulges:
                 bulges = bulges[: len(points)]
@@ -1350,7 +1413,7 @@ def _write_entity_to_modelspace_unsafe(modelspace: Any, entity: Entity) -> bool:
         modelspace.add_lwpolyline(
             vertices,
             format="xyseb",
-            close=bool(dxf.get("closed", False)),
+            close=closed,
             dxfattribs=dxfattribs,
         )
         return True
@@ -1526,7 +1589,12 @@ def _write_entity_to_modelspace_unsafe(modelspace: Any, entity: Entity) -> bool:
         return True
 
     if dxftype == "DIMENSION":
-        return _write_dimension_native(modelspace, dxf, dxfattribs)
+        return _write_dimension_native(
+            modelspace,
+            dxf,
+            dxfattribs,
+            explode_dimensions=explode_dimensions,
+        )
 
     return False
 
@@ -2043,7 +2111,13 @@ def _write_hatch(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str, Any
     return path_written
 
 
-def _write_dimension_native(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str, Any]) -> bool:
+def _write_dimension_native(
+    modelspace: Any,
+    dxf: dict[str, Any],
+    dxfattribs: dict[str, Any],
+    *,
+    explode_dimensions: bool = True,
+) -> bool:
     dimtype = str(dxf.get("dimtype") or "").upper()
     text = _dimension_text(dxf.get("text"))
     text_mid = _point2_or_none(dxf.get("text_midpoint"))
@@ -2060,8 +2134,12 @@ def _write_dimension_native(modelspace: Any, dxf: dict[str, Any], dxfattribs: di
                 text_rotation=_float_or_none(dxf.get("text_rotation")),
                 dxfattribs=dxfattribs,
             )
-            dim.render()
-            return True
+            return _finalize_dimension(
+                modelspace,
+                dim,
+                dxfattribs=dxfattribs,
+                explode_dimensions=explode_dimensions,
+            )
 
         if dimtype == "ALIGNED":
             p1 = _point2(dxf.get("defpoint2"))
@@ -2077,8 +2155,12 @@ def _write_dimension_native(modelspace: Any, dxf: dict[str, Any], dxfattribs: di
             )
             if text_mid is not None:
                 dim.set_location(text_mid, leader=False, relative=False)
-            dim.render()
-            return True
+            return _finalize_dimension(
+                modelspace,
+                dim,
+                dxfattribs=dxfattribs,
+                explode_dimensions=explode_dimensions,
+            )
 
         if dimtype == "RADIUS":
             center = _point2(dxf.get("defpoint2"))
@@ -2091,8 +2173,12 @@ def _write_dimension_native(modelspace: Any, dxf: dict[str, Any], dxfattribs: di
             )
             if text_mid is not None:
                 dim.set_location(text_mid, leader=False, relative=False)
-            dim.render()
-            return True
+            return _finalize_dimension(
+                modelspace,
+                dim,
+                dxfattribs=dxfattribs,
+                explode_dimensions=explode_dimensions,
+            )
 
         if dimtype == "DIAMETER":
             center = _point2(dxf.get("defpoint2"))
@@ -2105,8 +2191,12 @@ def _write_dimension_native(modelspace: Any, dxf: dict[str, Any], dxfattribs: di
             )
             if text_mid is not None:
                 dim.set_location(text_mid, leader=False, relative=False)
-            dim.render()
-            return True
+            return _finalize_dimension(
+                modelspace,
+                dim,
+                dxfattribs=dxfattribs,
+                explode_dimensions=explode_dimensions,
+            )
 
         if dimtype == "ORDINATE":
             feature = _point2(dxf.get("defpoint2"))
@@ -2121,13 +2211,75 @@ def _write_dimension_native(modelspace: Any, dxf: dict[str, Any], dxfattribs: di
                 text=text,
                 dxfattribs=dxfattribs,
             )
-            dim.render()
-            return True
+            return _finalize_dimension(
+                modelspace,
+                dim,
+                dxfattribs=dxfattribs,
+                explode_dimensions=explode_dimensions,
+            )
     except Exception:
         # Keep conversion robust and avoid generating synthetic geometry lines.
         pass
 
     return _write_dimension_text_fallback(modelspace, dxf, dxfattribs)
+
+
+def _finalize_dimension(
+    modelspace: Any,
+    dim: Any,
+    *,
+    dxfattribs: dict[str, Any],
+    explode_dimensions: bool,
+) -> bool:
+    dim.render()
+    if not explode_dimensions:
+        return True
+
+    dimension_entity = getattr(dim, "dimension", None)
+    if dimension_entity is None:
+        return True
+
+    try:
+        virtual_entities = list(dimension_entity.virtual_entities())
+    except Exception:
+        return True
+
+    if not virtual_entities:
+        return True
+
+    written = 0
+    for virtual_entity in virtual_entities:
+        if virtual_entity.dxftype() == "POINT":
+            # DEFPOINT-like helper markers are usually not rendered in CAD viewers.
+            continue
+        try:
+            clone = virtual_entity.copy()
+        except Exception:
+            continue
+        if "color" in dxfattribs and hasattr(clone.dxf, "color"):
+            try:
+                clone.dxf.color = int(dxfattribs["color"])
+            except Exception:
+                pass
+        if "true_color" in dxfattribs and hasattr(clone.dxf, "true_color"):
+            try:
+                clone.dxf.true_color = int(dxfattribs["true_color"])
+            except Exception:
+                pass
+        try:
+            modelspace.add_entity(clone)
+            written += 1
+        except Exception:
+            continue
+
+    if written <= 0:
+        return True
+
+    try:
+        modelspace.delete_entity(dimension_entity)
+    except Exception:
+        pass
+    return True
 
 
 def _write_dimension_text_fallback(

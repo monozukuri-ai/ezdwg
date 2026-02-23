@@ -291,7 +291,7 @@ class Layout:
                         {
                             "points": points3d,
                             "flags": flags,
-                            "closed": bool(flags & 1),
+                            "closed": _lwpolyline_closed(flags),
                             "bulges": bulges_list,
                             "widths": widths_list,
                             "const_width": const_width,
@@ -1691,15 +1691,33 @@ class Layout:
             return
 
         if dxftype == "DIMENSION":
-            dimension_rows: list[tuple[str, tuple]] = []
-            used_bulk_decoder = False
+            # Some decoder builds return only LINEAR rows from the bulk API.
+            # Merge subtype-specific decoders by handle to avoid silently
+            # dropping DIM_* entities.
+            rows_by_handle: dict[int, tuple[str, tuple]] = {}
+
+            def _put_row(dimtype: str, row: tuple) -> None:
+                if not isinstance(row, tuple) or len(row) == 0:
+                    return
+                try:
+                    handle = int(row[0])
+                except Exception:
+                    return
+                normalized_type = str(dimtype).upper()
+                existing = rows_by_handle.get(handle)
+                if existing is None:
+                    rows_by_handle[handle] = (normalized_type, row)
+                    return
+                existing_type, _ = existing
+                # Prefer subtype decoders over generic LINEAR when available.
+                if existing_type == "LINEAR" and normalized_type != "LINEAR":
+                    rows_by_handle[handle] = (normalized_type, row)
 
             try:
                 for dimtype, row in raw.decode_dimension_entities(decode_path):
-                    dimension_rows.append((str(dimtype).upper(), row))
-                used_bulk_decoder = True
+                    _put_row(str(dimtype), row)
             except Exception:
-                used_bulk_decoder = False
+                pass
 
             def _append_rows(dimtype: str, decode_fn) -> None:
                 try:
@@ -1707,18 +1725,17 @@ class Layout:
                 except Exception:
                     rows = []
                 for row in rows:
-                    dimension_rows.append((dimtype, row))
+                    _put_row(dimtype, row)
 
-            if not used_bulk_decoder:
-                _append_rows("LINEAR", raw.decode_dim_linear_entities)
-                _append_rows("ORDINATE", raw.decode_dim_ordinate_entities)
-                _append_rows("ALIGNED", raw.decode_dim_aligned_entities)
-                _append_rows("ANG3PT", raw.decode_dim_ang3pt_entities)
-                _append_rows("ANG2LN", raw.decode_dim_ang2ln_entities)
-                _append_rows("RADIUS", raw.decode_dim_radius_entities)
-                _append_rows("DIAMETER", raw.decode_dim_diameter_entities)
+            _append_rows("LINEAR", raw.decode_dim_linear_entities)
+            _append_rows("ORDINATE", raw.decode_dim_ordinate_entities)
+            _append_rows("ALIGNED", raw.decode_dim_aligned_entities)
+            _append_rows("ANG3PT", raw.decode_dim_ang3pt_entities)
+            _append_rows("ANG2LN", raw.decode_dim_ang2ln_entities)
+            _append_rows("RADIUS", raw.decode_dim_radius_entities)
+            _append_rows("DIAMETER", raw.decode_dim_diameter_entities)
 
-            dimension_rows.sort(key=lambda item: item[1][0])
+            dimension_rows = sorted(rows_by_handle.values(), key=lambda item: int(item[1][0]))
             for dimtype, row in dimension_rows:
                 (
                     handle,
@@ -1881,6 +1898,13 @@ def _polyline_2d_flags_info(flags: int) -> dict[str, bool]:
         "is_polyface_mesh": bool(value & 0x40),
         "continuous_linetype": bool(value & 0x80),
     }
+
+
+def _lwpolyline_closed(flags: int) -> bool:
+    value = int(flags)
+    # Some DWG variants store LWPOLYLINE close-state in bit 9 (0x200)
+    # instead of the DXF bit-0 flag.
+    return bool((value & 0x01) or (value & 0x200))
 
 
 def _polyline_2d_should_interpolate(
@@ -2938,13 +2962,31 @@ def _line_arc_circle_rows(
 ]:
     try:
         line_rows, arc_rows, circle_rows = raw.decode_line_arc_circle_entities(path)
-        return list(line_rows), list(arc_rows), list(circle_rows)
+        line_rows_list = list(line_rows)
+        if not _has_implausible_line_rows(line_rows_list):
+            return line_rows_list, list(arc_rows), list(circle_rows)
     except Exception:
-        return (
-            list(raw.decode_line_entities(path)),
-            list(raw.decode_arc_entities(path)),
-            list(raw.decode_circle_entities(path)),
-        )
+        pass
+    return (
+        list(raw.decode_line_entities(path)),
+        list(raw.decode_arc_entities(path)),
+        list(raw.decode_circle_entities(path)),
+    )
+
+
+def _has_implausible_line_rows(
+    line_rows: list[tuple[int, float, float, float, float, float, float]],
+) -> bool:
+    for row in line_rows:
+        if not isinstance(row, tuple) or len(row) < 7:
+            continue
+        _, sx, sy, sz, ex, ey, ez = row
+        values = (sx, sy, sz, ex, ey, ez)
+        if any(not math.isfinite(value) for value in values):
+            return True
+        if max(abs(value) for value in values) > 1.0e8:
+            return True
+    return False
 
 
 def _insert_minsert_rows(

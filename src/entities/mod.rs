@@ -114,8 +114,8 @@ pub use point::{
     PointEntity,
 };
 pub use polyline_2d::{
-    decode_polyline_2d, decode_polyline_2d_r14, Polyline2dEntity, PolylineCurveType,
-    PolylineFlagsInfo,
+    decode_polyline_2d, decode_polyline_2d_r14, decode_polyline_2d_r2007, decode_polyline_2d_r2010,
+    decode_polyline_2d_r2013, Polyline2dEntity, PolylineCurveType, PolylineFlagsInfo,
 };
 pub use polyline_3d::{
     decode_polyline_3d, decode_polyline_3d_r2007, decode_polyline_3d_r2010,
@@ -162,7 +162,10 @@ pub use tolerance::{
 pub use trace::{
     decode_trace, decode_trace_r2007, decode_trace_r2010, decode_trace_r2013, TraceEntity,
 };
-pub use vertex_2d::{decode_vertex_2d, Vertex2dEntity};
+pub use vertex_2d::{
+    decode_vertex_2d, decode_vertex_2d_r2007, decode_vertex_2d_r2010, decode_vertex_2d_r2013,
+    Vertex2dEntity,
+};
 pub use vertex_3d::{
     decode_vertex_3d, decode_vertex_3d_r2007, decode_vertex_3d_r2010, decode_vertex_3d_r2013,
     Vertex3dEntity,
