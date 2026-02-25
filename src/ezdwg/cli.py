@@ -149,7 +149,12 @@ def _build_parser() -> argparse.ArgumentParser:
     convert_parser.add_argument(
         "--native-dimensions",
         action="store_true",
-        help="Keep DIMENSION entities instead of exploding them to primitive geometry.",
+        help="Keep DIMENSION entities instead of exploding them to primitive geometry (default).",
+    )
+    convert_parser.add_argument(
+        "--explode-dimensions",
+        action="store_true",
+        help="Explode DIMENSION entities to primitive geometry (legacy behavior).",
     )
     convert_parser.add_argument(
         "--flatten-inserts",
@@ -351,7 +356,7 @@ def _run_convert(
     include_unsupported: bool = False,
     preserve_colors: bool = True,
     modelspace_only: bool = False,
-    explode_dimensions: bool = True,
+    explode_dimensions: bool = False,
     flatten_inserts: bool = False,
 ) -> int:
     dwg_path = Path(input_path)
@@ -429,6 +434,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "inspect":
         return _run_inspect(args.path, verbose=bool(args.verbose))
     if args.command == "convert":
+        explode_dimensions = bool(args.explode_dimensions)
+        if bool(args.native_dimensions):
+            explode_dimensions = False
         return _run_convert(
             args.input_path,
             args.output_path,
@@ -438,7 +446,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             include_unsupported=bool(args.include_unsupported),
             preserve_colors=not bool(args.no_colors),
             modelspace_only=bool(args.modelspace_only),
-            explode_dimensions=not bool(args.native_dimensions),
+            explode_dimensions=explode_dimensions,
             flatten_inserts=bool(args.flatten_inserts),
         )
     if args.command == "write":

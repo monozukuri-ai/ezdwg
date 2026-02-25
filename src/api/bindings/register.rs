@@ -41,6 +41,10 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_insert_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_minsert_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_insert_minsert_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        decode_insert_minsert_dimension_entities,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(decode_block_header_names, module)?)?;
     module.add_function(wrap_pyfunction!(decode_block_entity_names, module)?)?;
     module.add_function(wrap_pyfunction!(decode_polyline_2d_entities, module)?)?;

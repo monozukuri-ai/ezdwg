@@ -126,6 +126,11 @@ type DimLinearDecodeFn = for<'a> fn(
 type InsertEntityRow = (u64, f64, f64, f64, f64, f64, f64, f64, Option<String>);
 type MInsertEntityRow = (u64, f64, f64, f64, f64, f64, f64, f64, MInsertArrayRow);
 type InsertMInsertRows = (Vec<InsertEntityRow>, Vec<MInsertEntityRow>);
+type InsertMInsertDimensionRows = (
+    Vec<InsertEntityRow>,
+    Vec<MInsertEntityRow>,
+    Vec<DimTypedEntityRow>,
+);
 type BlockHeaderNameRow = (u64, String);
 type BlockEntityNameRow = (u64, String, String);
 type Polyline2dEntityRow = (u64, u16, u16, f64, f64, f64, f64);

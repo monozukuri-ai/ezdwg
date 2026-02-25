@@ -575,6 +575,45 @@ pub fn decode_insert_minsert_entities(
 }
 
 #[pyfunction(signature = (path, limit=None))]
+pub fn decode_insert_minsert_dimension_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<InsertMInsertDimensionRows> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut state =
+        prepare_insert_name_resolution_state(&decoder, &dynamic_types, &index, best_effort)?;
+    let inserts = decode_insert_entities_with_state(
+        &decoder,
+        &dynamic_types,
+        &index,
+        best_effort,
+        &mut state,
+        limit,
+    )?;
+    let minserts = decode_minsert_entities_with_state(
+        &decoder,
+        &dynamic_types,
+        &index,
+        best_effort,
+        &mut state,
+        limit,
+    )?;
+    let dimensions = decode_dimension_entities_with_state(
+        &decoder,
+        &dynamic_types,
+        &index,
+        best_effort,
+        &state,
+        limit,
+    )?;
+    Ok((inserts, minserts, dimensions))
+}
+
+#[pyfunction(signature = (path, limit=None))]
 pub fn decode_block_header_names(
     path: &str,
     limit: Option<usize>,

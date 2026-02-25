@@ -334,3 +334,67 @@ def test_dimension_entity_bulk_decoder_merges_legacy_subtypes_without_duplicates
     assert len(entities) == 2
     assert [entity.handle for entity in entities] == [321, 400]
     assert [entity.dxf["dimtype"] for entity in entities] == ["LINEAR", "ANG3PT"]
+
+
+def test_query_uses_combined_insert_minsert_dimension_decoder(monkeypatch) -> None:
+    monkeypatch.setattr(document_module, "_entity_style_map", lambda _path: {})
+    monkeypatch.setattr(document_module, "_layer_color_map", lambda _path: {})
+    monkeypatch.setattr(document_module.raw, "decode_block_header_names", lambda _path: [])
+    document_module._block_header_name_map.cache_clear()
+
+    row_linear = (
+        700,
+        "<>",
+        (0.0, 0.0, 0.0),
+        (1.0, 0.0, 0.0),
+        (2.0, 0.0, 0.0),
+        (1.0, 0.5, 0.0),
+        None,
+        ((0.0, 0.0, 1.0), (1.0, 1.0, 1.0)),
+        (0.0, 0.0, 0.0, 0.0),
+        (0, 2.0, None, None, None, 0.0),
+        (None, None),
+    )
+
+    calls = {"combined": 0}
+
+    def _combined(_path):
+        calls["combined"] += 1
+        return (
+            [(900, 1.0, 2.0, 0.0, 1.0, 1.0, 1.0, 0.0, "BLK_A")],
+            [],
+            [("LINEAR", row_linear)],
+        )
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_insert_minsert_dimension_entities",
+        _combined,
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_dimension_entities",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("bulk dimension decoder should not be called")
+        ),
+    )
+    monkeypatch.setattr(document_module.raw, "decode_dim_linear_entities", lambda _path: [row_linear])
+    monkeypatch.setattr(document_module.raw, "decode_dim_ordinate_entities", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_dim_aligned_entities", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_dim_ang3pt_entities", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_dim_ang2ln_entities", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_dim_radius_entities", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_dim_diameter_entities", lambda _path: [])
+
+    doc = Document(
+        path="dummy_combined_dimension.dwg",
+        version="AC1018",
+        decode_path="dummy_combined_dimension.dwg",
+        decode_version="AC1018",
+    )
+    layout = Layout(doc=doc, name="MODELSPACE")
+    entities = list(layout.query("INSERT MINSERT DIMENSION"))
+
+    assert calls["combined"] == 1
+    assert [entity.dxftype for entity in entities] == ["INSERT", "DIMENSION"]
+    assert entities[1].dxf["dimtype"] == "LINEAR"

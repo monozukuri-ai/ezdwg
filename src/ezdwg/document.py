@@ -157,14 +157,40 @@ class Layout:
         if sum(1 for dxftype in type_set if dxftype in _BULK_PRIMITIVE_TYPES) >= 2:
             bulk_rows = _line_arc_circle_rows(self.doc.decode_path)
         insert_minsert_rows = None
+        dimension_rows = None
         if "INSERT" in type_set and "MINSERT" in type_set:
-            insert_minsert_rows = _insert_minsert_rows(self.doc.decode_path)
+            decode_combined = getattr(raw, "decode_insert_minsert_dimension_entities", None)
+            if "DIMENSION" in type_set and callable(decode_combined):
+                try:
+                    insert_rows, minsert_rows, dim_rows = decode_combined(self.doc.decode_path)
+                    insert_minsert_rows = (list(insert_rows), list(minsert_rows))
+                    dimension_rows = list(dim_rows)
+                except Exception:
+                    insert_minsert_rows = _insert_minsert_rows(self.doc.decode_path)
+            else:
+                insert_minsert_rows = _insert_minsert_rows(self.doc.decode_path)
+        if include_styles:
+            entity_style_map = _entity_style_map(self.doc.decode_path)
+            layer_color_map = _layer_color_map(self.doc.decode_path)
+            layer_color_overrides = _layer_color_overrides(
+                self.doc.decode_version,
+                entity_style_map,
+                layer_color_map,
+            )
+        else:
+            entity_style_map = {}
+            layer_color_map = {}
+            layer_color_overrides = None
         for dxftype in type_set:
             yield from self._iter_type(
                 dxftype,
                 bulk_rows=bulk_rows,
                 insert_minsert_rows=insert_minsert_rows,
                 include_styles=include_styles,
+                entity_style_map=entity_style_map,
+                layer_color_map=layer_color_map,
+                layer_color_overrides=layer_color_overrides,
+                dimension_rows=dimension_rows,
             )
 
     def plot(self, *args, **kwargs):
@@ -193,19 +219,28 @@ class Layout:
         ]
         | None = None,
         insert_minsert_rows: tuple[list[tuple], list[tuple]] | None = None,
+        dimension_rows: list[tuple[str, tuple]] | None = None,
         include_styles: bool = True,
+        entity_style_map: dict[int, tuple[int | None, int | None, int]] | None = None,
+        layer_color_map: dict[int, tuple[int, int | None]] | None = None,
+        layer_color_overrides: dict[int, tuple[int, int | None]] | None = None,
     ) -> Iterator[Entity]:
         decode_path = self.doc.decode_path
-        if include_styles:
-            entity_style_map = _entity_style_map(decode_path)
-            layer_color_map = _layer_color_map(decode_path)
-            layer_color_overrides = _layer_color_overrides(
-                self.doc.decode_version, entity_style_map, layer_color_map
-            )
-        else:
+        if not include_styles:
             entity_style_map = {}
             layer_color_map = {}
             layer_color_overrides = None
+        else:
+            if entity_style_map is None:
+                entity_style_map = _entity_style_map(decode_path)
+            if layer_color_map is None:
+                layer_color_map = _layer_color_map(decode_path)
+            if layer_color_overrides is None:
+                layer_color_overrides = _layer_color_overrides(
+                    self.doc.decode_version,
+                    entity_style_map,
+                    layer_color_map,
+                )
         if dxftype == "LINE":
             if bulk_rows is not None:
                 line_rows = bulk_rows[0]
@@ -1714,11 +1749,31 @@ class Layout:
                 if existing_type == "LINEAR" and normalized_type != "LINEAR":
                     rows_by_handle[handle] = (normalized_type, row)
 
-            try:
-                for dimtype, row in raw.decode_dimension_entities(decode_path):
-                    _put_row(str(dimtype), row)
-            except Exception:
-                pass
+            bulk_decode_ok = False
+            bulk_types: set[str] = set()
+            bulk_rows_iter: list[tuple[str, tuple]]
+            if dimension_rows is not None:
+                bulk_rows_iter = list(dimension_rows)
+                bulk_decode_ok = True
+            else:
+                try:
+                    bulk_rows_iter = list(raw.decode_dimension_entities(decode_path))
+                    bulk_decode_ok = True
+                except Exception:
+                    bulk_rows_iter = []
+                    bulk_decode_ok = False
+            for dimtype, row in bulk_rows_iter:
+                normalized_type = str(dimtype).upper()
+                bulk_types.add(normalized_type)
+                _put_row(normalized_type, row)
+            if not bulk_rows_iter:
+                bulk_decode_ok = False
+
+            use_legacy_subtype_fallback = (
+                not bulk_decode_ok
+                or not rows_by_handle
+                or bulk_types.issubset({"LINEAR"})
+            )
 
             def _append_rows(dimtype: str, decode_fn) -> None:
                 try:
@@ -1728,13 +1783,14 @@ class Layout:
                 for row in rows:
                     _put_row(dimtype, row)
 
-            _append_rows("LINEAR", raw.decode_dim_linear_entities)
-            _append_rows("ORDINATE", raw.decode_dim_ordinate_entities)
-            _append_rows("ALIGNED", raw.decode_dim_aligned_entities)
-            _append_rows("ANG3PT", raw.decode_dim_ang3pt_entities)
-            _append_rows("ANG2LN", raw.decode_dim_ang2ln_entities)
-            _append_rows("RADIUS", raw.decode_dim_radius_entities)
-            _append_rows("DIAMETER", raw.decode_dim_diameter_entities)
+            if use_legacy_subtype_fallback:
+                _append_rows("LINEAR", raw.decode_dim_linear_entities)
+                _append_rows("ORDINATE", raw.decode_dim_ordinate_entities)
+                _append_rows("ALIGNED", raw.decode_dim_aligned_entities)
+                _append_rows("ANG3PT", raw.decode_dim_ang3pt_entities)
+                _append_rows("ANG2LN", raw.decode_dim_ang2ln_entities)
+                _append_rows("RADIUS", raw.decode_dim_radius_entities)
+                _append_rows("DIAMETER", raw.decode_dim_diameter_entities)
 
             dimension_rows = sorted(rows_by_handle.values(), key=lambda item: int(item[1][0]))
             for dimtype, row in dimension_rows:
@@ -2964,6 +3020,7 @@ def _block_and_endblk_name_maps(path: str) -> tuple[dict[int, str], dict[int, st
 
 @lru_cache(maxsize=16)
 def _block_header_name_map(path: str) -> dict[int, str]:
+    valid_handles = set(_entity_handles_by_type_name(path, "BLOCK_HEADER"))
     try:
         rows = raw.decode_block_header_names(path)
     except Exception:
@@ -2979,9 +3036,12 @@ def _block_header_name_map(path: str) -> dict[int, str]:
         if not name:
             continue
         try:
-            mapping[int(raw_handle)] = name
+            handle = int(raw_handle)
         except Exception:
             continue
+        if valid_handles and handle not in valid_handles:
+            continue
+        mapping[handle] = name
     return mapping
 
 

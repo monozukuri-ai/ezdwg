@@ -1886,6 +1886,205 @@ def test_write_dimension_native_placeholder_prefers_block_fallback() -> None:
     assert inserts[0].dxf.name == "*D2"
 
 
+def test_write_insert_skips_layout_pseudo_block_names() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+
+    written = convert_module._write_entity_to_modelspace_unsafe(
+        modelspace,
+        Entity(
+            dxftype="INSERT",
+            handle=4100,
+            dxf={
+                "name": "*Paper_Space",
+                "insert": (10.0, 20.0, 0.0),
+                "xscale": 1.0,
+                "yscale": 1.0,
+                "zscale": 1.0,
+                "rotation": 0.0,
+            },
+        ),
+        explode_dimensions=False,
+    )
+
+    assert written is True
+    assert len(list(modelspace.query("INSERT"))) == 0
+    assert len(list(modelspace.query("POINT"))) == 0
+
+
+def test_write_insert_skips_empty_block_definitions() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    doc.blocks.new(name="EMPTY_BLK")
+    modelspace = doc.modelspace()
+
+    written = convert_module._write_entity_to_modelspace_unsafe(
+        modelspace,
+        Entity(
+            dxftype="INSERT",
+            handle=4103,
+            dxf={
+                "name": "EMPTY_BLK",
+                "insert": (10.0, 20.0, 0.0),
+                "xscale": 1.0,
+                "yscale": 1.0,
+                "zscale": 1.0,
+                "rotation": 0.0,
+            },
+        ),
+        explode_dimensions=False,
+    )
+
+    assert written is True
+    assert len(list(modelspace.query("INSERT"))) == 0
+
+
+def test_write_insert_skips_placeholder_anonymous_dimension_insert() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+
+    written = convert_module._write_entity_to_modelspace_unsafe(
+        modelspace,
+        Entity(
+            dxftype="INSERT",
+            handle=4104,
+            dxf={
+                "name": "*D180",
+                "insert": (0.0, 0.0, 0.0),
+                "xscale": 1.0,
+                "yscale": 1.0,
+                "zscale": 1.0,
+                "rotation": 0.0,
+            },
+        ),
+        explode_dimensions=False,
+    )
+
+    assert written is True
+    assert len(list(modelspace.query("INSERT"))) == 0
+
+
+def test_write_insert_skips_nested_anonymous_dimension_block() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    child = doc.blocks.new(name="*D_CHILD")
+    child.add_line((0.0, 0.0), (1.0, 0.0))
+    root = doc.blocks.new(name="*D_ROOT")
+    root.add_blockref("*D_CHILD", (0.0, 0.0))
+    modelspace = doc.modelspace()
+
+    written = convert_module._write_entity_to_modelspace_unsafe(
+        modelspace,
+        Entity(
+            dxftype="INSERT",
+            handle=4105,
+            dxf={
+                "name": "*D_ROOT",
+                "insert": (10.0, 20.0, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+                "rotation": 0.0,
+            },
+        ),
+        explode_dimensions=False,
+    )
+
+    assert written is True
+    assert len(list(modelspace.query("INSERT"))) == 0
+
+
+def test_write_insert_skips_suspicious_scaled_anonymous_dimension_block() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    block = doc.blocks.new(name="*D_BIG")
+    block.add_line((20000.0, 30000.0), (20100.0, 30000.0))
+    modelspace = doc.modelspace()
+
+    written = convert_module._write_entity_to_modelspace_unsafe(
+        modelspace,
+        Entity(
+            dxftype="INSERT",
+            handle=4106,
+            dxf={
+                "name": "*D_BIG",
+                "insert": (100.0, 200.0, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+                "rotation": 0.0,
+            },
+        ),
+        explode_dimensions=False,
+    )
+
+    assert written is True
+    assert len(list(modelspace.query("INSERT"))) == 0
+
+
+def test_write_lwpolyline_drops_degenerate_width_only_geometry() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+
+    written = convert_module._write_entity_to_modelspace_unsafe(
+        modelspace,
+        Entity(
+            dxftype="LWPOLYLINE",
+            handle=4101,
+            dxf={
+                "points": [
+                    (0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0),
+                ],
+                "widths": [(1.0, 0.0), (1.0, 0.0), (1.0, 0.0)],
+                "bulges": [0.0, 0.0, 0.0],
+                "closed": False,
+            },
+        ),
+        explode_dimensions=False,
+    )
+
+    assert written is True
+    assert len(list(modelspace.query("LWPOLYLINE"))) == 0
+
+
+def test_write_entity_skips_implausible_coordinate_ranges() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+
+    written = convert_module._write_entity_to_modelspace(
+        modelspace,
+        Entity(
+            dxftype="SOLID",
+            handle=4102,
+            dxf={
+                "points": [
+                    (1.0e200, 0.0, 0.0),
+                    (0.0, 1.0e200, 0.0),
+                    (0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0),
+                ]
+            },
+        ),
+        explode_dimensions=False,
+    )
+
+    assert written is False
+    assert len(list(modelspace.query("SOLID"))) == 0
+
+
 def test_to_dxf_vertex_filter_writes_owner_polyline(monkeypatch, tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 

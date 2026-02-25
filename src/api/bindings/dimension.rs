@@ -103,10 +103,28 @@ pub fn decode_dimension_entities(
     let index = decoder.build_object_index().map_err(to_py_err)?;
     let insert_name_state =
         prepare_insert_name_resolution_state(&decoder, &dynamic_types, &index, best_effort)?;
+    decode_dimension_entities_with_state(
+        &decoder,
+        &dynamic_types,
+        &index,
+        best_effort,
+        &insert_name_state,
+        limit,
+    )
+}
+
+fn decode_dimension_entities_with_state(
+    decoder: &decoder::Decoder<'_>,
+    dynamic_types: &HashMap<u16, String>,
+    index: &objects::ObjectIndex,
+    best_effort: bool,
+    insert_name_state: &InsertNameResolutionState,
+    limit: Option<usize>,
+) -> PyResult<Vec<DimTypedEntityRow>> {
     let mut result: Vec<DimTypedEntityRow> = Vec::new();
 
     for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
         else {
             continue;
         };
@@ -116,9 +134,9 @@ pub fn decode_dimension_entities(
             &header,
             obj.handle.0,
             decoder.version(),
-            &dynamic_types,
+            dynamic_types,
             best_effort,
-            &insert_name_state,
+            insert_name_state,
         )? {
             result.push((dimtype.to_string(), row));
             if let Some(limit) = limit {
@@ -171,6 +189,7 @@ fn decode_dimension_typed_row(
             entity.common.anonymous_block_handle,
             &insert_name_state.known_block_handles,
             &insert_name_state.named_block_handles,
+            &insert_name_state.block_header_names,
         );
         return Ok(Some((
             spec.dimtype,
@@ -480,6 +499,7 @@ fn recover_dimension_anonymous_block_handle_r2010_plus(
     parsed_block_handle: Option<u64>,
     known_block_handles: &HashSet<u64>,
     named_block_handles: &HashSet<u64>,
+    block_header_names: &HashMap<u64, String>,
 ) -> Option<u64> {
     if !matches!(
         version,
@@ -492,11 +512,6 @@ fn recover_dimension_anonymous_block_handle_r2010_plus(
     }
 
     let parsed_block_handle = parsed_block_handle.filter(|handle| *handle != 0);
-    if let Some(handle) = parsed_block_handle {
-        if known_block_handles.contains(&handle) {
-            return Some(handle);
-        }
-    }
 
     let mut base_handles = vec![object_handle];
     if object_handle > 1 {
@@ -557,6 +572,15 @@ fn recover_dimension_anonymous_block_handle_r2010_plus(
 
     let expected_end_bit = resolve_r2010_object_data_end_bit(api_header).ok();
     let mut best: Option<(u64, u64)> = None;
+    if let Some(handle) = parsed_block_handle {
+        if known_block_handles.contains(&handle) {
+            let mut score = dimension_block_name_penalty(handle, block_header_names);
+            if !named_block_handles.is_empty() && named_block_handles.contains(&handle) {
+                score = score.saturating_sub(8);
+            }
+            best = Some((score, handle));
+        }
+    }
     for end_bit in end_bits.iter().copied() {
         for base_handle in base_handles.iter().copied() {
             let mut reader = record.bit_reader();
@@ -604,6 +628,9 @@ fn recover_dimension_anonymous_block_handle_r2010_plus(
             if !named_block_handles.is_empty() && named_block_handles.contains(&block_handle) {
                 score = score.saturating_sub(8);
             }
+            score = score.saturating_add(
+                dimension_block_name_penalty(block_handle, block_header_names),
+            );
             match best {
                 Some((best_score, _)) if best_score <= score => {}
                 _ => best = Some((score, block_handle)),
@@ -621,7 +648,7 @@ fn recover_dimension_anonymous_block_handle_r2010_plus(
                 }
                 reader.set_bit_pos(end_bit);
                 let mut prev_handle = base_handle;
-                for index in 0..48u64 {
+                for index in 0..256u64 {
                     let candidate = if chained_base {
                         match read_handle_reference_chained(&mut reader, &mut prev_handle) {
                             Ok(value) => value,
@@ -649,6 +676,8 @@ fn recover_dimension_anonymous_block_handle_r2010_plus(
                     if !named_block_handles.is_empty() && named_block_handles.contains(&candidate) {
                         score = score.saturating_sub(8);
                     }
+                    score =
+                        score.saturating_add(dimension_block_name_penalty(candidate, block_header_names));
                     if !chained_base {
                         score = score.saturating_add(6);
                     } else {
@@ -664,4 +693,33 @@ fn recover_dimension_anonymous_block_handle_r2010_plus(
     }
 
     best.map(|(_, handle)| handle).or(parsed_block_handle)
+}
+
+fn dimension_block_name_penalty(
+    handle: u64,
+    block_header_names: &HashMap<u64, String>,
+) -> u64 {
+    let Some(raw_name) = block_header_names.get(&handle) else {
+        return 96;
+    };
+    let name = raw_name.trim();
+    if name.is_empty() {
+        return 96;
+    }
+    let upper = name.to_ascii_uppercase();
+    if upper == "*D" {
+        // Many drawings contain placeholder duplicate "*D" names; selecting
+        // them eagerly collapses distinct anonymous dimension graphics.
+        return 1024;
+    }
+    if let Some(suffix) = upper.strip_prefix("*D") {
+        if !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()) {
+            return 0;
+        }
+        return 80;
+    }
+    if upper.starts_with('*') {
+        return 160;
+    }
+    240
 }
