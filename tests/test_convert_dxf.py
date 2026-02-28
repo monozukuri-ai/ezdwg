@@ -795,6 +795,339 @@ def test_prepare_insert_for_flatten_normalizes_modelspace_alias_rotation_270() -
     assert abs(float(insert.dxf.insert.y) - 180.0) < 1.0e-6
 
 
+def test_prepare_insert_for_flatten_drops_suspicious_scaled_anonymous_dimension_insert() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    block = doc.blocks.new(name="*D_BIG")
+    block.add_line((20000.0, 30000.0), (20100.0, 30000.0))
+    modelspace = doc.modelspace()
+    insert = modelspace.add_blockref(
+        "*D_BIG",
+        (100.0, 200.0),
+        dxfattribs={"xscale": 60.0, "yscale": 60.0, "zscale": 60.0, "rotation": 0.0},
+    )
+
+    drop_insert = convert_module._prepare_insert_for_flatten(modelspace, insert)
+
+    assert drop_insert is True
+
+
+def test_restore_known_layout_frame_polylines_adds_missing_left_frames() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+    modelspace.add_lwpolyline(
+        [(1050.0, 1500.0), (24180.0, 1500.0), (24180.0, 17220.0), (1050.0, 17220.0)],
+        close=True,
+        dxfattribs={"layer": "FRAME"},
+    )
+    modelspace.add_lwpolyline(
+        [
+            (28450.163173, 1500.0),
+            (51580.163173, 1500.0),
+            (51580.163173, 17220.0),
+            (28450.163173, 17220.0),
+        ],
+        close=True,
+        dxfattribs={"layer": "FRAME"},
+    )
+
+    convert_module._restore_known_layout_frame_polylines(modelspace)
+
+    rects = [
+        convert_module._axis_aligned_lwpolyline_rect_bbox(entity)
+        for entity in modelspace.query("LWPOLYLINE")
+    ]
+
+    def _has_rect(
+        min_x: float,
+        max_x: float,
+        min_y: float,
+        max_y: float,
+        *,
+        tol: float = 1.0e-6,
+    ) -> bool:
+        for rect in rects:
+            if rect is None:
+                continue
+            rect_min_x, rect_max_x, rect_min_y, rect_max_y = rect
+            if (
+                abs(rect_min_x - min_x) <= tol
+                and abs(rect_max_x - max_x) <= tol
+                and abs(rect_min_y - min_y) <= tol
+                and abs(rect_max_y - max_y) <= tol
+            ):
+                return True
+        return False
+
+    def _has_line(
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        *,
+        tol: float = 1.0e-6,
+    ) -> bool:
+        for entity in modelspace.query("LINE"):
+            start = entity.dxf.start
+            end = entity.dxf.end
+            same = (
+                abs(float(start.x) - x1) <= tol
+                and abs(float(start.y) - y1) <= tol
+                and abs(float(end.x) - x2) <= tol
+                and abs(float(end.y) - y2) <= tol
+            )
+            reverse = (
+                abs(float(start.x) - x2) <= tol
+                and abs(float(start.y) - y2) <= tol
+                and abs(float(end.x) - x1) <= tol
+                and abs(float(end.y) - y1) <= tol
+            )
+            if same or reverse:
+                return True
+        return False
+
+    assert _has_rect(1050.0, 24180.0, 600.0, 17220.0)
+    assert _has_rect(0.0, 25230.0, 0.0, 17820.0)
+    assert not _has_rect(28450.163173, 51580.163173, 600.0, 17220.0)
+    assert _has_line(14850.0, 1500.0, 24180.0, 1500.0)
+    assert _has_line(19830.0, 975.0, 22380.0, 975.0)
+    assert _has_line(22380.0, 600.0, 22380.0, 1500.0)
+
+
+def test_restore_known_layout_frame_polylines_noop_without_signature() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+    modelspace.add_lwpolyline(
+        [(3000.0, 2000.0), (18000.0, 2000.0), (18000.0, 12000.0), (3000.0, 12000.0)],
+        close=True,
+        dxfattribs={"layer": "FRAME"},
+    )
+    before = len(list(modelspace.query("LWPOLYLINE")))
+
+    convert_module._restore_known_layout_frame_polylines(modelspace)
+
+    after = len(list(modelspace.query("LWPOLYLINE")))
+    assert after == before
+
+
+def test_restore_known_layout_frame_polylines_removes_misaligned_title_ghost_lines() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+    modelspace.add_lwpolyline(
+        [(1050.0, 1500.0), (24180.0, 1500.0), (24180.0, 17220.0), (1050.0, 17220.0)],
+        close=True,
+        dxfattribs={"layer": "FRAME"},
+    )
+    # Known malformed fragment observed in this Open30-derived series.
+    ghost_lines = [
+        modelspace.add_line((18894.215, 1540.66), (18894.215, 590.66)),
+        modelspace.add_line((16124.216, 1540.66), (16124.216, 590.66)),
+        modelspace.add_line((18894.215, 590.66), (16124.216, 590.66)),
+        modelspace.add_line((18524.215, 1540.66), (18524.215, 890.66)),
+        modelspace.add_line((15824.216, 1540.66), (15824.216, 890.66)),
+        modelspace.add_line((18524.215, 890.66), (15824.216, 890.66)),
+    ]
+
+    convert_module._restore_known_layout_frame_polylines(modelspace)
+
+    remaining_ids = {id(entity) for entity in modelspace}
+    for ghost in ghost_lines:
+        assert id(ghost) not in remaining_ids
+
+
+def test_restore_known_layout_frame_polylines_removes_top_left_ghost_lines() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+    modelspace.add_lwpolyline(
+        [(1050.0, 1500.0), (24180.0, 1500.0), (24180.0, 17220.0), (1050.0, 17220.0)],
+        close=True,
+        dxfattribs={"layer": "FRAME"},
+    )
+    ghost_lines = [
+        modelspace.add_line((-3590.659, 18524.215), (-890.66, 18524.215)),
+        modelspace.add_line((-890.66, 17874.215), (-890.66, 18524.215)),
+        modelspace.add_line((-590.66, 17944.215), (-590.66, 18894.215)),
+    ]
+
+    convert_module._restore_known_layout_frame_polylines(modelspace)
+
+    remaining_ids = {id(entity) for entity in modelspace}
+    for ghost in ghost_lines:
+        assert id(ghost) not in remaining_ids
+
+
+def test_prune_generated_entities_outside_known_sheet_windows_removes_outside_noise() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+
+    # Signature rectangles for this drawing series.
+    modelspace.add_lwpolyline(
+        [(0.0, 0.0), (25230.0, 0.0), (25230.0, 17820.0), (0.0, 17820.0)],
+        close=True,
+    )
+    modelspace.add_lwpolyline(
+        [(28450.0, 1500.0), (51580.0, 1500.0), (51580.0, 17220.0), (28450.0, 17220.0)],
+        close=True,
+    )
+
+    original_inside = modelspace.add_line((1000.0, 1000.0), (1200.0, 1000.0))
+    original_ids = {id(original_inside)}
+
+    generated_inside = modelspace.add_line((29000.0, 2000.0), (29100.0, 2000.0))
+    outside_short = modelspace.add_line((-890.66, 17874.215), (-890.66, 18524.215))
+    outside_mid = modelspace.add_line((26643.933, 5793.961), (26643.933, 5423.961))
+    outside_long = modelspace.add_line((-3590.659, 18524.215), (-590.66, 18524.215))
+    very_long_outside = modelspace.add_line((25000.0, -1000.0), (32050.0, -1000.0))
+    outside_text = modelspace.add_text("NOISE", dxfattribs={"insert": (26600.0, 5600.0)})
+
+    convert_module._prune_generated_entities_outside_known_sheet_windows(
+        modelspace,
+        original_ids,
+    )
+
+    remaining_ids = {id(entity) for entity in modelspace}
+    assert id(original_inside) in remaining_ids
+    assert id(generated_inside) in remaining_ids
+    assert id(outside_short) not in remaining_ids
+    assert id(outside_mid) not in remaining_ids
+    assert id(outside_long) not in remaining_ids
+    assert id(outside_text) not in remaining_ids
+    assert id(very_long_outside) in remaining_ids
+
+
+def test_prune_generated_entities_outside_known_sheet_windows_accepts_canonical_1050_gap() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+
+    modelspace.add_lwpolyline(
+        [(0.0, 0.0), (25230.0, 0.0), (25230.0, 17820.0), (0.0, 17820.0)],
+        close=True,
+    )
+    # Canonical right sheet window observed in SSS11-1202-Y01 series.
+    modelspace.add_lwpolyline(
+        [(26280.0, 1500.0), (49410.0, 1500.0), (49410.0, 17220.0), (26280.0, 17220.0)],
+        close=True,
+    )
+
+    generated_inside = modelspace.add_line((27000.0, 2500.0), (27100.0, 2500.0))
+    outside_between_windows = modelspace.add_line((25700.0, 2500.0), (25800.0, 2500.0))
+    outside_top_left = modelspace.add_line((-900.0, 18500.0), (-900.0, 17880.0))
+
+    convert_module._prune_generated_entities_outside_known_sheet_windows(
+        modelspace,
+        original_entity_ids=set(),
+    )
+
+    remaining_ids = {id(entity) for entity in modelspace}
+    assert id(generated_inside) in remaining_ids
+    assert id(outside_between_windows) not in remaining_ids
+    assert id(outside_top_left) not in remaining_ids
+
+
+def test_realign_generated_right_sheet_window_moves_generated_right_entities() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+    modelspace.add_lwpolyline(
+        [(0.0, 0.0), (25230.0, 0.0), (25230.0, 17820.0), (0.0, 17820.0)],
+        close=True,
+    )
+    right_frame = modelspace.add_lwpolyline(
+        [(28450.163, 1500.0), (51580.163, 1500.0), (51580.163, 17220.0), (28450.163, 17220.0)],
+        close=True,
+    )
+
+    generated_line = modelspace.add_line((30000.163, 5000.0), (30100.163, 5000.0))
+    original_line = modelspace.add_line((30500.0, 6000.0), (30600.0, 6000.0))
+    original_ids = {id(original_line)}
+
+    convert_module._realign_generated_right_sheet_window(modelspace, original_ids)
+
+    start = generated_line.dxf.start
+    end = generated_line.dxf.end
+    assert abs(float(start.x) - 27830.0) <= 1.0e-3
+    assert abs(float(end.x) - 27930.0) <= 1.0e-3
+
+    # Original entities stay untouched.
+    original_start = original_line.dxf.start
+    assert abs(float(original_start.x) - 30500.0) <= 1.0e-6
+
+    # Right frame should be shifted to the canonical expected window.
+    rect = convert_module._axis_aligned_lwpolyline_rect_bbox(right_frame)
+    assert rect is not None
+    min_x, max_x, _min_y, _max_y = rect
+    assert abs(min_x - 26280.0) <= 1.0e-3
+    assert abs(max_x - 49410.0) <= 1.0e-3
+
+
+def test_dedupe_large_axis_aligned_lwpolyline_rectangles_removes_duplicates() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+
+    first = modelspace.add_lwpolyline(
+        [(1050.0, 1500.0), (24180.0, 1500.0), (24180.0, 17220.0), (1050.0, 17220.0)],
+        close=True,
+        dxfattribs={"layer": "FRAME", "color": 5},
+    )
+    duplicate = modelspace.add_lwpolyline(
+        [(1050.0, 1500.0), (24180.0, 1500.0), (24180.0, 17220.0), (1050.0, 17220.0)],
+        close=True,
+        dxfattribs={"layer": "FRAME", "color": 5},
+    )
+    # Different style should be preserved.
+    different_color = modelspace.add_lwpolyline(
+        [(1050.0, 1500.0), (24180.0, 1500.0), (24180.0, 17220.0), (1050.0, 17220.0)],
+        close=True,
+        dxfattribs={"layer": "FRAME", "color": 3},
+    )
+
+    convert_module._dedupe_large_axis_aligned_lwpolyline_rectangles(modelspace)
+
+    remaining_ids = {id(entity) for entity in modelspace}
+    assert id(first) in remaining_ids
+    assert id(duplicate) not in remaining_ids
+    assert id(different_color) in remaining_ids
+
+
+def test_ensure_layout_pseudo_block_alias_skips_acad_detailviewstyle_insert() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    source = doc.blocks.get("*Model_Space")
+    if source is None:
+        pytest.skip("modelspace block is unavailable")
+    try:
+        doc.blocks.get("ACAD_DETAILVIEWSTYLE")
+    except Exception:
+        doc.blocks.new(name="ACAD_DETAILVIEWSTYLE")
+    source.add_line((0.0, 0.0), (10.0, 0.0))
+    source.add_blockref("ACAD_DETAILVIEWSTYLE", (5.0, 5.0))
+
+    alias_name = convert_module._ensure_layout_pseudo_block_alias(doc, "*Model_Space")
+
+    assert alias_name is not None
+    alias = doc.blocks.get(alias_name)
+    assert alias is not None
+    assert len(list(alias.query("LINE"))) == 1
+    assert len(list(alias.query("INSERT"))) == 0
+
+
 def test_prune_flatten_tiny_generated_clusters_drops_external_small_clusters() -> None:
     ezdxf = pytest.importorskip("ezdxf")
 
@@ -851,6 +1184,172 @@ def test_prune_flatten_tiny_generated_clusters_keeps_internal_small_clusters() -
     remaining_ids = {id(entity) for entity in modelspace}
     assert id(kept_generated) in remaining_ids
     assert id(kept_generated_2) in remaining_ids
+
+
+def test_prune_flatten_tiny_generated_clusters_drops_external_annotation_noise() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+
+    original_entity_ids: set[int] = set()
+    for index in range(260):
+        x = float(index % 26) * 120.0
+        y = float(index // 26) * 120.0
+        line = modelspace.add_line((x, y), (x + 20.0, y))
+        original_entity_ids.add(id(line))
+    for index in range(260):
+        x = 7000.0 + float(index % 26) * 120.0
+        y = float(index // 26) * 120.0
+        line = modelspace.add_line((x, y), (x + 20.0, y))
+        original_entity_ids.add(id(line))
+
+    outside_point = modelspace.add_point((14000.0, 5000.0))
+    outside_text = modelspace.add_text("X", dxfattribs={"insert": (14100.0, 5050.0)})
+    outside_short = modelspace.add_line((14200.0, 5060.0), (14280.0, 5060.0))
+    outside_long = modelspace.add_line((14300.0, 5000.0), (15350.0, 5000.0))
+
+    convert_module._prune_flatten_tiny_generated_clusters(modelspace, original_entity_ids)
+
+    remaining_ids = {id(entity) for entity in modelspace}
+    assert id(outside_point) not in remaining_ids
+    assert id(outside_text) not in remaining_ids
+    assert id(outside_short) not in remaining_ids
+    assert id(outside_long) in remaining_ids
+
+
+def test_prune_flatten_tiny_generated_clusters_keeps_original_external_annotations() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+
+    original_entity_ids: set[int] = set()
+    for index in range(260):
+        x = float(index % 26) * 120.0
+        y = float(index // 26) * 120.0
+        line = modelspace.add_line((x, y), (x + 20.0, y))
+        original_entity_ids.add(id(line))
+    for index in range(260):
+        x = 7000.0 + float(index % 26) * 120.0
+        y = float(index // 26) * 120.0
+        line = modelspace.add_line((x, y), (x + 20.0, y))
+        original_entity_ids.add(id(line))
+
+    original_outside_text = modelspace.add_text("KEEP", dxfattribs={"insert": (14000.0, 5000.0)})
+    original_outside_short = modelspace.add_line((14200.0, 5060.0), (14280.0, 5060.0))
+    original_entity_ids.add(id(original_outside_text))
+    original_entity_ids.add(id(original_outside_short))
+
+    generated_outside_text = modelspace.add_text("DROP", dxfattribs={"insert": (14100.0, 5050.0)})
+
+    convert_module._prune_flatten_tiny_generated_clusters(modelspace, original_entity_ids)
+
+    remaining_ids = {id(entity) for entity in modelspace}
+    assert id(original_outside_text) in remaining_ids
+    assert id(original_outside_short) in remaining_ids
+    assert id(generated_outside_text) not in remaining_ids
+
+
+def test_prune_flatten_tiny_generated_clusters_drops_implausible_original_extent() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+
+    original_entity_ids: set[int] = set()
+    for index in range(260):
+        x = float(index % 26) * 120.0
+        y = float(index // 26) * 120.0
+        line = modelspace.add_line((x, y), (x + 20.0, y))
+        original_entity_ids.add(id(line))
+    for index in range(260):
+        x = 7000.0 + float(index % 26) * 120.0
+        y = float(index // 26) * 120.0
+        line = modelspace.add_line((x, y), (x + 20.0, y))
+        original_entity_ids.add(id(line))
+
+    implausible_arc = modelspace.add_arc((1.0, 1.0), 3.0e20, 0.0, 180.0)
+    implausible_ellipse = modelspace.add_ellipse(
+        center=(-2.0e20, 2000.0),
+        major_axis=(10.0, 0.0),
+        ratio=0.5,
+    )
+    original_entity_ids.add(id(implausible_arc))
+    original_entity_ids.add(id(implausible_ellipse))
+    generated_noise = modelspace.add_text("DROP", dxfattribs={"insert": (14000.0, 5050.0)})
+
+    convert_module._prune_flatten_tiny_generated_clusters(modelspace, original_entity_ids)
+
+    remaining_ids = {id(entity) for entity in modelspace}
+    assert id(implausible_arc) not in remaining_ids
+    assert id(implausible_ellipse) not in remaining_ids
+    assert id(generated_noise) not in remaining_ids
+
+
+def test_prune_flatten_tiny_generated_clusters_drops_near_origin_medium_lines() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+
+    original_entity_ids: set[int] = set()
+    for index in range(260):
+        x = 5000.0 + float(index % 26) * 120.0
+        y = float(index // 26) * 120.0
+        line = modelspace.add_line((x, y), (x + 20.0, y))
+        original_entity_ids.add(id(line))
+    for index in range(260):
+        x = 12000.0 + float(index % 26) * 120.0
+        y = float(index // 26) * 120.0
+        line = modelspace.add_line((x, y), (x + 20.0, y))
+        original_entity_ids.add(id(line))
+
+    near_origin_medium = modelspace.add_line((0.0, 0.0), (-1500.0, 0.0))
+    far_medium = modelspace.add_line((18000.0, 5000.0), (19500.0, 5000.0))
+
+    convert_module._prune_flatten_tiny_generated_clusters(modelspace, original_entity_ids)
+
+    remaining_ids = {id(entity) for entity in modelspace}
+    assert id(near_origin_medium) not in remaining_ids
+    assert id(far_medium) in remaining_ids
+
+
+def test_prune_flatten_tiny_generated_clusters_keeps_footer_band_entities() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+
+    original_entity_ids: set[int] = set()
+    for index in range(260):
+        x = 5000.0 + float(index % 26) * 120.0
+        y = 7000.0 + float(index // 26) * 120.0
+        line = modelspace.add_line((x, y), (x + 20.0, y))
+        original_entity_ids.add(id(line))
+    for index in range(260):
+        x = 12000.0 + float(index % 26) * 120.0
+        y = 7000.0 + float(index // 26) * 120.0
+        line = modelspace.add_line((x, y), (x + 20.0, y))
+        original_entity_ids.add(id(line))
+
+    modelspace.add_lwpolyline(
+        [(1050.0, 1500.0), (24180.0, 1500.0), (24180.0, 17220.0), (1050.0, 17220.0)],
+        close=True,
+    )
+
+    footer_text = modelspace.add_text("TITLE", dxfattribs={"insert": (6000.0, 700.0)})
+    footer_short = modelspace.add_line((6500.0, 800.0), (6600.0, 800.0))
+    origin_text = modelspace.add_text("NOISE", dxfattribs={"insert": (300.0, -80.0)})
+    origin_short = modelspace.add_line((250.0, -50.0), (320.0, -50.0))
+
+    convert_module._prune_flatten_tiny_generated_clusters(modelspace, original_entity_ids)
+
+    remaining_ids = {id(entity) for entity in modelspace}
+    assert id(footer_text) in remaining_ids
+    assert id(footer_short) in remaining_ids
+    assert id(origin_text) not in remaining_ids
+    assert id(origin_short) not in remaining_ids
 
 
 def test_cli_convert_passes_dim_block_policy(monkeypatch, tmp_path: Path) -> None:
@@ -1507,9 +2006,11 @@ def test_to_dxf_block_export_reuses_owner_map_for_helpers(monkeypatch, tmp_path:
     assert result.written_entities == 2
     # Expected calls:
     # 1) block traversal for INSERT references
-    # 2) all block member entities by type
-    # 3) one-time owner polyline fetch reused across blocks
-    assert counter["calls"] == 3
+    # 2) one-time owner polyline fetch reused across blocks
+    #
+    # Block member resolution is now keyed by (handle, dxftype), so it no
+    # longer goes through _entities_by_handle.
+    assert counter["calls"] == 2
 
 
 def test_entities_by_handle_skips_invalid_handles_and_iteration_errors() -> None:
@@ -1672,6 +2173,24 @@ def test_normalize_recursive_block_insert_skips_unresolved_self_reference() -> N
     assert normalized is None
 
 
+def test_normalize_recursive_block_insert_keeps_non_self_cycle_for_non_dimension_block() -> None:
+    entity = Entity(
+        dxftype="INSERT",
+        handle=10,
+        dxf={"name": "ACAD_DETAILVIEWSTYLE", "insert": (0.0, 0.0, 0.0)},
+    )
+
+    normalized = convert_module._normalize_recursive_block_insert(
+        entity,
+        block_name="i",
+        known_block_names={"i", "ACAD_DETAILVIEWSTYLE"},
+        recursive_target_names={"i", "ACAD_DETAILVIEWSTYLE"},
+    )
+
+    assert normalized is not None
+    assert normalized.dxf["name"] == "ACAD_DETAILVIEWSTYLE"
+
+
 def test_normalize_problematic_insert_name_remaps_i_to_open30() -> None:
     entity = Entity(
         dxftype="INSERT",
@@ -1679,9 +2198,10 @@ def test_normalize_problematic_insert_name_remaps_i_to_open30() -> None:
         dxf={
             "name": "i",
             "insert": (0.0, 0.0, 0.0),
-            "xscale": 60.0,
+            "xscale": -60.0,
             "yscale": 60.0,
             "zscale": 60.0,
+            "rotation": 69.60362427681007,
         },
     )
 
@@ -1700,9 +2220,10 @@ def test_normalize_problematic_insert_name_keeps_i_without_open30() -> None:
         dxf={
             "name": "i",
             "insert": (0.0, 0.0, 0.0),
-            "xscale": 60.0,
+            "xscale": -60.0,
             "yscale": 60.0,
             "zscale": 60.0,
+            "rotation": 69.60362427681007,
         },
     )
 
@@ -1733,6 +2254,60 @@ def test_normalize_problematic_insert_name_keeps_i_for_small_scale() -> None:
     )
 
     assert normalized.dxf["name"] == "i"
+
+
+def test_normalize_problematic_insert_name_keeps_i_for_orthogonal_rotation() -> None:
+    entity = Entity(
+        dxftype="INSERT",
+        handle=10,
+        dxf={
+            "name": "i",
+            "insert": (0.0, 0.0, 0.0),
+            "xscale": -60.0,
+            "yscale": 60.0,
+            "zscale": 60.0,
+            "rotation": 270.0,
+        },
+    )
+
+    normalized = convert_module._normalize_problematic_insert_name(
+        entity,
+        available_block_names={"_Open30", "i"},
+    )
+
+    assert normalized.dxf["name"] == "i"
+
+
+def test_entities_by_handle_and_type_keeps_duplicate_handles_by_dxftype() -> None:
+    class _DummyLayout:
+        def query(self, dxftype, include_styles=True):
+            if dxftype == "LINE":
+                return [
+                    Entity(
+                        dxftype="LINE",
+                        handle=42,
+                        dxf={"start": (0.0, 0.0, 0.0), "end": (1.0, 0.0, 0.0)},
+                    )
+                ]
+            if dxftype == "TEXT":
+                return [
+                    Entity(
+                        dxftype="TEXT",
+                        handle=42,
+                        dxf={"text": "A", "insert": (0.0, 0.0, 0.0)},
+                    )
+                ]
+            return []
+
+    result = convert_module._entities_by_handle_and_type(
+        _DummyLayout(),
+        {"LINE", "TEXT"},
+    )
+
+    assert (42, "LINE") in result
+    assert (42, "TEXT") in result
+    assert result[(42, "LINE")].dxftype == "LINE"
+    assert result[(42, "TEXT")].dxftype == "TEXT"
 
 
 def test_deduplicate_layout_pseudo_inserts_by_handle_keeps_first_preserved_insert() -> None:
@@ -1966,6 +2541,29 @@ def test_resolve_block_name_by_handle_does_not_use_positional_fallback(monkeypat
 
     resolved = convert_module._resolve_block_name_by_handle("dummy.dwg", header_rows)
     assert resolved == {100: "BLK_A"}
+
+
+def test_resolve_block_end_name_by_handle_exact_fills_missing_endblk_names(monkeypatch) -> None:
+    header_rows = [
+        (100, 10, 0, 0x04, "BLOCK", "Entity"),
+        (101, 11, 0, 0x05, "ENDBLK", "Entity"),
+        (200, 20, 0, 0x04, "BLOCK", "Entity"),
+        (201, 21, 0, 0x05, "ENDBLK", "Entity"),
+    ]
+
+    monkeypatch.setattr(
+        convert_module.raw,
+        "decode_block_entity_names",
+        lambda _path: [(100, "BLOCK", "BLK_A"), (101, "ENDBLK", "BLK_A")],
+    )
+
+    resolved = convert_module._resolve_block_end_name_by_handle_exact(
+        "dummy.dwg",
+        header_rows=header_rows,
+        block_name_by_handle={100: "BLK_A", 200: "BLK_B"},
+    )
+    assert resolved[101] == "BLK_A"
+    assert resolved[201] == "BLK_B"
 
 
 def test_materialize_export_entities_dedup_skips_only_identical_rows() -> None:
@@ -2600,6 +3198,36 @@ def test_write_insert_keeps_scaled_anonymous_dimension_block_in_smart_policy() -
 
     assert written is True
     assert len(list(modelspace.query("INSERT"))) == 1
+
+
+def test_write_insert_skips_anonymous_dimension_block_with_implausible_extent() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    block = doc.blocks.new(name="*D_BAD")
+    block.add_line((1.0e20, 0.0), (1.0e20 + 100.0, 0.0))
+    modelspace = doc.modelspace()
+
+    written = convert_module._write_entity_to_modelspace_unsafe(
+        modelspace,
+        Entity(
+            dxftype="INSERT",
+            handle=41060,
+            dxf={
+                "name": "*D_BAD",
+                "insert": (100.0, 200.0, 0.0),
+                "xscale": 1.0,
+                "yscale": 1.0,
+                "zscale": 1.0,
+                "rotation": 0.0,
+            },
+        ),
+        explode_dimensions=False,
+        dim_block_policy="smart",
+    )
+
+    assert written is True
+    assert len(list(modelspace.query("INSERT"))) == 0
 
 
 def test_write_insert_skips_suspicious_scaled_anonymous_dimension_block_in_legacy_policy() -> None:
