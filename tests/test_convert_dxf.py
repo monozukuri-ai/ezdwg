@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import math
+from typing import Any
 
 import pytest
 
@@ -660,6 +661,227 @@ def test_cli_convert_flatten_inserts_flag(tmp_path: Path, capsys) -> None:
     assert "written_entities: 1" in captured.out
     assert len(dxf_entities_of_type(output, "INSERT")) == 0
     assert len(dxf_entities_of_type(output, "LINE")) >= 1
+
+
+def test_flatten_modelspace_inserts_normalizes_suspicious_scaled_insert() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    big = doc.blocks.new(name="BIG_ABS")
+    big.add_line((20000.0, 30000.0), (20100.0, 30000.0))
+    small = doc.blocks.new(name="SMALL_LOCAL")
+    small.add_line((0.0, 0.0), (10.0, 0.0))
+    modelspace = doc.modelspace()
+    modelspace.add_blockref("BIG_ABS", (100.0, 200.0), dxfattribs={"xscale": 60.0, "yscale": 60.0, "zscale": 60.0})
+    modelspace.add_blockref("SMALL_LOCAL", (5.0, 5.0))
+
+    convert_module._flatten_modelspace_inserts(modelspace)
+
+    # Suspicious transformed insert is normalized then exploded.
+    assert len(list(modelspace.query("INSERT"))) == 0
+    lines = list(modelspace.query("LINE"))
+    assert len(lines) == 2
+    points = sorted(
+        [
+            (tuple(line.dxf.start), tuple(line.dxf.end))
+            for line in lines
+        ],
+        key=lambda entry: entry[0][0],
+    )
+    assert points[0] == ((5.0, 5.0, 0.0), (15.0, 5.0, 0.0))
+    assert points[1] == ((20100.0, 30200.0, 0.0), (20200.0, 30200.0, 0.0))
+
+
+def test_flatten_modelspace_inserts_prunes_generated_outliers_with_reference_bbox() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    big = doc.blocks.new(name="BIG_ABS")
+    big.add_line((20000.0, 30000.0), (20100.0, 30000.0))
+    small = doc.blocks.new(name="SMALL_LOCAL")
+    small.add_line((0.0, 0.0), (10.0, 0.0))
+    modelspace = doc.modelspace()
+    # Pre-existing primitive defines reference bbox near origin.
+    modelspace.add_line((0.0, 0.0), (100.0, 0.0))
+    modelspace.add_blockref(
+        "BIG_ABS",
+        (100.0, 200.0),
+        dxfattribs={"xscale": 60.0, "yscale": 60.0, "zscale": 60.0},
+    )
+    modelspace.add_blockref("SMALL_LOCAL", (5.0, 5.0))
+
+    convert_module._flatten_modelspace_inserts(modelspace)
+
+    assert len(list(modelspace.query("INSERT"))) == 0
+    lines = list(modelspace.query("LINE"))
+    # Base line + exploded safe insert line. The far-away normalized insert line
+    # should be pruned as an outlier.
+    assert len(lines) == 2
+    points = sorted(
+        [
+            (tuple(line.dxf.start), tuple(line.dxf.end))
+            for line in lines
+        ],
+        key=lambda entry: entry[0][0],
+    )
+    assert points[0] == ((0.0, 0.0, 0.0), (100.0, 0.0, 0.0))
+    assert points[1] == ((5.0, 5.0, 0.0), (15.0, 5.0, 0.0))
+
+
+def test_flatten_modelspace_inserts_keeps_layout_pseudo_references() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+    modelspace.add_line((0.0, 0.0), (1.0, 0.0))
+    modelspace.add_blockref(
+        "*Model_Space",
+        (100.0, 200.0),
+        dxfattribs={"xscale": 60.0, "yscale": 60.0, "zscale": 60.0, "rotation": 90.0},
+    )
+
+    convert_module._flatten_modelspace_inserts(modelspace)
+
+    inserts = list(modelspace.query("INSERT"))
+    assert len(inserts) == 1
+    assert inserts[0].dxf.name == "*Model_Space"
+
+
+def test_prepare_insert_for_flatten_normalizes_modelspace_alias_rotation_90() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    block = doc.blocks.new(name="__EZDWG_LAYOUT_ALIAS_MODEL_SPACE")
+    block.add_line((20000.0, 30000.0), (20010.0, 30020.0))
+    modelspace = doc.modelspace()
+    insert = modelspace.add_blockref(
+        "__EZDWG_LAYOUT_ALIAS_MODEL_SPACE",
+        (100.0, 200.0),
+        dxfattribs={"xscale": 60.0, "yscale": 60.0, "zscale": 60.0, "rotation": 90.0},
+    )
+
+    drop_insert = convert_module._prepare_insert_for_flatten(modelspace, insert)
+
+    assert drop_insert is False
+    assert float(insert.dxf.xscale) == 1.0
+    assert float(insert.dxf.yscale) == 1.0
+    assert float(insert.dxf.zscale) == 1.0
+    assert float(insert.dxf.rotation) == 0.0
+    assert abs(float(insert.dxf.insert.x) - 80.0) < 1.0e-6
+    assert abs(float(insert.dxf.insert.y) - 0.0) < 1.0e-6
+
+
+def test_prepare_insert_for_flatten_normalizes_modelspace_alias_rotation_270() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    block = doc.blocks.new(name="__EZDWG_LAYOUT_ALIAS_MODEL_SPACE")
+    block.add_line((20000.0, 30000.0), (20010.0, 30020.0))
+    modelspace = doc.modelspace()
+    insert = modelspace.add_blockref(
+        "__EZDWG_LAYOUT_ALIAS_MODEL_SPACE",
+        (100.0, 200.0),
+        dxfattribs={"xscale": 60.0, "yscale": 60.0, "zscale": 60.0, "rotation": 270.0},
+    )
+
+    drop_insert = convert_module._prepare_insert_for_flatten(modelspace, insert)
+
+    assert drop_insert is False
+    assert float(insert.dxf.xscale) == 1.0
+    assert float(insert.dxf.yscale) == 1.0
+    assert float(insert.dxf.zscale) == 1.0
+    assert float(insert.dxf.rotation) == 180.0
+    assert abs(float(insert.dxf.insert.x) - 100.0) < 1.0e-6
+    assert abs(float(insert.dxf.insert.y) - 180.0) < 1.0e-6
+
+
+def test_prune_flatten_tiny_generated_clusters_drops_external_small_clusters() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+
+    original_entity_ids: set[int] = set()
+    for index in range(260):
+        x = float(index % 26) * 120.0
+        y = float(index // 26) * 120.0
+        line = modelspace.add_line((x, y), (x + 20.0, y))
+        original_entity_ids.add(id(line))
+    for index in range(260):
+        x = 7000.0 + float(index % 26) * 120.0
+        y = float(index // 26) * 120.0
+        line = modelspace.add_line((x, y), (x + 20.0, y))
+        original_entity_ids.add(id(line))
+
+    kept_generated = modelspace.add_line((300.0, 300.0), (320.0, 300.0))
+    dropped_generated = modelspace.add_line((14000.0, 5000.0), (14020.0, 5000.0))
+    dropped_generated_2 = modelspace.add_line((14100.0, 5050.0), (14120.0, 5050.0))
+
+    convert_module._prune_flatten_tiny_generated_clusters(modelspace, original_entity_ids)
+
+    remaining_ids = {id(entity) for entity in modelspace}
+    assert id(kept_generated) in remaining_ids
+    assert id(dropped_generated) not in remaining_ids
+    assert id(dropped_generated_2) not in remaining_ids
+
+
+def test_prune_flatten_tiny_generated_clusters_keeps_internal_small_clusters() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    modelspace = doc.modelspace()
+
+    original_entity_ids: set[int] = set()
+    for index in range(260):
+        x = float(index % 26) * 120.0
+        y = float(index // 26) * 120.0
+        line = modelspace.add_line((x, y), (x + 20.0, y))
+        original_entity_ids.add(id(line))
+    for index in range(260):
+        x = 7000.0 + float(index % 26) * 120.0
+        y = float(index // 26) * 120.0
+        line = modelspace.add_line((x, y), (x + 20.0, y))
+        original_entity_ids.add(id(line))
+
+    kept_generated = modelspace.add_line((350.0, 350.0), (360.0, 350.0))
+    kept_generated_2 = modelspace.add_line((420.0, 330.0), (430.0, 330.0))
+
+    convert_module._prune_flatten_tiny_generated_clusters(modelspace, original_entity_ids)
+
+    remaining_ids = {id(entity) for entity in modelspace}
+    assert id(kept_generated) in remaining_ids
+    assert id(kept_generated_2) in remaining_ids
+
+
+def test_cli_convert_passes_dim_block_policy(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_to_dxf(source_path, output_path, **kwargs):
+        captured["source_path"] = source_path
+        captured["output_path"] = output_path
+        captured["kwargs"] = kwargs
+        return convert_module.ConvertResult(
+            source_path=str(source_path),
+            output_path=str(output_path),
+            total_entities=1,
+            written_entities=1,
+            skipped_entities=0,
+            skipped_by_type={},
+        )
+
+    monkeypatch.setattr(cli_module, "to_dxf", _fake_to_dxf)
+
+    code = cli_module._run_convert(
+        str(SAMPLES / "line_2007.dwg"),
+        str(tmp_path / "line_cli_dim_policy_out.dxf"),
+        types="LINE",
+        dxf_version="R2010",
+        strict=False,
+        dim_block_policy="legacy",
+    )
+
+    assert code == 0
+    assert captured["kwargs"]["dim_block_policy"] == "legacy"
 
 
 def test_to_dxf_insert_writes_linked_attribs(monkeypatch, tmp_path: Path) -> None:
@@ -1380,6 +1602,25 @@ def test_collect_block_members_by_name_keeps_first_duplicate_definition() -> Non
     assert members == {"BLK_DUP": [(101, "LINE")]}
 
 
+def test_collect_block_members_by_name_keeps_first_shadow_duplicate_at_same_offset() -> None:
+    rows = [
+        (100, 10, 0, 0x04, "BLOCK", "Entity"),
+        (200, 10, 0, 0x04, "BLOCK", "Entity"),
+        (101, 11, 0, 0x13, "LINE", "Entity"),
+        (102, 12, 0, 0x05, "ENDBLK", "Entity"),
+    ]
+
+    members = convert_module._collect_block_members_by_name(
+        rows,
+        {
+            100: "_Open30",
+            200: "*D193",
+        },
+    )
+
+    assert members == {"_Open30": [(101, "LINE")]}
+
+
 def test_normalize_recursive_block_insert_remaps_dimension_self_reference() -> None:
     entity = Entity(
         dxftype="INSERT",
@@ -1431,6 +1672,178 @@ def test_normalize_recursive_block_insert_skips_unresolved_self_reference() -> N
     assert normalized is None
 
 
+def test_normalize_problematic_insert_name_remaps_i_to_open30() -> None:
+    entity = Entity(
+        dxftype="INSERT",
+        handle=10,
+        dxf={
+            "name": "i",
+            "insert": (0.0, 0.0, 0.0),
+            "xscale": 60.0,
+            "yscale": 60.0,
+            "zscale": 60.0,
+        },
+    )
+
+    normalized = convert_module._normalize_problematic_insert_name(
+        entity,
+        available_block_names={"_Open30", "i"},
+    )
+
+    assert normalized.dxf["name"] == "_Open30"
+
+
+def test_normalize_problematic_insert_name_keeps_i_without_open30() -> None:
+    entity = Entity(
+        dxftype="INSERT",
+        handle=10,
+        dxf={
+            "name": "i",
+            "insert": (0.0, 0.0, 0.0),
+            "xscale": 60.0,
+            "yscale": 60.0,
+            "zscale": 60.0,
+        },
+    )
+
+    normalized = convert_module._normalize_problematic_insert_name(
+        entity,
+        available_block_names={"i"},
+    )
+
+    assert normalized.dxf["name"] == "i"
+
+
+def test_normalize_problematic_insert_name_keeps_i_for_small_scale() -> None:
+    entity = Entity(
+        dxftype="INSERT",
+        handle=10,
+        dxf={
+            "name": "i",
+            "insert": (0.0, 0.0, 0.0),
+            "xscale": 1.0,
+            "yscale": 1.0,
+            "zscale": 1.0,
+        },
+    )
+
+    normalized = convert_module._normalize_problematic_insert_name(
+        entity,
+        available_block_names={"_Open30", "i"},
+    )
+
+    assert normalized.dxf["name"] == "i"
+
+
+def test_deduplicate_layout_pseudo_inserts_by_handle_keeps_first_preserved_insert() -> None:
+    entities = [
+        Entity(
+            dxftype="INSERT",
+            handle=252,
+            dxf={
+                "name": "*Model_Space",
+                "insert": (10.0, 10.0, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+            },
+        ),
+        Entity(
+            dxftype="INSERT",
+            handle=252,
+            dxf={
+                "name": "*Model_Space",
+                "insert": (20.0, 20.0, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+            },
+        ),
+        Entity(dxftype="LINE", handle=300, dxf={"start": (0.0, 0.0, 0.0), "end": (1.0, 0.0, 0.0)}),
+    ]
+
+    deduped = convert_module._deduplicate_layout_pseudo_inserts_by_handle(entities)
+    assert len(deduped) == 2
+    assert deduped[0].handle == 252
+    assert deduped[1].dxftype == "LINE"
+
+
+def test_deduplicate_layout_pseudo_inserts_by_handle_keeps_only_first_layout_insert() -> None:
+    entities = [
+        Entity(
+            dxftype="INSERT",
+            handle=10,
+            dxf={
+                "name": "*Model_Space",
+                "insert": (100.0, 0.0, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+            },
+        ),
+        Entity(
+            dxftype="INSERT",
+            handle=11,
+            dxf={
+                "name": "*Model_Space",
+                "insert": (200.0, 0.0, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+            },
+        ),
+    ]
+
+    deduped = convert_module._deduplicate_layout_pseudo_inserts_by_handle(entities)
+    assert len(deduped) == 1
+    assert int(deduped[0].handle) == 10
+
+
+def test_deduplicate_layout_pseudo_inserts_by_handle_keeps_first_rotation_variant() -> None:
+    entities = [
+        Entity(
+            dxftype="INSERT",
+            handle=252,
+            dxf={
+                "name": "*Model_Space",
+                "insert": (44620.16, 3546.97, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+                "rotation": 90.0,
+            },
+        ),
+        Entity(
+            dxftype="INSERT",
+            handle=34,
+            dxf={
+                "name": "*Model_Space",
+                "insert": (32996.77, 11127.43, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+                "rotation": 90.0,
+            },
+        ),
+        Entity(
+            dxftype="INSERT",
+            handle=252,
+            dxf={
+                "name": "*Model_Space",
+                "insert": (46950.16, 10157.43, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+                "rotation": 270.0,
+            },
+        ),
+    ]
+
+    deduped = convert_module._deduplicate_layout_pseudo_inserts_by_handle(entities)
+    assert len(deduped) == 1
+    assert float(deduped[0].dxf["rotation"]) == 90.0
+
+
 def test_block_prefers_open30_arrowhead_for_ch_dimension_text() -> None:
     entities = [
         Entity(dxftype="LINE", handle=1, dxf={}),
@@ -1445,6 +1858,38 @@ def test_block_prefers_open30_arrowhead_ignores_non_ch_text() -> None:
         Entity(dxftype="MTEXT", handle=2, dxf={"text": r"\A1;390"}),
     ]
     assert not convert_module._block_prefers_open30_arrowhead(entities)
+
+
+def test_referenced_block_name_from_entity_keeps_modelspace_layout_copy() -> None:
+    entity = Entity(
+        dxftype="INSERT",
+        handle=10,
+        dxf={
+            "name": "*Model_Space",
+            "insert": (0.0, 0.0, 0.0),
+            "xscale": 60.0,
+            "yscale": 60.0,
+            "zscale": 60.0,
+        },
+    )
+
+    assert convert_module._referenced_block_name_from_entity(entity) == "*Model_Space"
+
+
+def test_referenced_block_name_from_entity_skips_paper_space_layout_copy() -> None:
+    entity = Entity(
+        dxftype="INSERT",
+        handle=10,
+        dxf={
+            "name": "*Paper_Space",
+            "insert": (0.0, 0.0, 0.0),
+            "xscale": 60.0,
+            "yscale": 60.0,
+            "zscale": 60.0,
+        },
+    )
+
+    assert convert_module._referenced_block_name_from_entity(entity) is None
 
 
 def test_filter_modelspace_entities_uses_block_boundaries(monkeypatch) -> None:
@@ -1725,6 +2170,19 @@ def test_to_dxf_strict_raises_on_skipped_entity(monkeypatch, tmp_path: Path) -> 
         )
 
 
+def test_to_dxf_rejects_unsupported_dim_block_policy(tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    with pytest.raises(ValueError, match="unsupported dim-block policy"):
+        convert_module.to_dxf(
+            str(SAMPLES / "line_2007.dwg"),
+            str(tmp_path / "invalid_dim_policy_out.dxf"),
+            types="LINE",
+            dxf_version="R2010",
+            dim_block_policy="invalid-policy",
+        )
+
+
 def test_to_dxf_dimension_writes_native_dimension_without_line_fallback(tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 
@@ -1886,6 +2344,59 @@ def test_write_dimension_native_placeholder_prefers_block_fallback() -> None:
     assert inserts[0].dxf.name == "*D2"
 
 
+def test_write_insert_skips_anonymous_dimension_insert_after_dimension_success() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    block = doc.blocks.new(name="*D4")
+    block.add_line((0.0, 0.0), (1.0, 0.0))
+    modelspace = doc.modelspace()
+    dimension_context = convert_module._DimensionWriteContext()
+
+    dim_written = convert_module._write_entity_to_modelspace_unsafe(
+        modelspace,
+        Entity(
+            dxftype="DIMENSION",
+            handle=4010,
+            dxf={
+                "dimtype": "ANG2LN",
+                "anonymous_block_name": "*D4",
+                "insert": (12.0, 34.0, 0.0),
+                "insert_scale": (2.0, 2.0, 1.0),
+                "insert_rotation": 10.0,
+            },
+        ),
+        explode_dimensions=True,
+        dim_block_policy="smart",
+        dimension_context=dimension_context,
+    )
+    assert dim_written is True
+    assert len(list(modelspace.query("INSERT"))) == 1
+
+    insert_written = convert_module._write_entity_to_modelspace_unsafe(
+        modelspace,
+        Entity(
+            dxftype="INSERT",
+            handle=4011,
+            dxf={
+                "name": "*D4",
+                "insert": (12.0, 34.0, 0.0),
+                "xscale": 2.0,
+                "yscale": 2.0,
+                "zscale": 1.0,
+                "rotation": 10.0,
+            },
+        ),
+        explode_dimensions=False,
+        dim_block_policy="smart",
+        dimension_context=dimension_context,
+    )
+
+    assert insert_written is True
+    # Only the DIMENSION fallback INSERT should remain.
+    assert len(list(modelspace.query("INSERT"))) == 1
+
+
 def test_write_insert_skips_layout_pseudo_block_names() -> None:
     ezdxf = pytest.importorskip("ezdxf")
 
@@ -1912,6 +2423,67 @@ def test_write_insert_skips_layout_pseudo_block_names() -> None:
     assert written is True
     assert len(list(modelspace.query("INSERT"))) == 0
     assert len(list(modelspace.query("POINT"))) == 0
+
+
+def test_write_insert_keeps_modelspace_layout_copy_block_names(monkeypatch) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    doc.blocks.new(name="ALIAS_MODELSPACE").add_line((0.0, 0.0), (1.0, 0.0))
+    modelspace = doc.modelspace()
+    monkeypatch.setattr(
+        convert_module,
+        "_ensure_layout_pseudo_block_alias",
+        lambda _doc, _name: "ALIAS_MODELSPACE",
+    )
+
+    written = convert_module._write_entity_to_modelspace_unsafe(
+        modelspace,
+        Entity(
+            dxftype="INSERT",
+            handle=4101,
+            dxf={
+                "name": "*Model_Space",
+                "insert": (10.0, 20.0, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+                "rotation": 90.0,
+            },
+        ),
+        explode_dimensions=False,
+    )
+
+    assert written is True
+    inserts = list(modelspace.query("INSERT"))
+    assert len(inserts) == 1
+    assert inserts[0].dxf.name == "ALIAS_MODELSPACE"
+    assert len(list(modelspace.query("POINT"))) == 0
+
+
+def test_ensure_layout_pseudo_block_alias_skips_nested_anonymous_dimension_inserts() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    source = doc.blocks.get("*Model_Space")
+    dim_block_name = "*D901"
+    regular_block_name = "REG_ALIAS_CHILD"
+    if doc.blocks.get(dim_block_name) is None:
+        doc.blocks.new(name=dim_block_name).add_line((0.0, 0.0), (1.0, 0.0))
+    if doc.blocks.get(regular_block_name) is None:
+        doc.blocks.new(name=regular_block_name).add_line((0.0, 0.0), (1.0, 0.0))
+    source.add_line((0.0, 0.0), (10.0, 0.0))
+    source.add_blockref(dim_block_name, (1.0, 1.0))
+    source.add_blockref(regular_block_name, (2.0, 2.0))
+
+    alias_name = convert_module._ensure_layout_pseudo_block_alias(doc, "*Model_Space")
+
+    assert isinstance(alias_name, str)
+    alias = doc.blocks.get(alias_name)
+    insert_names = [insert.dxf.name for insert in alias.query("INSERT")]
+    assert dim_block_name not in insert_names
+    assert regular_block_name in insert_names
+    assert len(list(alias.query("LINE"))) >= 1
 
 
 def test_write_insert_skips_empty_block_definitions() -> None:
@@ -2000,7 +2572,7 @@ def test_write_insert_skips_nested_anonymous_dimension_block() -> None:
     assert len(list(modelspace.query("INSERT"))) == 0
 
 
-def test_write_insert_skips_suspicious_scaled_anonymous_dimension_block() -> None:
+def test_write_insert_keeps_scaled_anonymous_dimension_block_in_smart_policy() -> None:
     ezdxf = pytest.importorskip("ezdxf")
 
     doc = ezdxf.new(dxfversion="R2010")
@@ -2023,6 +2595,37 @@ def test_write_insert_skips_suspicious_scaled_anonymous_dimension_block() -> Non
             },
         ),
         explode_dimensions=False,
+        dim_block_policy="smart",
+    )
+
+    assert written is True
+    assert len(list(modelspace.query("INSERT"))) == 1
+
+
+def test_write_insert_skips_suspicious_scaled_anonymous_dimension_block_in_legacy_policy() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    block = doc.blocks.new(name="*D_BIG")
+    block.add_line((20000.0, 30000.0), (20100.0, 30000.0))
+    modelspace = doc.modelspace()
+
+    written = convert_module._write_entity_to_modelspace_unsafe(
+        modelspace,
+        Entity(
+            dxftype="INSERT",
+            handle=4107,
+            dxf={
+                "name": "*D_BIG",
+                "insert": (100.0, 200.0, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+                "rotation": 0.0,
+            },
+        ),
+        explode_dimensions=False,
+        dim_block_policy="legacy",
     )
 
     assert written is True

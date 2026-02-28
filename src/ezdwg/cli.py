@@ -161,6 +161,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Explode INSERT/MINSERT references into primitive geometry in modelspace.",
     )
+    convert_parser.add_argument(
+        "--dim-block-policy",
+        choices=("smart", "legacy"),
+        default="smart",
+        help=(
+            "Policy for anonymous dimension block (*D...) INSERT handling: "
+            "smart (default) suppresses only references confirmed as duplicates by successful "
+            "DIMENSION conversion, legacy restores geometric suppression heuristics."
+        ),
+    )
 
     write_parser = subparsers.add_parser(
         "write",
@@ -358,6 +368,7 @@ def _run_convert(
     modelspace_only: bool = False,
     explode_dimensions: bool = False,
     flatten_inserts: bool = False,
+    dim_block_policy: str = "smart",
 ) -> int:
     dwg_path = Path(input_path)
     if not dwg_path.exists():
@@ -376,6 +387,7 @@ def _run_convert(
             modelspace_only=modelspace_only,
             explode_dimensions=explode_dimensions,
             flatten_inserts=flatten_inserts,
+            dim_block_policy=dim_block_policy,
         )
     except Exception as exc:
         print(f"error: failed to convert DWG to DXF: {exc}", file=sys.stderr)
@@ -448,6 +460,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             modelspace_only=bool(args.modelspace_only),
             explode_dimensions=explode_dimensions,
             flatten_inserts=bool(args.flatten_inserts),
+            dim_block_policy=str(args.dim_block_policy),
         )
     if args.command == "write":
         return _run_write(

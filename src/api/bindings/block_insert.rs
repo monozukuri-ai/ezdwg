@@ -283,6 +283,9 @@ fn decode_minsert_entities_with_state(
     state: &mut InsertNameResolutionState,
     limit: Option<usize>,
 ) -> PyResult<Vec<MInsertEntityRow>> {
+    let debug_minsert = std::env::var("EZDWG_DEBUG_MINSERT")
+        .ok()
+        .is_some_and(|v| v != "0");
     let mut decoded_rows: Vec<(
         u64,
         f64,
@@ -307,24 +310,33 @@ fn decode_minsert_entities_with_state(
         if !matches_type_name(header.type_code, 0x08, "MINSERT", dynamic_types) {
             continue;
         }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity = match entities::decode_minsert(&mut reader) {
+        let entity = match decode_minsert_with_fallback(
+            &record,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+            best_effort,
+            debug_minsert,
+        ) {
             Ok(entity) => entity,
             Err(err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
+        if !_is_reasonable_minsert(&entity) {
+            if debug_minsert {
+                eprintln!(
+                    "[minsert-decode] handle={} rejected=implausible-values",
+                    obj.handle.0
+                );
+            }
+            continue;
+        }
         let block_handle = recover_insert_block_header_handle_r2010_plus(
             &record,
             decoder.version(),
             &header,
             obj.handle.0,
-            None,
+            entity.block_header_handle,
             &state.known_block_handles,
             &state.named_block_handles,
         );
@@ -396,19 +408,25 @@ fn decode_minsert_entities_with_state(
             if !matches_type_name(header.type_code, 0x08, "MINSERT", dynamic_types) {
                 continue;
             }
-            let mut reader = record.bit_reader();
-            if skip_object_type_prefix(&mut reader, decoder.version()).is_err() {
-                continue;
-            }
-            let Ok(_entity) = entities::decode_minsert(&mut reader) else {
+            let Ok(entity) = decode_minsert_with_fallback(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                true,
+                debug_minsert,
+            ) else {
                 continue;
             };
+            if !_is_reasonable_minsert(&entity) {
+                continue;
+            }
             let candidates = collect_insert_block_handle_candidates_r2010_plus(
                 &record,
                 decoder.version(),
                 &header,
                 obj.handle.0,
-                None,
+                entity.block_header_handle,
                 Some(&state.known_block_handles),
                 8,
             );
@@ -838,6 +856,196 @@ fn decode_insert_for_version(
         version::DwgVersion::R2007 => entities::decode_insert_r2007(reader),
         _ => entities::decode_insert(reader),
     }
+}
+
+fn decode_minsert_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::MInsertEntity> {
+    match version {
+        version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+            let mut candidate_bits: Vec<u32> = Vec::new();
+            if let Ok(primary) = resolve_r2010_object_data_end_bit(header) {
+                candidate_bits.push(primary);
+            }
+            for candidate in resolve_r2010_object_data_end_bit_candidates(header) {
+                if !candidate_bits.contains(&candidate) {
+                    candidate_bits.push(candidate);
+                }
+            }
+            if candidate_bits.is_empty() {
+                return Err(DwgError::new(
+                    ErrorKind::Format,
+                    "no R2010 object data end-bit candidates",
+                ));
+            }
+
+            let mut first_err: Option<DwgError> = None;
+            for object_data_end_bit in candidate_bits {
+                let mut attempt_reader = reader.clone();
+                let result = match version {
+                    version::DwgVersion::R2010 => {
+                        entities::decode_minsert_r2010(
+                            &mut attempt_reader,
+                            object_data_end_bit,
+                            object_handle,
+                        )
+                    }
+                    version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+                        entities::decode_minsert_r2013(
+                            &mut attempt_reader,
+                            object_data_end_bit,
+                            object_handle,
+                        )
+                    }
+                    _ => unreachable!(),
+                };
+                match result {
+                    Ok(entity) => {
+                        *reader = attempt_reader;
+                        return Ok(entity);
+                    }
+                    Err(err) => {
+                        if first_err.is_none() {
+                            first_err = Some(err);
+                        }
+                    }
+                }
+            }
+            Err(first_err.unwrap_or_else(|| {
+                DwgError::new(
+                    ErrorKind::Format,
+                    "failed to decode MINSERT for all end-bit candidates",
+                )
+            }))
+        }
+        version::DwgVersion::R2007 => entities::decode_minsert_r2007(reader),
+        _ => entities::decode_minsert(reader),
+    }
+}
+
+fn _insert_as_single_minsert(insert: entities::InsertEntity) -> entities::MInsertEntity {
+    entities::MInsertEntity {
+        handle: insert.handle,
+        position: insert.position,
+        scale: insert.scale,
+        rotation: insert.rotation,
+        num_columns: 1,
+        num_rows: 1,
+        column_spacing: 0.0,
+        row_spacing: 0.0,
+        block_header_handle: insert.block_header_handle,
+    }
+}
+
+fn decode_minsert_attempt(
+    record: &objects::ObjectRecord<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+    with_prefix: bool,
+    legacy_minsert_parser: bool,
+    as_insert_fallback: bool,
+) -> crate::core::result::Result<entities::MInsertEntity> {
+    let mut reader = record.bit_reader();
+    if with_prefix {
+        skip_object_type_prefix(&mut reader, version)?;
+    }
+    if as_insert_fallback {
+        let insert = decode_insert_for_version(&mut reader, version, header, object_handle)?;
+        return Ok(_insert_as_single_minsert(insert));
+    }
+    if legacy_minsert_parser {
+        entities::decode_minsert(&mut reader)
+    } else {
+        decode_minsert_for_version(&mut reader, version, header, object_handle)
+    }
+}
+
+fn decode_minsert_with_fallback(
+    record: &objects::ObjectRecord<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+    best_effort: bool,
+    debug_minsert: bool,
+) -> crate::core::result::Result<entities::MInsertEntity> {
+    if !best_effort {
+        return decode_minsert_attempt(
+            record,
+            version,
+            header,
+            object_handle,
+            true,
+            false,
+            false,
+        );
+    }
+
+    let attempts = [
+        (true, false, false, "prefixed/minsert"),
+        (false, false, false, "plain/minsert"),
+        (true, true, false, "prefixed/minsert-legacy"),
+        (false, true, false, "plain/minsert-legacy"),
+        (true, false, true, "prefixed/insert-fallback"),
+        (false, false, true, "plain/insert-fallback"),
+    ];
+    for (with_prefix, legacy_minsert_parser, as_insert_fallback, label) in attempts {
+        match decode_minsert_attempt(
+            record,
+            version,
+            header,
+            object_handle,
+            with_prefix,
+            legacy_minsert_parser,
+            as_insert_fallback,
+        ) {
+            Ok(entity) => {
+                if debug_minsert && (as_insert_fallback || !with_prefix) {
+                    eprintln!(
+                        "[minsert-decode] handle={} recovered={}",
+                        object_handle, label
+                    );
+                }
+                return Ok(entity);
+            }
+            Err(err) => {
+                if debug_minsert {
+                    eprintln!(
+                        "[minsert-decode] handle={} attempt={} err={:?}",
+                        object_handle, label, err
+                    );
+                }
+            }
+        }
+    }
+
+    Err(DwgError::new(
+        ErrorKind::Format,
+        "failed to decode MINSERT with all fallback paths",
+    ))
+}
+
+fn _is_reasonable_minsert(entity: &entities::MInsertEntity) -> bool {
+    if entity.num_columns == 0 || entity.num_rows == 0 {
+        return false;
+    }
+    let values = [
+        entity.position.0,
+        entity.position.1,
+        entity.position.2,
+        entity.scale.0,
+        entity.scale.1,
+        entity.scale.2,
+        entity.rotation,
+        entity.column_spacing,
+        entity.row_spacing,
+    ];
+    values
+        .iter()
+        .all(|v| v.is_finite() && v.abs() <= 1.0e15_f64)
 }
 
 fn collect_block_header_name_entries_in_order(

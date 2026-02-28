@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -88,6 +88,12 @@ _DWG_WRITABLE_ENTITY_TYPES = {
 }
 _MAX_COORD_ABS = 1.0e12
 _BLOCK_INSERT_SAFETY_CACHE: weakref.WeakKeyDictionary[Any, dict[str, tuple[bool, bool, float | None]]] = weakref.WeakKeyDictionary()
+_LAYOUT_PSEUDO_ALIAS_CACHE: weakref.WeakKeyDictionary[Any, dict[str, str]] = weakref.WeakKeyDictionary()
+_BLOCK_LOCAL_Y_SPAN_CACHE: weakref.WeakKeyDictionary[Any, dict[str, float | None]] = weakref.WeakKeyDictionary()
+_DIM_BLOCK_POLICIES = {"smart", "legacy"}
+_OPEN30_REMAP_SCALE_MIN = 30.0
+_OPEN30_REMAP_SCALE_MAX = 120.0
+_LAYOUT_PSEUDO_MODELSPACE_ALIAS_PREFIX = "__EZDWG_LAYOUT_ALIAS_MODEL_SPACE"
 
 
 @dataclass(frozen=True)
@@ -109,6 +115,13 @@ class WriteResult:
     written_entities: int
     skipped_entities: int
     skipped_by_type: dict[str, int]
+
+
+@dataclass
+class _DimensionWriteContext:
+    written_block_refs: set[
+        tuple[str, tuple[float, float, float], tuple[float, float, float], float]
+    ] = field(default_factory=set)
 
 
 def to_dwg(
@@ -467,12 +480,15 @@ def to_dxf(
     modelspace_only: bool = False,
     explode_dimensions: bool = True,
     flatten_inserts: bool = False,
+    dim_block_policy: str = "smart",
 ) -> ConvertResult:
     ezdxf = _require_ezdxf()
     source_path, layout = _resolve_layout(source)
+    normalized_dim_block_policy = _normalize_dim_block_policy(dim_block_policy)
 
     dxf_doc = ezdxf.new(dxfversion=dxf_version)
     modelspace = dxf_doc.modelspace()
+    dimension_write_context = _DimensionWriteContext()
 
     source_entities = _resolve_export_entities(
         layout,
@@ -481,6 +497,17 @@ def to_dxf(
         include_styles=preserve_colors,
         modelspace_only=modelspace_only,
     )
+    if _has_problematic_i_inserts(source_entities):
+        available_block_names = _available_block_names(layout.doc.decode_path or layout.doc.path)
+        if "_Open30" in available_block_names:
+            source_entities = [
+                _normalize_problematic_insert_name(
+                    entity,
+                    available_block_names=available_block_names,
+                )
+                for entity in source_entities
+            ]
+    source_entities = _deduplicate_layout_pseudo_inserts_by_handle(source_entities)
     cached_entities_by_handle: dict[int, Entity] | None = None
     if types is None and not include_unsupported:
         cached_entities_by_handle = {}
@@ -498,9 +525,6 @@ def to_dxf(
         for entity in source_entities
         if entity.dxftype in _BLOCK_REFERENCE_ENTITY_TYPES
         and _referenced_block_name_from_entity(entity) is not None
-    ]
-    insert_reference_entities = [
-        entity for entity in block_reference_entities if entity.dxftype in {"INSERT", "MINSERT"}
     ]
     if block_reference_entities:
         insert_attributes_by_owner = _insert_attributes_by_owner(
@@ -520,6 +544,7 @@ def to_dxf(
             include_styles=preserve_colors,
             explode_dimensions=explode_dimensions,
             layer_name_by_handle=layer_name_by_handle,
+            dim_block_policy=normalized_dim_block_policy,
         )
 
     total = 0
@@ -533,6 +558,8 @@ def to_dxf(
             entity,
             explode_dimensions=explode_dimensions,
             layer_name_by_handle=layer_name_by_handle,
+            dim_block_policy=normalized_dim_block_policy,
+            dimension_context=dimension_write_context,
         ):
             written += 1
             continue
@@ -565,22 +592,339 @@ def to_dxf(
 def _flatten_modelspace_inserts(modelspace: Any, *, max_depth: int = 8) -> None:
     # Flatten nested block references for CAD viewers that do not reliably
     # evaluate deep INSERT hierarchies.
+    try:
+        initial_entities = list(modelspace)
+    except Exception:
+        return
+    original_entity_ids = {
+        id(entity)
+        for entity in initial_entities
+        if _ezdxf_entity_type(entity) != "INSERT"
+    }
+    reference_bbox = _collect_reference_bbox(initial_entities)
+    changed_any = False
+
     for _ in range(max_depth):
         try:
             inserts = list(modelspace.query("INSERT"))
         except Exception:
-            return
+            break
         if not inserts:
-            return
+            break
         exploded = 0
+        dropped = 0
         for insert in inserts:
+            block_name = _normalize_block_name(getattr(getattr(insert, "dxf", None), "name", None))
+            if block_name is not None and _is_layout_pseudo_block_name(block_name):
+                # Keep layout pseudo references intact. Exploding or deleting
+                # them drops viewport-driven copies in some drawings.
+                continue
+            if _prepare_insert_for_flatten(modelspace, insert):
+                try:
+                    modelspace.delete_entity(insert)
+                    dropped += 1
+                except Exception:
+                    pass
+                continue
             try:
                 insert.explode()
                 exploded += 1
             except Exception:
                 continue
-        if exploded <= 0:
+        if exploded <= 0 and dropped <= 0:
+            break
+        changed_any = True
+
+    if changed_any and reference_bbox is not None:
+        _prune_flatten_outlier_entities(modelspace, original_entity_ids, reference_bbox)
+        _prune_flatten_tiny_generated_clusters(modelspace, original_entity_ids)
+
+
+def _ezdxf_entity_type(entity: Any) -> str:
+    try:
+        token = entity.dxftype()
+    except Exception:
+        try:
+            token = entity.dxftype
+        except Exception:
+            return ""
+        if callable(token):
+            try:
+                token = token()
+            except Exception:
+                return ""
+    return str(token).strip().upper()
+
+
+def _entity_xy_points(entity: Any) -> list[tuple[float, float]]:
+    token = _ezdxf_entity_type(entity)
+    dxf = getattr(entity, "dxf", None)
+    if dxf is None:
+        return []
+
+    points: list[tuple[float, float]] = []
+
+    def _push(x: Any, y: Any) -> None:
+        try:
+            x_val = float(x)
+            y_val = float(y)
+        except Exception:
             return
+        if not (math.isfinite(x_val) and math.isfinite(y_val)):
+            return
+        points.append((x_val, y_val))
+
+    try:
+        if token == "LINE":
+            _push(dxf.start.x, dxf.start.y)
+            _push(dxf.end.x, dxf.end.y)
+            return points
+        if token == "POINT":
+            _push(dxf.location.x, dxf.location.y)
+            return points
+        if token in {"ARC", "CIRCLE"}:
+            _push(dxf.center.x, dxf.center.y)
+            return points
+        if token == "LWPOLYLINE":
+            for point in entity.get_points("xy"):
+                if len(point) >= 2:
+                    _push(point[0], point[1])
+            return points
+        if token in {"TEXT", "MTEXT"}:
+            _push(dxf.insert.x, dxf.insert.y)
+            return points
+        if token == "DIMENSION":
+            _push(getattr(dxf.defpoint, "x", 0.0), getattr(dxf.defpoint, "y", 0.0))
+            _push(getattr(dxf.text_midpoint, "x", 0.0), getattr(dxf.text_midpoint, "y", 0.0))
+            return points
+        if token in {"INSERT", "MINSERT"}:
+            _push(dxf.insert.x, dxf.insert.y)
+            return points
+    except Exception:
+        return points
+    return points
+
+
+def _collect_reference_bbox(entities: list[Any]) -> tuple[float, float, float, float] | None:
+    xs: list[float] = []
+    ys: list[float] = []
+    for entity in entities:
+        if _ezdxf_entity_type(entity) == "INSERT":
+            continue
+        for x, y in _entity_xy_points(entity):
+            xs.append(x)
+            ys.append(y)
+    if not xs or not ys:
+        return None
+    return (min(xs), max(xs), min(ys), max(ys))
+
+
+def _prune_flatten_outlier_entities(
+    modelspace: Any,
+    original_entity_ids: set[int],
+    reference_bbox: tuple[float, float, float, float],
+) -> None:
+    min_x, max_x, min_y, max_y = reference_bbox
+    # Keep a modest safety margin around original modelspace content.
+    # Large margins let through mis-normalized exploded fragments; tight bounds
+    # still preserve nearby annotation helpers around the drawing extents.
+    margin_x = max(3000.0, (max_x - min_x) * 0.05)
+    margin_y = max(1500.0, (max_y - min_y) * 0.05)
+    window = (
+        min_x - margin_x,
+        max_x + margin_x,
+        min_y - margin_y,
+        max_y + margin_y,
+    )
+    window_min_x, window_max_x, window_min_y, window_max_y = window
+
+    try:
+        entities = list(modelspace)
+    except Exception:
+        return
+
+    for entity in entities:
+        if id(entity) in original_entity_ids:
+            continue
+        if _ezdxf_entity_type(entity) == "INSERT":
+            continue
+        points = _entity_xy_points(entity)
+        if not points:
+            continue
+        outside = True
+        for x, y in points:
+            if (
+                window_min_x <= x <= window_max_x
+                and window_min_y <= y <= window_max_y
+            ):
+                outside = False
+                break
+        if not outside:
+            continue
+        try:
+            modelspace.delete_entity(entity)
+        except Exception:
+            continue
+
+
+def _entity_center_bbox(entity: Any) -> tuple[float, float, float, float, float, float] | None:
+    points = _entity_xy_points(entity)
+    if not points:
+        return None
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    min_x = min(xs)
+    max_x = max(xs)
+    min_y = min(ys)
+    max_y = max(ys)
+    center_x = (min_x + max_x) * 0.5
+    center_y = (min_y + max_y) * 0.5
+    return (center_x, center_y, min_x, max_x, min_y, max_y)
+
+
+def _cluster_entity_indices(
+    centers: list[tuple[float, float]],
+    *,
+    radius: float,
+) -> list[list[int]]:
+    if not centers:
+        return []
+    if radius <= 0.0:
+        return [[index] for index in range(len(centers))]
+
+    cell_size = radius
+    grid: dict[tuple[int, int], list[int]] = {}
+    for index, (center_x, center_y) in enumerate(centers):
+        grid_key = (
+            int(math.floor(center_x / cell_size)),
+            int(math.floor(center_y / cell_size)),
+        )
+        grid.setdefault(grid_key, []).append(index)
+
+    parent = list(range(len(centers)))
+    comp_size = [1] * len(centers)
+    radius_squared = radius * radius
+
+    def _find(value: int) -> int:
+        while parent[value] != value:
+            parent[value] = parent[parent[value]]
+            value = parent[value]
+        return value
+
+    def _union(left: int, right: int) -> None:
+        left_root = _find(left)
+        right_root = _find(right)
+        if left_root == right_root:
+            return
+        if comp_size[left_root] < comp_size[right_root]:
+            left_root, right_root = right_root, left_root
+        parent[right_root] = left_root
+        comp_size[left_root] += comp_size[right_root]
+
+    for index, (center_x, center_y) in enumerate(centers):
+        grid_x = int(math.floor(center_x / cell_size))
+        grid_y = int(math.floor(center_y / cell_size))
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for neighbor in grid.get((grid_x + dx, grid_y + dy), []):
+                    if neighbor <= index:
+                        continue
+                    neighbor_x, neighbor_y = centers[neighbor]
+                    if (
+                        (center_x - neighbor_x) * (center_x - neighbor_x)
+                        + (center_y - neighbor_y) * (center_y - neighbor_y)
+                    ) <= radius_squared:
+                        _union(index, neighbor)
+
+    by_root: dict[int, list[int]] = {}
+    for index in range(len(centers)):
+        root = _find(index)
+        by_root.setdefault(root, []).append(index)
+    return list(by_root.values())
+
+
+def _prune_flatten_tiny_generated_clusters(
+    modelspace: Any,
+    original_entity_ids: set[int],
+) -> None:
+    try:
+        entities = list(modelspace)
+    except Exception:
+        return
+
+    metadata: list[tuple[Any, bool, float, float, float, float, float, float]] = []
+    centers: list[tuple[float, float]] = []
+    for entity in entities:
+        if _ezdxf_entity_type(entity) == "INSERT":
+            continue
+        center_bbox = _entity_center_bbox(entity)
+        if center_bbox is None:
+            continue
+        center_x, center_y, min_x, max_x, min_y, max_y = center_bbox
+        is_original = id(entity) in original_entity_ids
+        metadata.append(
+            (
+                entity,
+                is_original,
+                center_x,
+                center_y,
+                min_x,
+                max_x,
+                min_y,
+                max_y,
+            )
+        )
+        centers.append((center_x, center_y))
+
+    if not metadata:
+        return
+
+    components = _cluster_entity_indices(centers, radius=500.0)
+    if not components:
+        return
+
+    major_regions: list[tuple[float, float, float, float]] = []
+    for component in components:
+        if len(component) < 250:
+            continue
+        min_x = min(metadata[index][4] for index in component)
+        max_x = max(metadata[index][5] for index in component)
+        min_y = min(metadata[index][6] for index in component)
+        max_y = max(metadata[index][7] for index in component)
+        major_regions.append((min_x, max_x, min_y, max_y))
+    if not major_regions:
+        return
+
+    major_margin = 250.0
+    for component in components:
+        if len(component) > 8:
+            continue
+        if any(metadata[index][1] for index in component):
+            continue
+        min_x = min(metadata[index][4] for index in component)
+        max_x = max(metadata[index][5] for index in component)
+        min_y = min(metadata[index][6] for index in component)
+        max_y = max(metadata[index][7] for index in component)
+        if (max_x - min_x) > 1200.0 or (max_y - min_y) > 1200.0:
+            continue
+        center_x = (min_x + max_x) * 0.5
+        center_y = (min_y + max_y) * 0.5
+        inside_major = False
+        for major_min_x, major_max_x, major_min_y, major_max_y in major_regions:
+            if (
+                (major_min_x - major_margin) <= center_x <= (major_max_x + major_margin)
+                and (major_min_y - major_margin) <= center_y <= (major_max_y + major_margin)
+            ):
+                inside_major = True
+                break
+        if inside_major:
+            continue
+        for index in component:
+            entity = metadata[index][0]
+            try:
+                modelspace.delete_entity(entity)
+            except Exception:
+                continue
 
 
 def _resolve_export_entities(
@@ -930,6 +1274,7 @@ def _populate_block_definitions(
     include_styles: bool = True,
     explode_dimensions: bool = True,
     layer_name_by_handle: dict[int, str] | None = None,
+    dim_block_policy: str = "smart",
 ) -> None:
     if reference_entities is None:
         reference_entities = []
@@ -1164,6 +1509,7 @@ def _populate_block_definitions(
                 normalized_entity,
                 explode_dimensions=explode_dimensions,
                 layer_name_by_handle=layer_name_by_handle,
+                dim_block_policy=dim_block_policy,
             )
 
 
@@ -1178,6 +1524,7 @@ def _collect_block_members_by_name(
     candidate_scores: dict[str, tuple[int, int]] = {}
     current_block_name: str | None = None
     current_members: list[tuple[int, str]] = []
+    current_block_offset: int | None = None
 
     def _commit_current_candidate() -> None:
         nonlocal current_block_name, current_members
@@ -1196,30 +1543,48 @@ def _collect_block_members_by_name(
     for row in sorted_header_rows:
         if not isinstance(row, tuple) or len(row) < 6:
             continue
-        raw_handle, _offset, _size, _code, raw_type_name, raw_type_class = row
+        raw_handle, raw_offset, _size, _code, raw_type_name, raw_type_class = row
         if str(raw_type_class).strip().upper() not in {"E", "ENTITY"}:
             continue
         try:
             handle = int(raw_handle)
         except Exception:
             continue
+        try:
+            offset = int(raw_offset)
+        except Exception:
+            offset = None
         type_name = str(raw_type_name).strip().upper()
 
         if type_name == "BLOCK":
+            # Some R2010+ drawings contain shadow BLOCK records at the same
+            # stream offset before any members. Keep the first mapped name to
+            # avoid dropping its members (for example `_Open30`).
+            if (
+                current_block_name is not None
+                and not current_members
+                and current_block_offset is not None
+                and offset is not None
+                and current_block_offset == offset
+            ):
+                continue
             _commit_current_candidate()
             block_name = block_name_by_handle.get(handle)
             if isinstance(block_name, str) and block_name.strip() != "":
                 current_block_name = block_name.strip()
                 current_members = []
+                current_block_offset = offset
             else:
                 current_block_name = None
                 current_members = []
+                current_block_offset = None
             continue
 
         if type_name == "ENDBLK":
             _commit_current_candidate()
             current_block_name = None
             current_members = []
+            current_block_offset = None
             continue
 
         if current_block_name is None:
@@ -1336,6 +1701,89 @@ def _normalize_recursive_block_insert(
 
     # Drop unresolved recursive INSERTs to avoid cyclic block graphs.
     return None
+
+
+def _has_problematic_i_inserts(entities: list[Entity]) -> bool:
+    for entity in entities:
+        if entity.dxftype not in {"INSERT", "MINSERT"}:
+            continue
+        if _normalize_block_name(entity.dxf.get("name")) == "i":
+            return True
+    return False
+
+
+def _deduplicate_layout_pseudo_inserts_by_handle(entities: list[Entity]) -> list[Entity]:
+    if not entities:
+        return []
+    candidate_indices: list[int] = []
+    for index, entity in enumerate(entities):
+        if entity.dxftype not in {"INSERT", "MINSERT"}:
+            continue
+        name = _normalize_block_name(entity.dxf.get("name"))
+        if name is None or not _is_layout_pseudo_block_name(name):
+            continue
+        if not _should_preserve_layout_pseudo_insert(name, entity.dxf):
+            continue
+        candidate_indices.append(index)
+
+    if len(candidate_indices) <= 1:
+        return list(entities)
+
+    # Prefer the earliest decoded pseudo layout candidate. Later variants are
+    # often fallback artifacts with unstable rotation/placement.
+    keep_index = candidate_indices[0]
+    candidate_index_set = set(candidate_indices)
+    result: list[Entity] = []
+    for index, entity in enumerate(entities):
+        if index in candidate_index_set and index != keep_index:
+            continue
+        result.append(entity)
+    return result
+
+
+def _available_block_names(decode_path: str) -> set[str]:
+    try:
+        rows = raw.decode_block_header_names(decode_path)
+    except Exception:
+        return set()
+    names: set[str] = set()
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) < 2:
+            continue
+        normalized = _normalize_block_name(row[1])
+        if normalized is not None:
+            names.add(normalized)
+    return names
+
+
+def _normalize_problematic_insert_name(
+    entity: Entity,
+    *,
+    available_block_names: set[str],
+) -> Entity:
+    if entity.dxftype not in {"INSERT", "MINSERT"}:
+        return entity
+    name = _normalize_block_name(entity.dxf.get("name"))
+    if name != "i" or "_Open30" not in available_block_names:
+        return entity
+    if not _looks_like_open30_insert(entity.dxf):
+        return entity
+    remapped = dict(entity.dxf)
+    remapped["name"] = "_Open30"
+    return Entity(dxftype=entity.dxftype, handle=entity.handle, dxf=remapped)
+
+
+def _looks_like_open30_insert(dxf: dict[str, Any]) -> bool:
+    xscale = abs(_finite_float(dxf.get("xscale", 1.0), 1.0))
+    yscale = abs(_finite_float(dxf.get("yscale", 1.0), 1.0))
+    zscale = abs(_finite_float(dxf.get("zscale", 1.0), 1.0))
+    scales = (xscale, yscale, zscale)
+    min_scale = min(scales)
+    max_scale = max(scales)
+    if min_scale < _OPEN30_REMAP_SCALE_MIN or max_scale > _OPEN30_REMAP_SCALE_MAX:
+        return False
+    tolerance = max(1.0e-6, max_scale * 1.0e-4)
+    return (max_scale - min_scale) <= tolerance
 
 
 def _resolve_block_name_by_handle(
@@ -1538,7 +1986,7 @@ def _collect_referenced_block_names(
     pending_names: list[str] = [
         name
         for name in referenced_names
-        if name in block_members_by_name and not _is_layout_pseudo_block_name(name)
+        if name in block_members_by_name
     ]
     pending_name_set: set[str] = set(pending_names)
     while pending_names:
@@ -1596,6 +2044,8 @@ def _referenced_block_name_from_entity(entity: Entity) -> str | None:
     if entity.dxftype in {"INSERT", "MINSERT"}:
         name = _normalize_block_name(entity.dxf.get("name"))
         if name is not None and _is_layout_pseudo_block_name(name):
+            if _should_preserve_layout_pseudo_insert(name, entity.dxf):
+                return name
             return None
         return name
     if entity.dxftype == "DIMENSION":
@@ -1626,6 +2076,105 @@ def _is_layout_pseudo_block_name(name: str) -> bool:
     return upper.startswith("*MODEL_SPACE") or upper.startswith("*PAPER_SPACE")
 
 
+def _should_preserve_layout_pseudo_insert(name: str, dxf: dict[str, Any]) -> bool:
+    # Keep only modelspace clone-like references. Paper space pseudo inserts
+    # often behave as viewport artifacts and should stay skipped.
+    if not name.upper().startswith("*MODEL_SPACE"):
+        return False
+    return _looks_like_open30_insert(dxf)
+
+
+def _layout_pseudo_alias_name(name: str) -> str:
+    normalized = "".join(ch if ch.isalnum() else "_" for ch in name.upper()).strip("_")
+    if normalized == "":
+        normalized = "LAYOUT"
+    return f"__EZDWG_LAYOUT_ALIAS_{normalized}"
+
+
+def _is_layout_pseudo_modelspace_alias_name(name: str) -> bool:
+    return name.upper().startswith(_LAYOUT_PSEUDO_MODELSPACE_ALIAS_PREFIX)
+
+
+def _ensure_layout_pseudo_block_alias(doc: Any, source_name: str) -> str | None:
+    if doc is None:
+        return None
+    by_source = _LAYOUT_PSEUDO_ALIAS_CACHE.get(doc)
+    if by_source is None:
+        by_source = {}
+        _LAYOUT_PSEUDO_ALIAS_CACHE[doc] = by_source
+    cached = by_source.get(source_name)
+    if cached:
+        try:
+            if doc.blocks.get(cached) is not None:
+                return cached
+        except Exception:
+            pass
+
+    try:
+        source_block = doc.blocks.get(source_name)
+    except Exception:
+        source_block = None
+    if source_block is None:
+        return None
+
+    alias_name = _layout_pseudo_alias_name(source_name)
+    try:
+        alias_block = doc.blocks.get(alias_name)
+    except Exception:
+        alias_block = None
+    if alias_block is None:
+        alias_block = doc.blocks.new(name=alias_name)
+        for entity in source_block:
+            if _ezdxf_entity_type(entity) == "INSERT":
+                nested_name = _normalize_block_name(getattr(getattr(entity, "dxf", None), "name", None))
+                if nested_name is not None:
+                    if _is_layout_pseudo_block_name(nested_name):
+                        continue
+                    if nested_name.upper().startswith("*D"):
+                        # Nested anonymous dimension graphics inside layout
+                        # pseudo blocks frequently expand to scattered
+                        # outliers after flattening.
+                        continue
+            try:
+                alias_block.add_entity(entity.copy())
+            except Exception:
+                continue
+    by_source[source_name] = alias_name
+    return alias_name
+
+
+def _cached_block_local_y_span(modelspace: Any, block_name: str) -> float | None:
+    doc = getattr(modelspace, "doc", None)
+    if doc is None:
+        return None
+    by_name = _BLOCK_LOCAL_Y_SPAN_CACHE.get(doc)
+    if by_name is None:
+        by_name = {}
+        _BLOCK_LOCAL_Y_SPAN_CACHE[doc] = by_name
+    if block_name in by_name:
+        return by_name[block_name]
+
+    y_values: list[float] = []
+    try:
+        block = doc.blocks.get(block_name)
+    except Exception:
+        block = None
+    if block is not None:
+        for entity in block:
+            for _x, y in _entity_xy_points(entity):
+                y_values.append(float(y))
+    if not y_values:
+        by_name[block_name] = None
+        return None
+
+    span = max(y_values) - min(y_values)
+    if not math.isfinite(span) or span <= 0.0:
+        by_name[block_name] = None
+        return None
+    by_name[block_name] = float(span)
+    return float(span)
+
+
 def _ensure_block_layout(dxf_doc: Any, name: str) -> Any:
     try:
         block_layout = dxf_doc.blocks.get(name)
@@ -1649,6 +2198,8 @@ def _write_entity_to_modelspace(
     *,
     explode_dimensions: bool = True,
     layer_name_by_handle: dict[int, str] | None = None,
+    dim_block_policy: str = "smart",
+    dimension_context: _DimensionWriteContext | None = None,
 ) -> bool:
     try:
         return _write_entity_to_modelspace_unsafe(
@@ -1656,6 +2207,8 @@ def _write_entity_to_modelspace(
             entity,
             explode_dimensions=explode_dimensions,
             layer_name_by_handle=layer_name_by_handle,
+            dim_block_policy=dim_block_policy,
+            dimension_context=dimension_context,
         )
     except Exception:
         return False
@@ -1667,6 +2220,8 @@ def _write_entity_to_modelspace_unsafe(
     *,
     explode_dimensions: bool = True,
     layer_name_by_handle: dict[int, str] | None = None,
+    dim_block_policy: str = "smart",
+    dimension_context: _DimensionWriteContext | None = None,
 ) -> bool:
     dxftype = entity.dxftype
     dxf = entity.dxf
@@ -1943,35 +2498,31 @@ def _write_entity_to_modelspace_unsafe(
         name = _normalize_block_name(dxf.get("name"))
         if name is not None:
             if _is_layout_pseudo_block_name(name):
-                return True
+                if not _should_preserve_layout_pseudo_insert(name, dxf):
+                    return True
+                alias_name = _ensure_layout_pseudo_block_alias(
+                    getattr(modelspace, "doc", None),
+                    name,
+                )
+                if alias_name is None:
+                    return True
+                name = alias_name
             insert = _point3(dxf.get("insert"))
             xscale = _finite_float(dxf.get("xscale", 1.0), 1.0)
             yscale = _finite_float(dxf.get("yscale", 1.0), 1.0)
             zscale = _finite_float(dxf.get("zscale", 1.0), 1.0)
             rotation = _finite_float(dxf.get("rotation", 0.0), 0.0)
             if is_modelspace_layout:
-                is_empty, has_nested_dim_insert, local_center_abs = _cached_block_insert_safety_info(
+                if _should_skip_anonymous_dimension_block_insert(
                     modelspace,
-                    name,
-                )
-                if _is_placeholder_anonymous_dimension_insert(
                     name,
                     insert,
                     xscale,
                     yscale,
                     zscale,
                     rotation,
-                ):
-                    return True
-                if has_nested_dim_insert:
-                    return True
-                if is_empty:
-                    return True
-                if (
-                    name.upper().startswith("*D")
-                    and max(abs(xscale), abs(yscale), abs(zscale)) >= 10.0
-                    and local_center_abs is not None
-                    and local_center_abs > 1000.0
+                    dim_block_policy=dim_block_policy,
+                    dimension_context=dimension_context,
                 ):
                     return True
             row_count = max(1, int(dxf.get("row_count", 1)))
@@ -2010,35 +2561,31 @@ def _write_entity_to_modelspace_unsafe(
         name = _normalize_block_name(dxf.get("name"))
         if name is not None:
             if _is_layout_pseudo_block_name(name):
-                return True
+                if not _should_preserve_layout_pseudo_insert(name, dxf):
+                    return True
+                alias_name = _ensure_layout_pseudo_block_alias(
+                    getattr(modelspace, "doc", None),
+                    name,
+                )
+                if alias_name is None:
+                    return True
+                name = alias_name
             insert = _point3(dxf.get("insert"))
             xscale = _finite_float(dxf.get("xscale", 1.0), 1.0)
             yscale = _finite_float(dxf.get("yscale", 1.0), 1.0)
             zscale = _finite_float(dxf.get("zscale", 1.0), 1.0)
             rotation = _finite_float(dxf.get("rotation", 0.0), 0.0)
             if is_modelspace_layout:
-                is_empty, has_nested_dim_insert, local_center_abs = _cached_block_insert_safety_info(
+                if _should_skip_anonymous_dimension_block_insert(
                     modelspace,
-                    name,
-                )
-                if _is_placeholder_anonymous_dimension_insert(
                     name,
                     insert,
                     xscale,
                     yscale,
                     zscale,
                     rotation,
-                ):
-                    return True
-                if has_nested_dim_insert:
-                    return True
-                if is_empty:
-                    return True
-                if (
-                    name.upper().startswith("*D")
-                    and max(abs(xscale), abs(yscale), abs(zscale)) >= 10.0
-                    and local_center_abs is not None
-                    and local_center_abs > 1000.0
+                    dim_block_policy=dim_block_policy,
+                    dimension_context=dimension_context,
                 ):
                     return True
             try:
@@ -2062,6 +2609,8 @@ def _write_entity_to_modelspace_unsafe(
             dxf,
             dxfattribs,
             explode_dimensions=explode_dimensions,
+            dim_block_policy=dim_block_policy,
+            dimension_context=dimension_context,
         )
 
     return False
@@ -2585,7 +3134,22 @@ def _write_dimension_native(
     dxfattribs: dict[str, Any],
     *,
     explode_dimensions: bool = True,
+    dim_block_policy: str = "smart",
+    dimension_context: _DimensionWriteContext | None = None,
 ) -> bool:
+    normalized_dim_block_policy = _normalize_dim_block_policy(dim_block_policy)
+
+    def _finalize_and_track(dim: Any) -> bool:
+        written = _finalize_dimension(
+            modelspace,
+            dim,
+            dxfattribs=dxfattribs,
+            explode_dimensions=explode_dimensions,
+        )
+        if written:
+            _remember_written_dimension_block_reference(dimension_context, dxf)
+        return written
+
     dimtype = str(dxf.get("dimtype") or "").upper()
     if dimtype.startswith("DIM_"):
         dimtype = dimtype[4:]
@@ -2594,12 +3158,24 @@ def _write_dimension_native(
     # dimension graphics in best-effort decode paths. Prefer native geometry
     # generation for those to avoid collapsing many dimensions onto one block.
     prefer_native_first = anonymous_block_name in {None, "*D"}
-    if not prefer_native_first and _write_dimension_block_fallback(modelspace, dxf, dxfattribs):
+    if not prefer_native_first and _write_dimension_block_fallback(
+        modelspace,
+        dxf,
+        dxfattribs,
+        dim_block_policy=normalized_dim_block_policy,
+        dimension_context=dimension_context,
+    ):
         return True
     if _is_placeholder_dimension_payload(dxf):
         # Keep conversion stable for minimally decoded DIM placeholders:
         # do not generate synthetic zero-length geometry.
-        if _write_dimension_block_fallback(modelspace, dxf, dxfattribs):
+        if _write_dimension_block_fallback(
+            modelspace,
+            dxf,
+            dxfattribs,
+            dim_block_policy=normalized_dim_block_policy,
+            dimension_context=dimension_context,
+        ):
             return True
         return True
     text = _dimension_text(dxf.get("text"))
@@ -2617,12 +3193,7 @@ def _write_dimension_native(
                 text_rotation=_float_or_none(dxf.get("text_rotation")),
                 dxfattribs=dxfattribs,
             )
-            return _finalize_dimension(
-                modelspace,
-                dim,
-                dxfattribs=dxfattribs,
-                explode_dimensions=explode_dimensions,
-            )
+            return _finalize_and_track(dim)
 
         if dimtype == "ALIGNED":
             p1 = _point2(dxf.get("defpoint2"))
@@ -2638,12 +3209,7 @@ def _write_dimension_native(
             )
             if text_mid is not None:
                 dim.set_location(text_mid, leader=False, relative=False)
-            return _finalize_dimension(
-                modelspace,
-                dim,
-                dxfattribs=dxfattribs,
-                explode_dimensions=explode_dimensions,
-            )
+            return _finalize_and_track(dim)
 
         if dimtype == "RADIUS":
             center = _point2(dxf.get("defpoint2"))
@@ -2656,12 +3222,7 @@ def _write_dimension_native(
             )
             if text_mid is not None:
                 dim.set_location(text_mid, leader=False, relative=False)
-            return _finalize_dimension(
-                modelspace,
-                dim,
-                dxfattribs=dxfattribs,
-                explode_dimensions=explode_dimensions,
-            )
+            return _finalize_and_track(dim)
 
         if dimtype == "DIAMETER":
             center = _point2(dxf.get("defpoint2"))
@@ -2674,12 +3235,7 @@ def _write_dimension_native(
             )
             if text_mid is not None:
                 dim.set_location(text_mid, leader=False, relative=False)
-            return _finalize_dimension(
-                modelspace,
-                dim,
-                dxfattribs=dxfattribs,
-                explode_dimensions=explode_dimensions,
-            )
+            return _finalize_and_track(dim)
 
         if dimtype == "ORDINATE":
             feature = _point2(dxf.get("defpoint2"))
@@ -2694,36 +3250,32 @@ def _write_dimension_native(
                 text=text,
                 dxfattribs=dxfattribs,
             )
-            return _finalize_dimension(
-                modelspace,
-                dim,
-                dxfattribs=dxfattribs,
-                explode_dimensions=explode_dimensions,
-            )
+            return _finalize_and_track(dim)
     except Exception:
         # Keep conversion robust and avoid generating synthetic geometry lines.
         pass
 
-    if _write_dimension_block_fallback(modelspace, dxf, dxfattribs):
+    if _write_dimension_block_fallback(
+        modelspace,
+        dxf,
+        dxfattribs,
+        dim_block_policy=normalized_dim_block_policy,
+        dimension_context=dimension_context,
+    ):
         return True
     return _write_dimension_text_fallback(modelspace, dxf, dxfattribs)
 
 
-def _write_dimension_block_fallback(
-    modelspace: Any,
+def _dimension_block_reference_transform(
     dxf: dict[str, Any],
-    dxfattribs: dict[str, Any],
-) -> bool:
-    name = _dimension_anonymous_block_name(dxf)
-    if name is None:
-        return False
-
+) -> tuple[tuple[float, float, float], float, float, float, float]:
     insert_value = dxf.get("insert")
     if insert_value is None:
         insert_value = dxf.get("text_midpoint")
     if insert_value is None:
         insert_value = dxf.get("defpoint")
     insert = _point3(insert_value)
+
     scale = dxf.get("insert_scale")
     xscale = 1.0
     yscale = 1.0
@@ -2733,6 +3285,23 @@ def _write_dimension_block_fallback(
         yscale = _finite_float(scale[1], 1.0)
         zscale = _finite_float(scale[2], 1.0)
     rotation = _finite_float(dxf.get("insert_rotation"), 0.0)
+    return (insert, xscale, yscale, zscale, rotation)
+
+
+def _write_dimension_block_fallback(
+    modelspace: Any,
+    dxf: dict[str, Any],
+    dxfattribs: dict[str, Any],
+    *,
+    dim_block_policy: str = "smart",
+    dimension_context: _DimensionWriteContext | None = None,
+) -> bool:
+    normalized_dim_block_policy = _normalize_dim_block_policy(dim_block_policy)
+    name = _dimension_anonymous_block_name(dxf)
+    if name is None:
+        return False
+
+    insert, xscale, yscale, zscale, rotation = _dimension_block_reference_transform(dxf)
     if bool(getattr(modelspace, "is_modelspace", False)):
         is_empty, has_nested_dim_insert, local_center_abs = _cached_block_insert_safety_info(
             modelspace,
@@ -2743,7 +3312,8 @@ def _write_dimension_block_fallback(
         if has_nested_dim_insert:
             return False
         if (
-            name.upper().startswith("*D")
+            normalized_dim_block_policy == "legacy"
+            and name.upper().startswith("*D")
             and max(abs(xscale), abs(yscale), abs(zscale)) >= 10.0
             and local_center_abs is not None
             and local_center_abs > 1000.0
@@ -2759,6 +3329,7 @@ def _write_dimension_block_fallback(
     ref.dxf.yscale = yscale
     ref.dxf.zscale = zscale
     ref.dxf.rotation = rotation
+    _remember_written_dimension_block_reference(dimension_context, dxf)
     return True
 
 
@@ -3000,6 +3571,227 @@ def _distinct_xy_count(points: list[tuple[float, float, float]]) -> int:
     return len({(float(point[0]), float(point[1])) for point in points})
 
 
+def _normalize_dim_block_policy(policy: str) -> str:
+    token = str(policy or "").strip().lower()
+    if token in {"", "smart", "auto", "default"}:
+        return "smart"
+    if token in _DIM_BLOCK_POLICIES:
+        return token
+    allowed = ", ".join(sorted(_DIM_BLOCK_POLICIES))
+    raise ValueError(f"unsupported dim-block policy: {policy!r} (expected one of: {allowed})")
+
+
+def _quantize_dim_block_value(value: float) -> float:
+    return round(float(value), 9)
+
+
+def _normalized_angle_degrees(value: float) -> float:
+    normalized = float(value) % 360.0
+    if abs(normalized) <= 1.0e-9:
+        return 0.0
+    if abs(normalized - 360.0) <= 1.0e-9:
+        return 0.0
+    return normalized
+
+
+def _anonymous_dimension_block_ref_key(
+    block_name: str,
+    insert: tuple[float, float, float],
+    xscale: float,
+    yscale: float,
+    zscale: float,
+    rotation: float,
+) -> tuple[str, tuple[float, float, float], tuple[float, float, float], float] | None:
+    if not block_name.upper().startswith("*D"):
+        return None
+    return (
+        block_name.strip().upper(),
+        (
+            _quantize_dim_block_value(insert[0]),
+            _quantize_dim_block_value(insert[1]),
+            _quantize_dim_block_value(insert[2]),
+        ),
+        (
+            _quantize_dim_block_value(xscale),
+            _quantize_dim_block_value(yscale),
+            _quantize_dim_block_value(zscale),
+        ),
+        _quantize_dim_block_value(_normalized_angle_degrees(rotation)),
+    )
+
+
+def _remember_written_dimension_block_reference(
+    dimension_context: _DimensionWriteContext | None,
+    dxf: dict[str, Any],
+) -> None:
+    if dimension_context is None:
+        return
+    block_name = _dimension_anonymous_block_name(dxf)
+    if block_name is None:
+        return
+    insert, xscale, yscale, zscale, rotation = _dimension_block_reference_transform(dxf)
+    key = _anonymous_dimension_block_ref_key(block_name, insert, xscale, yscale, zscale, rotation)
+    if key is None:
+        return
+    dimension_context.written_block_refs.add(key)
+
+
+def _should_skip_anonymous_dimension_block_insert(
+    modelspace: Any,
+    block_name: str,
+    insert: tuple[float, float, float],
+    xscale: float,
+    yscale: float,
+    zscale: float,
+    rotation: float,
+    *,
+    dim_block_policy: str,
+    dimension_context: _DimensionWriteContext | None,
+) -> bool:
+    is_empty, has_nested_dim_insert, local_center_abs = _cached_block_insert_safety_info(
+        modelspace,
+        block_name,
+    )
+    if is_empty:
+        return True
+    if not block_name.upper().startswith("*D"):
+        return False
+
+    normalized_policy = _normalize_dim_block_policy(dim_block_policy)
+    if has_nested_dim_insert:
+        return True
+    if _is_placeholder_anonymous_dimension_insert(
+        block_name,
+        insert,
+        xscale,
+        yscale,
+        zscale,
+        rotation,
+    ):
+        return True
+
+    if normalized_policy == "legacy":
+        if (
+            max(abs(xscale), abs(yscale), abs(zscale)) >= 10.0
+            and local_center_abs is not None
+            and local_center_abs > 1000.0
+        ):
+            return True
+        return False
+
+    if dimension_context is None:
+        return False
+
+    key = _anonymous_dimension_block_ref_key(
+        block_name,
+        insert,
+        xscale,
+        yscale,
+        zscale,
+        rotation,
+    )
+    if key is None:
+        return False
+    return key in dimension_context.written_block_refs
+
+
+def _prepare_insert_for_flatten(modelspace: Any, insert: Any) -> bool:
+    try:
+        block_name = _normalize_block_name(getattr(insert.dxf, "name", None))
+    except Exception:
+        block_name = None
+    if block_name is None:
+        return False
+    if _is_layout_pseudo_block_name(block_name):
+        return True
+
+    try:
+        insert_point = (
+            float(getattr(insert.dxf.insert, "x", 0.0)),
+            float(getattr(insert.dxf.insert, "y", 0.0)),
+            float(getattr(insert.dxf.insert, "z", 0.0)),
+        )
+    except Exception:
+        insert_point = (0.0, 0.0, 0.0)
+    xscale = _finite_float(getattr(insert.dxf, "xscale", 1.0), 1.0)
+    yscale = _finite_float(getattr(insert.dxf, "yscale", 1.0), 1.0)
+    zscale = _finite_float(getattr(insert.dxf, "zscale", 1.0), 1.0)
+    rotation = _finite_float(getattr(insert.dxf, "rotation", 0.0), 0.0)
+
+    is_empty, has_nested_dim_insert, local_center_abs = _cached_block_insert_safety_info(
+        modelspace,
+        block_name,
+    )
+    if is_empty:
+        return True
+
+    if block_name.upper().startswith("*D"):
+        if has_nested_dim_insert:
+            return True
+        if _is_placeholder_anonymous_dimension_insert(
+            block_name,
+            insert_point,
+            xscale,
+            yscale,
+            zscale,
+            rotation,
+        ):
+            return True
+
+    # Flattening applies INSERT transforms to contained entities. For blocks
+    # that already carry world-like coordinates, large scales produce extreme
+    # outliers and collapse the visible drawing in lightweight renderers.
+    # Normalize scale before explode instead of dropping potentially useful
+    # geometry.
+    if (
+        max(abs(xscale), abs(yscale), abs(zscale)) >= 10.0
+        and local_center_abs is not None
+        and local_center_abs > 1000.0
+    ):
+        try:
+            insert.dxf.xscale = 1.0
+            insert.dxf.yscale = 1.0
+            insert.dxf.zscale = 1.0
+            if _is_layout_pseudo_modelspace_alias_name(block_name):
+                # Layout pseudo aliases represent viewport-like snapshots.
+                # Some files carry 90/270-degree rotations that should be
+                # normalized to the landscape orientation before explode.
+                local_y_span = _cached_block_local_y_span(modelspace, block_name)
+                normalized_rotation = _normalized_angle_degrees(rotation)
+                if (
+                    local_y_span is not None
+                    and 45.0 <= normalized_rotation <= 135.0
+                ):
+                    normalized_insert_y = insert_point[1]
+                    if local_center_abs is not None and local_center_abs > 1000.0:
+                        # Layout pseudo aliases often embed world coordinates in
+                        # block-local space; keeping insert.y shifts the exploded
+                        # copy upward by that offset.
+                        normalized_insert_y = 0.0
+                    insert.dxf.insert = (
+                        insert_point[0] - local_y_span,
+                        normalized_insert_y,
+                        insert_point[2],
+                    )
+                    insert.dxf.rotation = 0.0
+                elif (
+                    local_y_span is not None
+                    and 225.0 <= normalized_rotation <= 315.0
+                ):
+                    insert.dxf.insert = (
+                        insert_point[0],
+                        insert_point[1] - local_y_span,
+                        insert_point[2],
+                    )
+                    insert.dxf.rotation = 180.0
+        except Exception:
+            # If normalization is unavailable, keep the entity so explode()
+            # can still attempt best-effort expansion.
+            pass
+        return False
+    return False
+
+
 def _cached_block_insert_safety_info(
     modelspace: Any,
     block_name: str,
@@ -3031,61 +3823,59 @@ def _cached_block_insert_safety_info(
     is_empty = len(entities) == 0
     has_nested_dim_insert = False
     local_center_abs: float | None = None
+    min_x = math.inf
+    min_y = math.inf
+    max_x = -math.inf
+    max_y = -math.inf
 
-    if block_name.upper().startswith("*D"):
-        min_x = math.inf
-        min_y = math.inf
-        max_x = -math.inf
-        max_y = -math.inf
+    def _push_xy(x: Any, y: Any) -> None:
+        nonlocal min_x, min_y, max_x, max_y
+        try:
+            x_val = float(x)
+            y_val = float(y)
+        except Exception:
+            return
+        if not (math.isfinite(x_val) and math.isfinite(y_val)):
+            return
+        min_x = min(min_x, x_val)
+        min_y = min(min_y, y_val)
+        max_x = max(max_x, x_val)
+        max_y = max(max_y, y_val)
 
-        def _push_xy(x: Any, y: Any) -> None:
-            nonlocal min_x, min_y, max_x, max_y
+    for entity in entities:
+        dxftype = entity.dxftype()
+        dxf = entity.dxf
+        if dxftype in {"INSERT", "MINSERT"}:
+            nested_name = _normalize_block_name(getattr(dxf, "name", None))
+            if nested_name is not None and nested_name.upper().startswith("*D"):
+                has_nested_dim_insert = True
+            _push_xy(getattr(dxf.insert, "x", 0.0), getattr(dxf.insert, "y", 0.0))
+            continue
+        if dxftype == "LINE":
+            _push_xy(getattr(dxf.start, "x", 0.0), getattr(dxf.start, "y", 0.0))
+            _push_xy(getattr(dxf.end, "x", 0.0), getattr(dxf.end, "y", 0.0))
+            continue
+        if dxftype == "POINT":
+            _push_xy(getattr(dxf.location, "x", 0.0), getattr(dxf.location, "y", 0.0))
+            continue
+        if dxftype in {"ARC", "CIRCLE"}:
+            _push_xy(getattr(dxf.center, "x", 0.0), getattr(dxf.center, "y", 0.0))
+            continue
+        if dxftype in {"TEXT", "MTEXT"}:
+            _push_xy(getattr(dxf.insert, "x", 0.0), getattr(dxf.insert, "y", 0.0))
+            continue
+        if dxftype == "LWPOLYLINE":
             try:
-                x_val = float(x)
-                y_val = float(y)
+                for point in entity.get_points("xy"):
+                    if len(point) >= 2:
+                        _push_xy(point[0], point[1])
             except Exception:
-                return
-            if not (math.isfinite(x_val) and math.isfinite(y_val)):
-                return
-            min_x = min(min_x, x_val)
-            min_y = min(min_y, y_val)
-            max_x = max(max_x, x_val)
-            max_y = max(max_y, y_val)
+                continue
 
-        for entity in entities:
-            dxftype = entity.dxftype()
-            dxf = entity.dxf
-            if dxftype in {"INSERT", "MINSERT"}:
-                nested_name = _normalize_block_name(getattr(dxf, "name", None))
-                if nested_name is not None and nested_name.upper().startswith("*D"):
-                    has_nested_dim_insert = True
-                _push_xy(getattr(dxf.insert, "x", 0.0), getattr(dxf.insert, "y", 0.0))
-                continue
-            if dxftype == "LINE":
-                _push_xy(getattr(dxf.start, "x", 0.0), getattr(dxf.start, "y", 0.0))
-                _push_xy(getattr(dxf.end, "x", 0.0), getattr(dxf.end, "y", 0.0))
-                continue
-            if dxftype == "POINT":
-                _push_xy(getattr(dxf.location, "x", 0.0), getattr(dxf.location, "y", 0.0))
-                continue
-            if dxftype in {"ARC", "CIRCLE"}:
-                _push_xy(getattr(dxf.center, "x", 0.0), getattr(dxf.center, "y", 0.0))
-                continue
-            if dxftype in {"TEXT", "MTEXT"}:
-                _push_xy(getattr(dxf.insert, "x", 0.0), getattr(dxf.insert, "y", 0.0))
-                continue
-            if dxftype == "LWPOLYLINE":
-                try:
-                    for point in entity.get_points("xy"):
-                        if len(point) >= 2:
-                            _push_xy(point[0], point[1])
-                except Exception:
-                    continue
-
-        if math.isfinite(min_x) and math.isfinite(min_y):
-            center_x = (min_x + max_x) * 0.5
-            center_y = (min_y + max_y) * 0.5
-            local_center_abs = max(abs(center_x), abs(center_y))
+    if math.isfinite(min_x) and math.isfinite(min_y):
+        center_x = (min_x + max_x) * 0.5
+        center_y = (min_y + max_y) * 0.5
+        local_center_abs = max(abs(center_x), abs(center_y))
 
     info = (is_empty, has_nested_dim_insert, local_center_abs)
     by_name[block_name] = info

@@ -95,7 +95,9 @@ pub use lwpolyline::{
     decode_lwpolyline, decode_lwpolyline_r14, decode_lwpolyline_r2007, decode_lwpolyline_r2010,
     decode_lwpolyline_r2013, LwPolylineEntity,
 };
-pub use minsert::{decode_minsert, MInsertEntity};
+pub use minsert::{
+    decode_minsert, decode_minsert_r2007, decode_minsert_r2010, decode_minsert_r2013, MInsertEntity,
+};
 pub use mline::{
     decode_mline, decode_mline_r2007, decode_mline_r2010, decode_mline_r2013, MLineEntity,
     MLineVertex,
