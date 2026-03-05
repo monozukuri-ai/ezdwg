@@ -94,6 +94,11 @@ _DIM_BLOCK_POLICIES = {"smart", "legacy"}
 _OPEN30_REMAP_SCALE_MIN = 30.0
 _OPEN30_REMAP_SCALE_MAX = 120.0
 _OPEN30_REMAP_ANGLE_EPS = 1.0e-3
+_OPEN30_LEFT_OUTER_WIDTH = 25230.0
+_OPEN30_LEFT_OUTER_HEIGHT = 17820.0
+_OPEN30_INNER_WIDTH = 23130.0
+_OPEN30_INNER_HEIGHT = 15720.0
+_OPEN30_SHEET_GAP = 1050.0
 _LAYOUT_PSEUDO_MODELSPACE_ALIAS_PREFIX = "__EZDWG_LAYOUT_ALIAS_MODEL_SPACE"
 
 
@@ -646,6 +651,90 @@ def _flatten_modelspace_inserts(modelspace: Any, *, max_depth: int = 8) -> None:
         _prune_generated_entities_outside_known_sheet_windows(modelspace, original_entity_ids)
 
 
+def _collect_large_rect_bboxes(
+    polylines: list[Any],
+    *,
+    min_width: float = 20000.0,
+    min_height: float = 14000.0,
+) -> list[tuple[float, float, float, float]]:
+    result: list[tuple[float, float, float, float]] = []
+    for polyline in polylines:
+        bbox = _axis_aligned_lwpolyline_rect_bbox(polyline)
+        if bbox is None:
+            continue
+        min_x, max_x, min_y, max_y = bbox
+        width = max_x - min_x
+        height = max_y - min_y
+        if width < min_width or height < min_height:
+            continue
+        result.append((min_x, max_x, min_y, max_y))
+    return result
+
+
+def _find_open30_sheet_windows(
+    large_rects: list[tuple[float, float, float, float]],
+    *,
+    tolerance: float = 30.0,
+) -> tuple[tuple[float, float, float, float], tuple[float, float, float, float]] | None:
+    left_outer: tuple[float, float, float, float] | None = None
+    for min_x, max_x, min_y, max_y in large_rects:
+        width = max_x - min_x
+        height = max_y - min_y
+        if abs(width - _OPEN30_LEFT_OUTER_WIDTH) > tolerance or abs(height - _OPEN30_LEFT_OUTER_HEIGHT) > tolerance:
+            continue
+        if abs(min_x) > 300.0 or abs(min_y) > 300.0:
+            continue
+        left_outer = (min_x, max_x, min_y, max_y)
+        break
+    if left_outer is None:
+        return None
+
+    right_base: tuple[float, float, float, float] | None = None
+    for min_x, max_x, min_y, max_y in large_rects:
+        width = max_x - min_x
+        height = max_y - min_y
+        if abs(width - _OPEN30_INNER_WIDTH) > tolerance or abs(height - _OPEN30_INNER_HEIGHT) > tolerance:
+            continue
+        # Canonical separation in this series is about +1050 from left outer
+        # max_x, but malformed snapshots can drift upward. Accept the nearest
+        # plausible right window candidate above a small positive gap.
+        if min_x <= left_outer[1] + 500.0:
+            continue
+        if min_y < 1200.0 or min_y > 1800.0:
+            continue
+        if right_base is None or min_x < right_base[0]:
+            right_base = (min_x, max_x, min_y, max_y)
+    if right_base is None:
+        return None
+    return (left_outer, right_base)
+
+
+def _point_inside_any_rect(
+    x: float,
+    y: float,
+    rects: list[tuple[float, float, float, float]],
+    *,
+    margin: float = 0.0,
+) -> bool:
+    for min_x, max_x, min_y, max_y in rects:
+        if (min_x - margin) <= x <= (max_x + margin) and (min_y - margin) <= y <= (max_y + margin):
+            return True
+    return False
+
+
+def _line_entity_length(entity: Any) -> float | None:
+    dxf = getattr(entity, "dxf", None)
+    if dxf is None:
+        return None
+    try:
+        return math.hypot(
+            float(dxf.end.x) - float(dxf.start.x),
+            float(dxf.end.y) - float(dxf.start.y),
+        )
+    except Exception:
+        return None
+
+
 def _prune_generated_entities_outside_known_sheet_windows(
     modelspace: Any,
     original_entity_ids: set[int],
@@ -657,51 +746,14 @@ def _prune_generated_entities_outside_known_sheet_windows(
     if not polylines:
         return
 
-    large_rects: list[tuple[float, float, float, float]] = []
-    for polyline in polylines:
-        bbox = _axis_aligned_lwpolyline_rect_bbox(polyline)
-        if bbox is None:
-            continue
-        min_x, max_x, min_y, max_y = bbox
-        width = max_x - min_x
-        height = max_y - min_y
-        if width < 20000.0 or height < 14000.0:
-            continue
-        large_rects.append((min_x, max_x, min_y, max_y))
+    large_rects = _collect_large_rect_bboxes(polylines)
     if not large_rects:
         return
 
-    left_outer: tuple[float, float, float, float] | None = None
-    for min_x, max_x, min_y, max_y in large_rects:
-        width = max_x - min_x
-        height = max_y - min_y
-        if abs(width - 25230.0) > 30.0 or abs(height - 17820.0) > 30.0:
-            continue
-        if abs(min_x) > 300.0 or abs(min_y) > 300.0:
-            continue
-        left_outer = (min_x, max_x, min_y, max_y)
-        break
-    if left_outer is None:
+    windows = _find_open30_sheet_windows(large_rects)
+    if windows is None:
         return
-
-    left_min_x, left_max_x, _left_min_y, _left_max_y = left_outer
-    right_base: tuple[float, float, float, float] | None = None
-    for min_x, max_x, min_y, max_y in large_rects:
-        width = max_x - min_x
-        height = max_y - min_y
-        if abs(width - 23130.0) > 30.0 or abs(height - 15720.0) > 30.0:
-            continue
-        # Canonical separation in this series is about +1050 from left outer
-        # max_x, but malformed snapshots can drift upward. Accept the nearest
-        # plausible right window candidate above a small positive gap.
-        if min_x <= left_max_x + 500.0:
-            continue
-        if min_y < 1200.0 or min_y > 1800.0:
-            continue
-        if right_base is None or min_x < right_base[0]:
-            right_base = (min_x, max_x, min_y, max_y)
-    if right_base is None:
-        return
+    left_outer, right_base = windows
 
     window_margin = 250.0
     keep_windows = [
@@ -719,12 +771,6 @@ def _prune_generated_entities_outside_known_sheet_windows(
         ),
     ]
 
-    def _inside_keep_windows(x: float, y: float) -> bool:
-        for min_x, max_x, min_y, max_y in keep_windows:
-            if min_x <= x <= max_x and min_y <= y <= max_y:
-                return True
-        return False
-
     try:
         entities = list(modelspace)
     except Exception:
@@ -739,24 +785,16 @@ def _prune_generated_entities_outside_known_sheet_windows(
         points = _entity_xy_points(entity)
         if not points:
             continue
-        if any(_inside_keep_windows(x, y) for x, y in points):
+        if any(_point_inside_any_rect(x, y, keep_windows) for x, y in points):
             continue
 
         should_delete = False
         if token in {"POINT", "TEXT", "MTEXT"}:
             should_delete = True
         elif token == "LINE":
-            dxf = getattr(entity, "dxf", None)
-            if dxf is not None:
-                try:
-                    line_len = math.hypot(
-                        float(dxf.end.x) - float(dxf.start.x),
-                        float(dxf.end.y) - float(dxf.start.y),
-                    )
-                    if line_len <= 5000.0:
-                        should_delete = True
-                except Exception:
-                    should_delete = False
+            line_len = _line_entity_length(entity)
+            if line_len is not None and line_len <= 5000.0:
+                should_delete = True
         elif token in {"ARC", "CIRCLE", "LWPOLYLINE", "POLYLINE"}:
             center_bbox = _entity_center_bbox(entity)
             if center_bbox is not None:
@@ -782,50 +820,16 @@ def _realign_generated_right_sheet_window(
     if not polylines:
         return
 
-    large_rects: list[tuple[float, float, float, float]] = []
-    for polyline in polylines:
-        bbox = _axis_aligned_lwpolyline_rect_bbox(polyline)
-        if bbox is None:
-            continue
-        min_x, max_x, min_y, max_y = bbox
-        width = max_x - min_x
-        height = max_y - min_y
-        if width < 20000.0 or height < 14000.0:
-            continue
-        large_rects.append((min_x, max_x, min_y, max_y))
+    large_rects = _collect_large_rect_bboxes(polylines)
     if not large_rects:
         return
 
-    left_outer: tuple[float, float, float, float] | None = None
-    for min_x, max_x, min_y, max_y in large_rects:
-        width = max_x - min_x
-        height = max_y - min_y
-        if abs(width - 25230.0) > 30.0 or abs(height - 17820.0) > 30.0:
-            continue
-        if abs(min_x) > 300.0 or abs(min_y) > 300.0:
-            continue
-        left_outer = (min_x, max_x, min_y, max_y)
-        break
-    if left_outer is None:
+    windows = _find_open30_sheet_windows(large_rects)
+    if windows is None:
         return
+    left_outer, right_base = windows
 
-    right_base: tuple[float, float, float, float] | None = None
-    for min_x, max_x, min_y, max_y in large_rects:
-        width = max_x - min_x
-        height = max_y - min_y
-        if abs(width - 23130.0) > 30.0 or abs(height - 15720.0) > 30.0:
-            continue
-        # Canonical right sheet starts near left_outer.max_x + 1050.
-        if min_x <= left_outer[1] + 500.0:
-            continue
-        if min_y < 1200.0 or min_y > 1800.0:
-            continue
-        if right_base is None or min_x < right_base[0]:
-            right_base = (min_x, max_x, min_y, max_y)
-    if right_base is None:
-        return
-
-    expected_right_min_x = left_outer[1] + 1050.0
+    expected_right_min_x = left_outer[1] + _OPEN30_SHEET_GAP
     delta_x = expected_right_min_x - right_base[0]
     if not math.isfinite(delta_x) or abs(delta_x) < 1.0e-6:
         return
@@ -1231,20 +1235,11 @@ def _prune_flatten_tiny_generated_clusters(
 
     major_margin = 250.0
 
-    def _inside_major_regions(center_x: float, center_y: float, *, margin: float) -> bool:
-        for major_min_x, major_max_x, major_min_y, major_max_y in major_regions:
-            if (
-                (major_min_x - margin) <= center_x <= (major_max_x + margin)
-                and (major_min_y - margin) <= center_y <= (major_max_y + margin)
-            ):
-                return True
-        return False
-
     footer_keep_windows: list[tuple[float, float, float, float]] = []
     for _entity, _is_original, _center_x, _center_y, min_x, max_x, min_y, max_y in metadata:
         width = max_x - min_x
         height = max_y - min_y
-        if abs(width - 23130.0) > 20.0 or abs(height - 15720.0) > 20.0:
+        if abs(width - _OPEN30_INNER_WIDTH) > 20.0 or abs(height - _OPEN30_INNER_HEIGHT) > 20.0:
             continue
         if min_x < 500.0 or min_y < 1200.0 or min_y > 1800.0:
             continue
@@ -1271,12 +1266,6 @@ def _prune_flatten_tiny_generated_clusters(
         if not duplicate:
             footer_keep_windows.append(window)
 
-    def _inside_footer_keep_windows(center_x: float, center_y: float) -> bool:
-        for min_x, max_x, min_y, max_y in footer_keep_windows:
-            if min_x <= center_x <= max_x and min_y <= center_y <= max_y:
-                return True
-        return False
-
     for component in components:
         # Layout-alias explode can produce medium-sized detached fragments
         # (dimension helper remnants). Keep the threshold above tiny noise so
@@ -1293,26 +1282,17 @@ def _prune_flatten_tiny_generated_clusters(
             continue
         center_x = (min_x + max_x) * 0.5
         center_y = (min_y + max_y) * 0.5
-        if _inside_major_regions(center_x, center_y, margin=major_margin):
+        if _point_inside_any_rect(center_x, center_y, major_regions, margin=major_margin):
             continue
-        if _inside_footer_keep_windows(center_x, center_y):
+        if _point_inside_any_rect(center_x, center_y, footer_keep_windows):
             continue
         has_long_line = False
         for index in component:
             entity = metadata[index][0]
             if _ezdxf_entity_type(entity) != "LINE":
                 continue
-            dxf = getattr(entity, "dxf", None)
-            if dxf is None:
-                continue
-            try:
-                line_len = math.hypot(
-                    float(dxf.end.x) - float(dxf.start.x),
-                    float(dxf.end.y) - float(dxf.start.y),
-                )
-            except Exception:
-                continue
-            if line_len > 220.0:
+            line_len = _line_entity_length(entity)
+            if line_len is not None and line_len > 220.0:
                 has_long_line = True
                 break
         if has_long_line:
@@ -1330,52 +1310,30 @@ def _prune_flatten_tiny_generated_clusters(
     for entity, is_original, center_x, center_y, _min_x, _max_x, _min_y, _max_y in metadata:
         if id(entity) in deleted_entity_ids:
             continue
+        if is_original:
+            # Keep source geometry intact; this pass should only trim artifacts
+            # generated while flattening INSERT hierarchies.
+            continue
+        if _point_inside_any_rect(center_x, center_y, major_regions, margin=major_margin):
+            continue
+        if _point_inside_any_rect(center_x, center_y, footer_keep_windows):
+            continue
+        token = _ezdxf_entity_type(entity)
         abs_extent = max(
             abs(float(_min_x)),
             abs(float(_max_x)),
             abs(float(_min_y)),
             abs(float(_max_y)),
         )
-        if (not math.isfinite(abs_extent)) or abs_extent > 1.0e12:
-            try:
-                modelspace.delete_entity(entity)
-                deleted_entity_ids.add(id(entity))
-            except Exception:
-                pass
-            continue
-        if is_original:
-            # Keep source geometry intact; this pass should only trim artifacts
-            # generated while flattening INSERT hierarchies.
-            continue
-        if _inside_major_regions(center_x, center_y, margin=major_margin):
-            continue
-        if _inside_footer_keep_windows(center_x, center_y):
-            continue
-        token = _ezdxf_entity_type(entity)
-        near_origin = (
-            max(
-                abs(float(_min_x)),
-                abs(float(_max_x)),
-                abs(float(_min_y)),
-                abs(float(_max_y)),
-            )
-            <= 2500.0
-        )
+        near_origin = abs_extent <= 2500.0
         should_delete = token in {"POINT", "TEXT", "MTEXT"}
         if not should_delete and near_origin and token in {"ARC", "CIRCLE", "LWPOLYLINE"}:
             should_delete = True
         if not should_delete and token == "LINE":
-            dxf = getattr(entity, "dxf", None)
-            if dxf is not None:
-                try:
-                    line_len = math.hypot(
-                        float(dxf.end.x) - float(dxf.start.x),
-                        float(dxf.end.y) - float(dxf.start.y),
-                    )
-                    if line_len <= 220.0 or (near_origin and line_len <= 1800.0):
-                        should_delete = True
-                except Exception:
-                    should_delete = False
+            line_len = _line_entity_length(entity)
+            if line_len is not None:
+                if line_len <= 220.0 or (near_origin and line_len <= 1800.0):
+                    should_delete = True
         if not should_delete:
             continue
         try:
@@ -1454,7 +1412,7 @@ def _restore_known_layout_frame_polylines(modelspace: Any) -> None:
     for polyline, min_x, max_x, min_y, max_y in rectangles:
         width = max_x - min_x
         height = max_y - min_y
-        if abs(width - 23130.0) > 20.0 or abs(height - 15720.0) > 20.0:
+        if abs(width - _OPEN30_INNER_WIDTH) > 20.0 or abs(height - _OPEN30_INNER_HEIGHT) > 20.0:
             continue
         if min_x < -50.0 or min_x > 1100.0:
             continue
@@ -1524,8 +1482,8 @@ def _restore_known_layout_frame_polylines(modelspace: Any) -> None:
 
     _add_rect(base_min_x, base_max_x, base_min_y - 900.0, base_max_y)
     _add_rect(
-        base_min_x - 1050.0,
-        base_max_x + 1050.0,
+        base_min_x - _OPEN30_SHEET_GAP,
+        base_max_x + _OPEN30_SHEET_GAP,
         base_min_y - 1500.0,
         base_max_y + 600.0,
     )
@@ -2887,22 +2845,6 @@ def _entities_by_handle(layout: Layout, types: set[str]) -> dict[int, Entity]:
 
 def _entities_by_handle_no_styles(layout: Layout, types: set[str]) -> dict[int, Entity]:
     return _entities_by_handle_impl(layout, types, include_styles=False)
-
-
-def _entities_by_handle_and_type(
-    layout: Layout,
-    types: set[str],
-) -> dict[tuple[int, str], Entity]:
-    by_key = _entities_by_handle_and_type_multi_impl(layout, types, include_styles=True)
-    return {key: entities[0] for key, entities in by_key.items() if entities}
-
-
-def _entities_by_handle_and_type_no_styles(
-    layout: Layout,
-    types: set[str],
-) -> dict[tuple[int, str], Entity]:
-    by_key = _entities_by_handle_and_type_multi_impl(layout, types, include_styles=False)
-    return {key: entities[0] for key, entities in by_key.items() if entities}
 
 
 def _entities_by_handle_and_type_multi(

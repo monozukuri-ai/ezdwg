@@ -2299,15 +2299,15 @@ def test_entities_by_handle_and_type_keeps_duplicate_handles_by_dxftype() -> Non
                 ]
             return []
 
-    result = convert_module._entities_by_handle_and_type(
+    result = convert_module._entities_by_handle_and_type_multi(
         _DummyLayout(),
         {"LINE", "TEXT"},
     )
 
     assert (42, "LINE") in result
     assert (42, "TEXT") in result
-    assert result[(42, "LINE")].dxftype == "LINE"
-    assert result[(42, "TEXT")].dxftype == "TEXT"
+    assert result[(42, "LINE")][0].dxftype == "LINE"
+    assert result[(42, "TEXT")][0].dxftype == "TEXT"
 
 
 def test_deduplicate_layout_pseudo_inserts_by_handle_keeps_first_preserved_insert() -> None:
