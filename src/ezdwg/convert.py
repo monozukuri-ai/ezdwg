@@ -516,6 +516,12 @@ def to_dxf(
         modelspace_only=modelspace_only,
         decode_cache=decode_cache,
     )
+    if not modelspace_only:
+        source_entities = _maybe_prefer_modelspace_filtered_entities(
+            layout,
+            source_entities,
+            decode_cache=decode_cache,
+        )
     if _has_problematic_i_inserts(source_entities):
         available_block_names = _available_block_names(
             layout.doc.decode_path or layout.doc.path,
@@ -569,6 +575,10 @@ def to_dxf(
             dim_block_policy=normalized_dim_block_policy,
             decode_cache=decode_cache,
         )
+        # Block definitions are assembled just above; drop memoized block
+        # safety/span caches so modelspace INSERT handling sees final content.
+        _BLOCK_INSERT_SAFETY_CACHE.pop(dxf_doc, None)
+        _BLOCK_LOCAL_Y_SPAN_CACHE.pop(dxf_doc, None)
 
     total = 0
     written = 0
@@ -596,6 +606,9 @@ def to_dxf(
         raise ValueError(f"failed to convert {skipped} entities ({summary})")
 
     _restore_sparse_open30_left_window(modelspace)
+    _restore_known_layout_frame_polylines(modelspace)
+    _replace_layout_alias_with_open30_right_sheet_inserts(modelspace)
+    _rebalance_sparse_open30_right_sheet_geometry(modelspace)
 
     if flatten_inserts:
         _flatten_modelspace_inserts(modelspace)
@@ -1909,6 +1922,429 @@ def _restore_known_layout_frame_polylines(modelspace: Any) -> None:
             continue
 
 
+def _open30_insert_signature(insert: Any) -> tuple[float, float, float, float, float, float, float]:
+    dxf = getattr(insert, "dxf", None)
+    x = _finite_float(getattr(getattr(dxf, "insert", None), "x", 0.0), 0.0)
+    y = _finite_float(getattr(getattr(dxf, "insert", None), "y", 0.0), 0.0)
+    z = _finite_float(getattr(getattr(dxf, "insert", None), "z", 0.0), 0.0)
+    xscale = _finite_float(getattr(dxf, "xscale", 1.0), 1.0)
+    yscale = _finite_float(getattr(dxf, "yscale", 1.0), 1.0)
+    zscale = _finite_float(getattr(dxf, "zscale", 1.0), 1.0)
+    rotation = _finite_float(getattr(dxf, "rotation", 0.0), 0.0)
+    return (
+        round(x, 6),
+        round(y, 6),
+        round(z, 6),
+        round(xscale, 6),
+        round(yscale, 6),
+        round(zscale, 6),
+        round(rotation, 6),
+    )
+
+
+def _replace_layout_alias_with_open30_right_sheet_inserts(modelspace: Any) -> None:
+    try:
+        all_inserts = list(modelspace.query("INSERT"))
+    except Exception:
+        return
+    alias_inserts: list[Any] = []
+    open30_inserts: list[Any] = []
+    for insert in all_inserts:
+        name = _normalize_block_name(getattr(getattr(insert, "dxf", None), "name", None))
+        if name is None:
+            continue
+        if _is_layout_pseudo_modelspace_alias_name(name):
+            alias_inserts.append(insert)
+            continue
+        if name != "_Open30":
+            continue
+        dxf = getattr(insert, "dxf", None)
+        if dxf is None:
+            continue
+        dxf_like = {
+            "xscale": _finite_float(getattr(dxf, "xscale", 1.0), 1.0),
+            "yscale": _finite_float(getattr(dxf, "yscale", 1.0), 1.0),
+            "zscale": _finite_float(getattr(dxf, "zscale", 1.0), 1.0),
+            "rotation": _finite_float(getattr(dxf, "rotation", 0.0), 0.0),
+        }
+        if _looks_like_open30_insert(dxf_like):
+            open30_inserts.append(insert)
+    if not alias_inserts or len(open30_inserts) < 3:
+        return
+
+    def _insert_x(entry: Any) -> float:
+        dxf = getattr(entry, "dxf", None)
+        insert = getattr(dxf, "insert", None)
+        return _finite_float(getattr(insert, "x", 0.0), 0.0)
+
+    ordered = sorted(open30_inserts, key=_insert_x)
+    left_inserts = [insert for insert in ordered if _finite_float(insert.dxf.insert.x, 0.0) < _OPEN30_LEFT_OUTER_WIDTH]
+    if len(left_inserts) < 3:
+        left_inserts = ordered[:3]
+    if len(left_inserts) < 3:
+        return
+    left_inserts = left_inserts[:3]
+
+    existing = {_open30_insert_signature(insert) for insert in open30_inserts}
+    for insert in left_inserts:
+        insert_x = _finite_float(getattr(insert.dxf.insert, "x", 0.0), 0.0)
+        insert_y = _finite_float(getattr(insert.dxf.insert, "y", 0.0), 0.0)
+        insert_z = _finite_float(getattr(insert.dxf.insert, "z", 0.0), 0.0)
+        xscale = _finite_float(getattr(insert.dxf, "xscale", 1.0), 1.0)
+        yscale = _finite_float(getattr(insert.dxf, "yscale", 1.0), 1.0)
+        zscale = _finite_float(getattr(insert.dxf, "zscale", 1.0), 1.0)
+        rotation = _finite_float(getattr(insert.dxf, "rotation", 0.0), 0.0)
+        target_signature = (
+            round(insert_x + _OPEN30_LEFT_OUTER_WIDTH, 6),
+            round(insert_y, 6),
+            round(insert_z, 6),
+            round(xscale, 6),
+            round(yscale, 6),
+            round(zscale, 6),
+            round(rotation, 6),
+        )
+        if target_signature in existing:
+            continue
+        dxfattribs: dict[str, Any] = {}
+        layer = getattr(insert.dxf, "layer", None)
+        if isinstance(layer, str) and layer:
+            dxfattribs["layer"] = layer
+        color = _to_valid_aci(getattr(insert.dxf, "color", None))
+        if color is not None:
+            dxfattribs["color"] = color
+        true_color = _to_valid_true_color(getattr(insert.dxf, "true_color", None))
+        if true_color is not None:
+            dxfattribs["true_color"] = true_color
+        try:
+            ref = modelspace.add_blockref(
+                "_Open30",
+                (insert_x + _OPEN30_LEFT_OUTER_WIDTH, insert_y, insert_z),
+                dxfattribs=dxfattribs or None,
+            )
+            ref.dxf.xscale = xscale
+            ref.dxf.yscale = yscale
+            ref.dxf.zscale = zscale
+            ref.dxf.rotation = rotation
+            existing.add(target_signature)
+        except Exception:
+            continue
+
+    for insert in alias_inserts:
+        try:
+            modelspace.delete_entity(insert)
+        except Exception:
+            continue
+
+
+def _entity_representative_x(entity: Any) -> float | None:
+    dxf = getattr(entity, "dxf", None)
+    if dxf is None:
+        return None
+    dxftype = _ezdxf_entity_type(entity)
+    try:
+        if dxftype == "LINE":
+            return (
+                _finite_float(getattr(dxf.start, "x", 0.0), 0.0)
+                + _finite_float(getattr(dxf.end, "x", 0.0), 0.0)
+            ) * 0.5
+        if dxftype in {"ARC", "CIRCLE", "ELLIPSE"}:
+            return _finite_float(getattr(dxf.center, "x", 0.0), 0.0)
+        if dxftype in {"TEXT", "MTEXT", "INSERT"}:
+            return _finite_float(getattr(dxf.insert, "x", 0.0), 0.0)
+        if dxftype == "POINT":
+            return _finite_float(getattr(dxf.location, "x", 0.0), 0.0)
+        if dxftype == "DIMENSION":
+            if hasattr(dxf, "defpoint"):
+                return _finite_float(getattr(dxf.defpoint, "x", 0.0), 0.0)
+            return _finite_float(getattr(dxf.text_midpoint, "x", 0.0), 0.0)
+        if dxftype == "LWPOLYLINE":
+            try:
+                points = list(entity.get_points("xy"))
+            except Exception:
+                points = []
+            if not points:
+                return None
+            total_x = 0.0
+            count = 0
+            for point in points:
+                if len(point) < 2:
+                    continue
+                total_x += _finite_float(point[0], 0.0)
+                count += 1
+            if count <= 0:
+                return None
+            return total_x / float(count)
+        if dxftype == "LEADER":
+            try:
+                vertices = list(entity.vertices)
+            except Exception:
+                vertices = []
+            if not vertices:
+                return None
+            total_x = 0.0
+            count = 0
+            for vertex in vertices:
+                if len(vertex) < 2:
+                    continue
+                total_x += _finite_float(vertex[0], 0.0)
+                count += 1
+            if count <= 0:
+                return None
+            return total_x / float(count)
+    except Exception:
+        return None
+    return None
+
+
+def _entity_overlap_signature(entity: Any) -> tuple[Any, ...] | None:
+    dxf = getattr(entity, "dxf", None)
+    if dxf is None:
+        return None
+    dxftype = _ezdxf_entity_type(entity)
+    try:
+        if dxftype == "LINE":
+            p1 = (
+                _rounded_coord(float(dxf.start.x), ndigits=4),
+                _rounded_coord(float(dxf.start.y), ndigits=4),
+            )
+            p2 = (
+                _rounded_coord(float(dxf.end.x), ndigits=4),
+                _rounded_coord(float(dxf.end.y), ndigits=4),
+            )
+            a, b = (p1, p2) if p1 <= p2 else (p2, p1)
+            return (dxftype, a, b)
+        if dxftype == "ARC":
+            center = (
+                _rounded_coord(float(dxf.center.x), ndigits=4),
+                _rounded_coord(float(dxf.center.y), ndigits=4),
+            )
+            return (
+                dxftype,
+                center,
+                _rounded_coord(float(dxf.radius), ndigits=4),
+                _rounded_coord(float(dxf.start_angle), ndigits=3),
+                _rounded_coord(float(dxf.end_angle), ndigits=3),
+            )
+        if dxftype == "CIRCLE":
+            center = (
+                _rounded_coord(float(dxf.center.x), ndigits=4),
+                _rounded_coord(float(dxf.center.y), ndigits=4),
+            )
+            return (
+                dxftype,
+                center,
+                _rounded_coord(float(dxf.radius), ndigits=4),
+            )
+        if dxftype == "ELLIPSE":
+            center = (
+                _rounded_coord(float(dxf.center.x), ndigits=4),
+                _rounded_coord(float(dxf.center.y), ndigits=4),
+            )
+            major = (
+                _rounded_coord(float(dxf.major_axis.x), ndigits=4),
+                _rounded_coord(float(dxf.major_axis.y), ndigits=4),
+            )
+            return (
+                dxftype,
+                center,
+                major,
+                _rounded_coord(float(dxf.ratio), ndigits=5),
+                _rounded_coord(float(getattr(dxf, "start_param", 0.0)), ndigits=5),
+                _rounded_coord(float(getattr(dxf, "end_param", 0.0)), ndigits=5),
+            )
+        if dxftype == "LWPOLYLINE":
+            points = tuple(
+                (
+                    _rounded_coord(float(point[0]), ndigits=4),
+                    _rounded_coord(float(point[1]), ndigits=4),
+                )
+                for point in entity.get_points("xy")
+                if len(point) >= 2
+            )
+            if not points:
+                return None
+            return (dxftype, bool(getattr(dxf, "closed", False)), points)
+        if dxftype == "TEXT":
+            insert = (
+                _rounded_coord(float(dxf.insert.x), ndigits=4),
+                _rounded_coord(float(dxf.insert.y), ndigits=4),
+            )
+            return (
+                dxftype,
+                insert,
+                str(getattr(dxf, "text", "")).strip(),
+                _rounded_coord(float(getattr(dxf, "rotation", 0.0)), ndigits=3),
+                _rounded_coord(float(getattr(dxf, "height", 0.0)), ndigits=4),
+            )
+        if dxftype == "MTEXT":
+            insert = (
+                _rounded_coord(float(dxf.insert.x), ndigits=4),
+                _rounded_coord(float(dxf.insert.y), ndigits=4),
+            )
+            return (
+                dxftype,
+                insert,
+                str(getattr(dxf, "text", "")).strip(),
+                _rounded_coord(float(getattr(dxf, "rotation", 0.0)), ndigits=3),
+                _rounded_coord(float(getattr(dxf, "char_height", 0.0)), ndigits=4),
+            )
+        if dxftype == "POINT":
+            location = (
+                _rounded_coord(float(dxf.location.x), ndigits=4),
+                _rounded_coord(float(dxf.location.y), ndigits=4),
+            )
+            return (dxftype, location)
+        if dxftype == "DIMENSION":
+            defpoint = getattr(dxf, "defpoint", None)
+            text_midpoint = getattr(dxf, "text_midpoint", None)
+            return (
+                dxftype,
+                (
+                    _rounded_coord(float(defpoint.x), ndigits=3),
+                    _rounded_coord(float(defpoint.y), ndigits=3),
+                )
+                if defpoint is not None
+                else None,
+                (
+                    _rounded_coord(float(text_midpoint.x), ndigits=3),
+                    _rounded_coord(float(text_midpoint.y), ndigits=3),
+                )
+                if text_midpoint is not None
+                else None,
+                str(getattr(dxf, "text", "")).strip(),
+            )
+        if dxftype == "LEADER":
+            vertices = tuple(
+                (
+                    _rounded_coord(float(vertex[0]), ndigits=3),
+                    _rounded_coord(float(vertex[1]), ndigits=3),
+                )
+                for vertex in entity.vertices
+                if len(vertex) >= 2
+            )
+            if not vertices:
+                return None
+            return (dxftype, vertices)
+    except Exception:
+        return None
+    return None
+
+
+def _rebalance_sparse_open30_right_sheet_geometry(modelspace: Any) -> None:
+    try:
+        inserts = list(modelspace.query("INSERT"))
+    except Exception:
+        return
+    open30_insert_count = 0
+    for insert in inserts:
+        name = _normalize_block_name(getattr(getattr(insert, "dxf", None), "name", None))
+        if name != "_Open30":
+            continue
+        dxf = getattr(insert, "dxf", None)
+        if dxf is None:
+            continue
+        dxf_like = {
+            "xscale": _finite_float(getattr(dxf, "xscale", 1.0), 1.0),
+            "yscale": _finite_float(getattr(dxf, "yscale", 1.0), 1.0),
+            "zscale": _finite_float(getattr(dxf, "zscale", 1.0), 1.0),
+            "rotation": _finite_float(getattr(dxf, "rotation", 0.0), 0.0),
+        }
+        if _looks_like_open30_insert(dxf_like):
+            open30_insert_count += 1
+    if open30_insert_count < 6:
+        return
+
+    shift_types = (
+        "LINE",
+        "ARC",
+        "CIRCLE",
+        "LWPOLYLINE",
+        "TEXT",
+        "MTEXT",
+        "POINT",
+        "DIMENSION",
+        "LEADER",
+        "ELLIPSE",
+    )
+    core_types = ("LINE", "ARC", "DIMENSION", "LWPOLYLINE")
+    side_counts: dict[str, list[int]] = {token: [0, 0] for token in shift_types}
+    left_candidates: dict[str, list[tuple[float, Any]]] = {token: [] for token in shift_types}
+
+    for token in shift_types:
+        try:
+            entities = list(modelspace.query(token))
+        except Exception:
+            entities = []
+        for entity in entities:
+            x = _entity_representative_x(entity)
+            if x is None or not math.isfinite(x):
+                continue
+            if x < _OPEN30_LEFT_OUTER_WIDTH:
+                side_counts[token][0] += 1
+                left_candidates[token].append((x, entity))
+            else:
+                side_counts[token][1] += 1
+
+    core_left = sum(side_counts[token][0] for token in core_types)
+    core_right = sum(side_counts[token][1] for token in core_types)
+    if core_left < 800:
+        return
+    if core_right >= core_left * 0.25:
+        return
+
+    shift_x = _OPEN30_LEFT_OUTER_WIDTH
+    moved_total = 0
+    for token in shift_types:
+        left_count, right_count = side_counts[token]
+        if left_count <= 1:
+            continue
+        if right_count >= left_count * 0.45:
+            continue
+        groups: dict[tuple[Any, ...], list[tuple[float, Any]]] = {}
+        for x, entity in left_candidates[token]:
+            signature = _entity_overlap_signature(entity)
+            if signature is None:
+                continue
+            groups.setdefault(signature, []).append((x, entity))
+        moved = 0
+        for entries in groups.values():
+            if len(entries) <= 1:
+                continue
+            entries.sort(key=lambda row: row[0])
+            move_count = len(entries) // 2
+            for _x, entity in entries[-move_count:]:
+                try:
+                    entity.translate(shift_x, 0.0, 0.0)
+                    moved += 1
+                except Exception:
+                    continue
+        moved_total += moved
+
+    if moved_total > 0:
+        return
+
+    # Fallback for sparse-right cases that do not contain obvious overlaps.
+    for token in shift_types:
+        left_count, right_count = side_counts[token]
+        if left_count <= 0:
+            continue
+        if right_count >= left_count * 0.45:
+            continue
+        target_move = (left_count - right_count) // 2
+        if target_move <= 0:
+            continue
+        candidates = sorted(left_candidates[token], key=lambda entry: entry[0], reverse=True)
+        moved = 0
+        for _x, entity in candidates:
+            if moved >= target_move:
+                break
+            try:
+                entity.translate(shift_x, 0.0, 0.0)
+                moved += 1
+            except Exception:
+                continue
+
+
 def _resolve_export_entities(
     layout: Layout,
     types: str | Iterable[str] | None,
@@ -1976,6 +2412,70 @@ def _filter_modelspace_entities(
         # cannot recover reliably yet. Keep behavior non-destructive.
         return entities
     return filtered
+
+
+def _entity_type_counts(entities: list[Entity]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for entity in entities:
+        token = str(entity.dxftype).strip().upper()
+        counts[token] = counts.get(token, 0) + 1
+    return counts
+
+
+def _has_open30_layout_markers(entities: list[Entity]) -> bool:
+    for entity in entities:
+        if entity.dxftype not in {"INSERT", "MINSERT"}:
+            continue
+        name = _normalize_block_name(entity.dxf.get("name"))
+        if name is None:
+            continue
+        if _is_layout_pseudo_block_name(name) and _should_preserve_layout_pseudo_insert(
+            name,
+            entity.dxf,
+        ):
+            return True
+        if name in {"_Open30", "i"} and _looks_like_open30_insert(entity.dxf):
+            return True
+    return False
+
+
+def _maybe_prefer_modelspace_filtered_entities(
+    layout: Layout,
+    entities: list[Entity],
+    *,
+    decode_cache: _ConvertDecodeCache | None = None,
+) -> list[Entity]:
+    if not entities:
+        return entities
+    if not _has_open30_layout_markers(entities):
+        return entities
+    filtered = _filter_modelspace_entities(
+        layout.doc.decode_path,
+        entities,
+        decode_cache=decode_cache,
+    )
+    if len(filtered) >= len(entities):
+        return entities
+
+    all_counts = _entity_type_counts(entities)
+    filtered_counts = _entity_type_counts(filtered)
+    line_removed = all_counts.get("LINE", 0) - filtered_counts.get("LINE", 0)
+    arc_removed = all_counts.get("ARC", 0) - filtered_counts.get("ARC", 0)
+    lwpolyline_removed = all_counts.get("LWPOLYLINE", 0) - filtered_counts.get(
+        "LWPOLYLINE",
+        0,
+    )
+    # If modelspace ownership recovery drops a large amount of core geometry,
+    # treat the filtered set as unreliable and keep the full set.
+    if line_removed > 150 or arc_removed > 40 or lwpolyline_removed > 40:
+        return entities
+    points_removed = all_counts.get("POINT", 0) - filtered_counts.get("POINT", 0)
+    mtext_removed = all_counts.get("MTEXT", 0) - filtered_counts.get("MTEXT", 0)
+    if points_removed >= 100 and mtext_removed >= 30:
+        return filtered
+    if all_counts.get("POINT", 0) >= 200 and filtered_counts.get("POINT", 0) <= 40:
+        return filtered
+    return entities
 
 
 def _resolve_modelspace_entity_handles(
@@ -2375,22 +2875,55 @@ def _populate_block_definitions(
         insert_entities_by_handle,
     )
     missing_direct_references = referenced_names - selected_block_names
+    empty_direct_references = {
+        name
+        for name in (referenced_names & selected_block_names)
+        if not block_members_by_name.get(name)
+        and not name.upper().startswith("*PAPER_SPACE")
+    }
     if (
         missing_direct_references
+        or empty_direct_references
         or not has_member_candidates
         or _has_unresolved_selected_block_targets(
-        selected_block_names,
-        block_members_by_name,
-        insert_entities_by_handle,
+            selected_block_names,
+            block_members_by_name,
+            insert_entities_by_handle,
         )
     ):
         # Fallback to exact BLOCK<->name mapping only when the fast map cannot
         # resolve nested INSERT targets required by selected blocks.
-        exact_block_name_by_handle = _resolve_block_name_by_handle(
-            decode_path,
-            header_rows,
-            decode_cache=decode_cache,
-        )
+        try:
+            exact_block_name_by_handle = _resolve_block_name_by_handle_exact(
+                decode_path,
+                decode_cache=decode_cache,
+            )
+        except TypeError:
+            exact_block_name_by_handle = _resolve_block_name_by_handle_exact(decode_path)
+        block_handles_set: set[int] = set()
+        for row in header_rows:
+            if not isinstance(row, tuple) or len(row) < 6:
+                continue
+            raw_handle, _offset, _size, _code, raw_type_name, raw_type_class = row
+            if str(raw_type_class).strip().upper() not in {"E", "ENTITY"}:
+                continue
+            if str(raw_type_name).strip().upper() != "BLOCK":
+                continue
+            try:
+                block_handles_set.add(int(raw_handle))
+            except Exception:
+                continue
+        exact_block_name_by_handle = {
+            handle: name
+            for handle, name in exact_block_name_by_handle.items()
+            if handle in block_handles_set
+        }
+        # Keep unmatched fallback names from the fast map when exact rows are
+        # incomplete, while still prioritizing exact mappings where available.
+        if len(exact_block_name_by_handle) < len(block_handles_set):
+            for handle, name in block_name_by_handle.items():
+                if handle in block_handles_set:
+                    exact_block_name_by_handle.setdefault(handle, name)
         if exact_block_name_by_handle:
             block_name_by_handle = exact_block_name_by_handle
             endblk_name_by_handle = _resolve_block_end_name_by_handle_exact(
@@ -2427,14 +2960,35 @@ def _populate_block_definitions(
 
     entities_by_handle: dict[int, Entity] = {}
     entities_by_handle_type: dict[tuple[int, str], list[Entity]] = {}
+    required_member_keys: set[tuple[int, str]] = set()
+    for block_name in selected_block_names:
+        for member_handle, raw_type_name in block_members_by_name.get(block_name, []):
+            canonical = _canonical_entity_type(raw_type_name)
+            if canonical not in all_member_types:
+                continue
+            try:
+                required_member_keys.add((int(member_handle), canonical))
+            except Exception:
+                continue
+
     missing_member_types = set(all_member_types)
+    cached_member_keys: set[tuple[int, str]] = set()
     if cached_entities_by_handle is not None:
         for handle, entity in cached_entities_by_handle.items():
             token = str(entity.dxftype).strip().upper()
             if token in all_member_types:
-                entities_by_handle.setdefault(handle, entity)
-                entities_by_handle_type.setdefault((int(handle), token), []).append(entity)
-                missing_member_types.discard(token)
+                try:
+                    handle_int = int(handle)
+                except Exception:
+                    continue
+                entities_by_handle.setdefault(handle_int, entity)
+                key = (handle_int, token)
+                entities_by_handle_type.setdefault(key, []).append(entity)
+                cached_member_keys.add(key)
+        if required_member_keys:
+            missing_member_types = {
+                token for _handle, token in (required_member_keys - cached_member_keys)
+            }
     if missing_member_types:
         if include_styles:
             queried_entities_by_handle_type = _entities_by_handle_and_type_multi(
@@ -3620,19 +4174,25 @@ def _write_entity_to_modelspace_unsafe(
         return True
 
     if dxftype == "ARC":
+        radius = abs(_finite_float(dxf.get("radius", 0.0), 0.0))
+        if radius <= 0.0:
+            return True
         modelspace.add_arc(
             _point3(dxf.get("center")),
-            float(dxf.get("radius", 0.0)),
-            float(dxf.get("start_angle", 0.0)),
-            float(dxf.get("end_angle", 0.0)),
+            radius,
+            _finite_float(dxf.get("start_angle", 0.0), 0.0),
+            _finite_float(dxf.get("end_angle", 0.0), 0.0),
             dxfattribs=dxfattribs,
         )
         return True
 
     if dxftype == "CIRCLE":
+        radius = abs(_finite_float(dxf.get("radius", 0.0), 0.0))
+        if radius <= 0.0:
+            return True
         modelspace.add_circle(
             _point3(dxf.get("center")),
-            float(dxf.get("radius", 0.0)),
+            radius,
             dxfattribs=dxfattribs,
         )
         return True
@@ -3845,7 +4405,18 @@ def _write_entity_to_modelspace_unsafe(
         points = [_point3(point) for point in dxf.get("points", [])]
         if len(points) < 2:
             return False
-        modelspace.add_polyline3d(points, close=False, dxfattribs=dxfattribs)
+        try:
+            leader = modelspace.add_leader(points, dxfattribs=dxfattribs)
+            annotation_type = dxf.get("annotation_type")
+            if annotation_type is not None and hasattr(leader.dxf, "annotation_type"):
+                try:
+                    leader.dxf.annotation_type = int(annotation_type)
+                except Exception:
+                    pass
+            return True
+        except Exception:
+            # Fallback for backends/version targets without LEADER support.
+            modelspace.add_polyline3d(points, close=False, dxfattribs=dxfattribs)
         return True
 
     if dxftype == "HATCH":
@@ -3879,6 +4450,21 @@ def _write_entity_to_modelspace_unsafe(
             yscale = _finite_float(dxf.get("yscale", 1.0), 1.0)
             zscale = _finite_float(dxf.get("zscale", 1.0), 1.0)
             rotation = _finite_float(dxf.get("rotation", 0.0), 0.0)
+            insert, xscale, yscale, zscale, rotation = _normalize_layout_pseudo_insert_transform(
+                modelspace,
+                name,
+                insert,
+                xscale,
+                yscale,
+                zscale,
+                rotation,
+            )
+            if is_modelspace_layout and _should_skip_layout_proxy_i_insert(
+                modelspace,
+                name,
+                dxf,
+            ):
+                return True
             if is_modelspace_layout:
                 if _should_skip_anonymous_dimension_block_insert(
                     modelspace,
@@ -3942,6 +4528,21 @@ def _write_entity_to_modelspace_unsafe(
             yscale = _finite_float(dxf.get("yscale", 1.0), 1.0)
             zscale = _finite_float(dxf.get("zscale", 1.0), 1.0)
             rotation = _finite_float(dxf.get("rotation", 0.0), 0.0)
+            insert, xscale, yscale, zscale, rotation = _normalize_layout_pseudo_insert_transform(
+                modelspace,
+                name,
+                insert,
+                xscale,
+                yscale,
+                zscale,
+                rotation,
+            )
+            if is_modelspace_layout and _should_skip_layout_proxy_i_insert(
+                modelspace,
+                name,
+                dxf,
+            ):
+                return True
             if is_modelspace_layout:
                 if _should_skip_anonymous_dimension_block_insert(
                     modelspace,
@@ -4674,6 +5275,20 @@ def _write_dimension_block_fallback(
             modelspace,
             name,
         )
+        if (
+            _is_placeholder_anonymous_dimension_insert(
+                name,
+                insert,
+                xscale,
+                yscale,
+                zscale,
+                rotation,
+            )
+            and name.upper().startswith("*D")
+            and local_center_abs is not None
+            and local_center_abs > 1000.0
+        ):
+            return False
         if is_empty:
             return False
         if has_nested_dim_insert:
@@ -5193,7 +5808,24 @@ def _cached_block_insert_safety_info(
         _BLOCK_INSERT_SAFETY_CACHE[doc] = by_name
     cached = by_name.get(block_name)
     if cached is not None:
-        return cached
+        # Block layouts may be created first and populated later. Refresh
+        # stale "empty block" cache entries once members exist.
+        if cached[0]:
+            try:
+                block = doc.blocks.get(block_name)
+            except Exception:
+                block = None
+            if block is None:
+                return cached
+            try:
+                has_members = any(True for _ in block)
+            except Exception:
+                has_members = False
+            if not has_members:
+                return cached
+            by_name.pop(block_name, None)
+        else:
+            return cached
 
     try:
         block = doc.blocks.get(block_name)
@@ -5291,6 +5923,95 @@ def _is_placeholder_anonymous_dimension_insert(
     ):
         return True
     return False
+
+
+def _normalize_layout_pseudo_insert_transform(
+    modelspace: Any,
+    block_name: str,
+    insert: tuple[float, float, float],
+    xscale: float,
+    yscale: float,
+    zscale: float,
+    rotation: float,
+) -> tuple[tuple[float, float, float], float, float, float, float]:
+    if not _is_layout_pseudo_modelspace_alias_name(block_name):
+        return (insert, xscale, yscale, zscale, rotation)
+
+    is_empty, _has_nested_dim_insert, local_center_abs = _cached_block_insert_safety_info(
+        modelspace,
+        block_name,
+    )
+    if is_empty:
+        return (insert, xscale, yscale, zscale, rotation)
+    if local_center_abs is None or local_center_abs <= 1000.0:
+        return (insert, xscale, yscale, zscale, rotation)
+    if max(abs(xscale), abs(yscale), abs(zscale)) < 10.0:
+        return (insert, xscale, yscale, zscale, rotation)
+
+    normalized_insert = insert
+    normalized_rotation = rotation
+    local_y_span = _cached_block_local_y_span(modelspace, block_name)
+    angle = _normalized_angle_degrees(rotation)
+    if local_y_span is not None and 45.0 <= angle <= 135.0:
+        normalized_insert = (
+            insert[0] - local_y_span - (2.0 * _OPEN30_SHEET_GAP),
+            0.0,
+            insert[2],
+        )
+        normalized_rotation = 0.0
+    elif local_y_span is not None and 225.0 <= angle <= 315.0:
+        normalized_insert = (
+            insert[0],
+            insert[1] - local_y_span,
+            insert[2],
+        )
+        normalized_rotation = 180.0
+
+    return (normalized_insert, 1.0, 1.0, 1.0, normalized_rotation)
+
+
+def _should_skip_layout_proxy_i_insert(
+    modelspace: Any,
+    block_name: str,
+    dxf: dict[str, Any],
+) -> bool:
+    if block_name != "i":
+        return False
+    if not _looks_like_open30_insert(dxf):
+        return False
+
+    doc = getattr(modelspace, "doc", None)
+    if doc is None:
+        return False
+    try:
+        if doc.blocks.get("_Open30") is None:
+            return False
+        block = doc.blocks.get("i")
+    except Exception:
+        return False
+    if block is None:
+        return False
+
+    has_detailviewstyle_nested_insert = False
+    for entity in block:
+        if _ezdxf_entity_type(entity) not in {"INSERT", "MINSERT"}:
+            continue
+        nested_name = _normalize_block_name(getattr(getattr(entity, "dxf", None), "name", None))
+        if nested_name is None:
+            continue
+        if nested_name.upper().startswith("ACAD_DETAILVIEWSTYLE"):
+            has_detailviewstyle_nested_insert = True
+            break
+    if not has_detailviewstyle_nested_insert:
+        return False
+
+    _is_empty, _has_nested_dim_insert, local_center_abs = _cached_block_insert_safety_info(
+        modelspace,
+        "i",
+    )
+    if local_center_abs is None or local_center_abs <= 1000.0:
+        return False
+    return True
 
 
 def _point3(value: Any) -> tuple[float, float, float]:

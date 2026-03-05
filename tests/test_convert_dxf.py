@@ -214,6 +214,41 @@ def test_to_dxf_writes_ray_and_xline_entities(monkeypatch, tmp_path: Path) -> No
     assert abs(group_float(xline, "21") - 1.0) < 1.0e-6
 
 
+def test_to_dxf_writes_leader_entity(monkeypatch, tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [(0x920, 10, 0, 0x1B, "LEADER", "Entity")],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_leader_entities",
+        lambda _path: [
+            (0x920, 1, 0, [(0.0, 0.0, 0.0), (10.0, 2.0, 0.0), (12.0, 3.0, 0.0)])
+        ],
+    )
+
+    output = tmp_path / "leader_out.dxf"
+    doc = document_module.Document(path="dummy_leader_convert.dwg", version="AC1021")
+    result = ezdwg.to_dxf(doc, str(output), types="LEADER", dxf_version="R2010")
+
+    assert result.total_entities == 1
+    assert result.written_entities == 1
+    leaders = dxf_entities_of_type(output, "LEADER")
+    assert len(leaders) == 1
+    assert len(dxf_entities_of_type(output, "POLYLINE")) == 0
+    assert abs(group_float(leaders[0], "10") - 0.0) < 1.0e-6
+    assert abs(group_float(leaders[0], "20") - 0.0) < 1.0e-6
+
+
 def test_to_dxf_skips_region_entity(monkeypatch, tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 
@@ -2276,6 +2311,273 @@ def test_normalize_problematic_insert_name_keeps_i_for_orthogonal_rotation() -> 
     )
 
     assert normalized.dxf["name"] == "i"
+
+
+def test_maybe_prefer_modelspace_filtered_entities_for_open30_layout(monkeypatch) -> None:
+    layout = type(
+        "_Layout",
+        (),
+        {
+            "doc": type("_Doc", (), {"decode_path": "dummy.dwg"})(),
+        },
+    )()
+    entities = [
+        Entity(
+            dxftype="INSERT",
+            handle=1,
+            dxf={
+                "name": "*Model_Space",
+                "insert": (0.0, 0.0, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+            },
+        )
+    ]
+    entities.extend(
+        Entity(dxftype="POINT", handle=1000 + i, dxf={"location": (float(i), 0.0, 0.0)})
+        for i in range(220)
+    )
+    entities.extend(
+        Entity(dxftype="MTEXT", handle=2000 + i, dxf={"insert": (float(i), 0.0, 0.0), "text": "T"})
+        for i in range(90)
+    )
+
+    filtered = [
+        Entity(
+            dxftype="INSERT",
+            handle=1,
+            dxf={
+                "name": "*Model_Space",
+                "insert": (0.0, 0.0, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+            },
+        ),
+        Entity(dxftype="POINT", handle=9001, dxf={"location": (0.0, 0.0, 0.0)}),
+        Entity(dxftype="MTEXT", handle=9002, dxf={"insert": (0.0, 0.0, 0.0), "text": "T"}),
+    ]
+
+    monkeypatch.setattr(
+        convert_module,
+        "_filter_modelspace_entities",
+        lambda *_args, **_kwargs: filtered,
+    )
+
+    resolved = convert_module._maybe_prefer_modelspace_filtered_entities(layout, entities)
+    assert resolved is filtered
+
+
+def test_maybe_prefer_modelspace_filtered_entities_keeps_full_set_when_lines_drop_too_much(
+    monkeypatch,
+) -> None:
+    layout = type(
+        "_Layout",
+        (),
+        {
+            "doc": type("_Doc", (), {"decode_path": "dummy.dwg"})(),
+        },
+    )()
+    entities = [
+        Entity(
+            dxftype="INSERT",
+            handle=1,
+            dxf={
+                "name": "*Model_Space",
+                "insert": (0.0, 0.0, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+            },
+        )
+    ]
+    entities.extend(
+        Entity(
+            dxftype="LINE",
+            handle=1000 + i,
+            dxf={"start": (float(i), 0.0, 0.0), "end": (float(i), 1.0, 0.0)},
+        )
+        for i in range(220)
+    )
+    entities.extend(
+        Entity(dxftype="POINT", handle=3000 + i, dxf={"location": (float(i), 0.0, 0.0)})
+        for i in range(220)
+    )
+    entities.extend(
+        Entity(dxftype="MTEXT", handle=4000 + i, dxf={"insert": (float(i), 0.0, 0.0), "text": "T"})
+        for i in range(80)
+    )
+    filtered = [
+        Entity(
+            dxftype="INSERT",
+            handle=1,
+            dxf={
+                "name": "*Model_Space",
+                "insert": (0.0, 0.0, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+            },
+        ),
+        Entity(dxftype="LINE", handle=9001, dxf={"start": (0.0, 0.0, 0.0), "end": (1.0, 0.0, 0.0)}),
+        Entity(dxftype="POINT", handle=9002, dxf={"location": (0.0, 0.0, 0.0)}),
+        Entity(dxftype="MTEXT", handle=9003, dxf={"insert": (0.0, 0.0, 0.0), "text": "T"}),
+    ]
+
+    monkeypatch.setattr(
+        convert_module,
+        "_filter_modelspace_entities",
+        lambda *_args, **_kwargs: filtered,
+    )
+
+    resolved = convert_module._maybe_prefer_modelspace_filtered_entities(layout, entities)
+    assert resolved is entities
+
+
+def test_replace_layout_alias_with_open30_right_sheet_inserts() -> None:
+    pytest.importorskip("ezdxf")
+
+    ezdxf = convert_module._require_ezdxf()
+    doc = ezdxf.new(dxfversion="R2010")
+    msp = doc.modelspace()
+    open30_block = doc.blocks.new(name="_Open30")
+    open30_block.add_line((0.0, 0.0), (1.0, 0.0))
+    doc.blocks.new(name="__EZDWG_LAYOUT_ALIAS_MODEL_SPACE")
+
+    for x, y in [
+        (5872.77817695745, 11427.437111958425),
+        (13369.389088356227, 11527.438221728415),
+        (20526.169088356546, 11427.437111958425),
+    ]:
+        ref = msp.add_blockref("_Open30", (x, y, 0.0))
+        ref.dxf.xscale = -60.0
+        ref.dxf.yscale = 60.0
+        ref.dxf.zscale = 60.0
+        ref.dxf.rotation = 69.60362427681007
+
+    msp.add_blockref("__EZDWG_LAYOUT_ALIAS_MODEL_SPACE", (1000.0, 0.0, 0.0))
+
+    convert_module._replace_layout_alias_with_open30_right_sheet_inserts(msp)
+
+    inserts = list(msp.query("INSERT"))
+    assert len(inserts) == 6
+    assert all(entity.dxf.name == "_Open30" for entity in inserts)
+
+    positions = {
+        round(float(entity.dxf.insert.x), 6)
+        for entity in inserts
+    }
+    for x in (31102.778177, 38599.389088, 45756.169088):
+        assert x in positions
+
+
+def test_rebalance_sparse_open30_right_sheet_geometry_moves_left_entities_to_right() -> None:
+    pytest.importorskip("ezdxf")
+
+    ezdxf = convert_module._require_ezdxf()
+    doc = ezdxf.new(dxfversion="R2010")
+    msp = doc.modelspace()
+    open30_block = doc.blocks.new(name="_Open30")
+    open30_block.add_line((0.0, 0.0), (1.0, 0.0))
+
+    for x in (1000.0, 2000.0, 3000.0, 33000.0, 34000.0, 35000.0):
+        ref = msp.add_blockref("_Open30", (x, 1000.0, 0.0))
+        ref.dxf.xscale = 60.0
+        ref.dxf.yscale = 60.0
+        ref.dxf.zscale = 60.0
+
+    for i in range(1000):
+        x = 1000.0 + i * 20.0
+        msp.add_line((x, 1000.0, 0.0), (x + 50.0, 1200.0, 0.0))
+
+    convert_module._rebalance_sparse_open30_right_sheet_geometry(msp)
+
+    left = 0
+    right = 0
+    for line in msp.query("LINE"):
+        x_mid = (float(line.dxf.start.x) + float(line.dxf.end.x)) * 0.5
+        if x_mid < 25230.0:
+            left += 1
+        else:
+            right += 1
+
+    assert left + right == 1000
+    assert right >= 450
+
+
+def test_rebalance_sparse_open30_right_sheet_geometry_shifts_overlapped_duplicates_first() -> None:
+    pytest.importorskip("ezdxf")
+
+    ezdxf = convert_module._require_ezdxf()
+    doc = ezdxf.new(dxfversion="R2010")
+    msp = doc.modelspace()
+    open30_block = doc.blocks.new(name="_Open30")
+    open30_block.add_line((0.0, 0.0), (1.0, 0.0))
+
+    for x in (1000.0, 2000.0, 3000.0, 33000.0, 34000.0, 35000.0):
+        ref = msp.add_blockref("_Open30", (x, 1000.0, 0.0))
+        ref.dxf.xscale = 60.0
+        ref.dxf.yscale = 60.0
+        ref.dxf.zscale = 60.0
+
+    # 400 overlapped pairs should split left/right; 50 uniques should remain left.
+    for i in range(400):
+        x = 1200.0 + i * 20.0
+        msp.add_line((x, 1000.0, 0.0), (x + 50.0, 1200.0, 0.0))
+        msp.add_line((x, 1000.0, 0.0), (x + 50.0, 1200.0, 0.0))
+    for i in range(50):
+        x = 6000.0 + i * 60.0
+        msp.add_line((x, 1400.0, 0.0), (x + 40.0, 1500.0, 0.0))
+
+    convert_module._rebalance_sparse_open30_right_sheet_geometry(msp)
+
+    left = 0
+    right = 0
+    for line in msp.query("LINE"):
+        x_mid = (float(line.dxf.start.x) + float(line.dxf.end.x)) * 0.5
+        if x_mid < 25230.0:
+            left += 1
+        else:
+            right += 1
+
+    assert left + right == 850
+    assert left == 450
+    assert right == 400
+
+
+def test_rebalance_sparse_open30_right_sheet_geometry_skips_when_open30_inserts_are_few() -> None:
+    pytest.importorskip("ezdxf")
+
+    ezdxf = convert_module._require_ezdxf()
+    doc = ezdxf.new(dxfversion="R2010")
+    msp = doc.modelspace()
+    open30_block = doc.blocks.new(name="_Open30")
+    open30_block.add_line((0.0, 0.0), (1.0, 0.0))
+
+    for x in (1000.0, 2000.0, 3000.0):
+        ref = msp.add_blockref("_Open30", (x, 1000.0, 0.0))
+        ref.dxf.xscale = 60.0
+        ref.dxf.yscale = 60.0
+        ref.dxf.zscale = 60.0
+
+    for i in range(10):
+        x = 1000.0 + i * 200.0
+        msp.add_line((x, 1000.0, 0.0), (x + 50.0, 1200.0, 0.0))
+
+    convert_module._rebalance_sparse_open30_right_sheet_geometry(msp)
+
+    left = 0
+    right = 0
+    for line in msp.query("LINE"):
+        x_mid = (float(line.dxf.start.x) + float(line.dxf.end.x)) * 0.5
+        if x_mid < 25230.0:
+            left += 1
+        else:
+            right += 1
+
+    assert left == 10
+    assert right == 0
 
 
 def test_entities_by_handle_and_type_keeps_duplicate_handles_by_dxftype() -> None:
