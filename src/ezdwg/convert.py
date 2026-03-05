@@ -595,6 +595,8 @@ def to_dxf(
         )
         raise ValueError(f"failed to convert {skipped} entities ({summary})")
 
+    _restore_sparse_open30_left_window(modelspace)
+
     if flatten_inserts:
         _flatten_modelspace_inserts(modelspace)
 
@@ -737,6 +739,227 @@ def _point_inside_any_rect(
         if (min_x - margin) <= x <= (max_x + margin) and (min_y - margin) <= y <= (max_y + margin):
             return True
     return False
+
+
+def _rect_contains_all_points(
+    rect: tuple[float, float, float, float],
+    points: list[tuple[float, float]],
+    *,
+    margin: float = 0.0,
+) -> bool:
+    if not points:
+        return False
+    min_x, max_x, min_y, max_y = rect
+    for x, y in points:
+        if not ((min_x - margin) <= x <= (max_x + margin) and (min_y - margin) <= y <= (max_y + margin)):
+            return False
+    return True
+
+
+def _entity_xy_points_with_polyline(entity: Any) -> list[tuple[float, float]]:
+    points = _entity_xy_points(entity)
+    if points:
+        return points
+    if _ezdxf_entity_type(entity) != "POLYLINE":
+        return []
+    out: list[tuple[float, float]] = []
+    try:
+        for vertex in entity.vertices:
+            location = vertex.dxf.location
+            x = float(location.x)
+            y = float(location.y)
+            if math.isfinite(x) and math.isfinite(y):
+                out.append((x, y))
+    except Exception:
+        return []
+    return out
+
+
+def _count_entities_fully_inside_rect(
+    entities: list[Any],
+    token_set: set[str],
+    rect: tuple[float, float, float, float],
+) -> int:
+    count = 0
+    for entity in entities:
+        token = _ezdxf_entity_type(entity)
+        if token not in token_set:
+            continue
+        points = _entity_xy_points_with_polyline(entity)
+        if _rect_contains_all_points(rect, points):
+            count += 1
+    return count
+
+
+def _rounded_coord(value: float, *, ndigits: int = 3) -> float:
+    return round(float(value), ndigits)
+
+
+def _entity_rect_signature(entity: Any, *, shift_x: float = 0.0) -> tuple[Any, ...] | None:
+    token = _ezdxf_entity_type(entity)
+    dxf = getattr(entity, "dxf", None)
+    if dxf is None:
+        return None
+
+    try:
+        if token == "LINE":
+            p1 = (_rounded_coord(float(dxf.start.x) + shift_x), _rounded_coord(float(dxf.start.y)))
+            p2 = (_rounded_coord(float(dxf.end.x) + shift_x), _rounded_coord(float(dxf.end.y)))
+            a, b = (p1, p2) if p1 <= p2 else (p2, p1)
+            return (token, a, b)
+
+        if token in {"LWPOLYLINE", "POLYLINE"}:
+            points = _entity_xy_points_with_polyline(entity)
+            if not points:
+                return None
+            rounded_points = tuple(
+                (_rounded_coord(x + shift_x), _rounded_coord(y))
+                for x, y in points
+            )
+            closed = bool(getattr(dxf, "closed", False))
+            return (token, closed, rounded_points)
+
+        if token == "ARC":
+            center = (
+                _rounded_coord(float(dxf.center.x) + shift_x),
+                _rounded_coord(float(dxf.center.y)),
+            )
+            radius = _rounded_coord(float(dxf.radius))
+            start = _rounded_coord(float(dxf.start_angle), ndigits=4)
+            end = _rounded_coord(float(dxf.end_angle), ndigits=4)
+            return (token, center, radius, start, end)
+
+        if token == "CIRCLE":
+            center = (
+                _rounded_coord(float(dxf.center.x) + shift_x),
+                _rounded_coord(float(dxf.center.y)),
+            )
+            radius = _rounded_coord(float(dxf.radius))
+            return (token, center, radius)
+
+        if token == "ELLIPSE":
+            center = (
+                _rounded_coord(float(dxf.center.x) + shift_x),
+                _rounded_coord(float(dxf.center.y)),
+            )
+            major = (
+                _rounded_coord(float(dxf.major_axis.x)),
+                _rounded_coord(float(dxf.major_axis.y)),
+            )
+            ratio = _rounded_coord(float(dxf.ratio), ndigits=5)
+            start = _rounded_coord(float(getattr(dxf, "start_param", 0.0)), ndigits=5)
+            end = _rounded_coord(float(getattr(dxf, "end_param", 0.0)), ndigits=5)
+            return (token, center, major, ratio, start, end)
+
+        if token in {"TEXT", "MTEXT"}:
+            insert = (
+                _rounded_coord(float(dxf.insert.x) + shift_x),
+                _rounded_coord(float(dxf.insert.y)),
+            )
+            text_value = str(getattr(entity, "text", getattr(dxf, "text", "")))
+            return (token, insert, text_value.strip())
+    except Exception:
+        return None
+    return None
+
+
+def _restore_sparse_open30_left_window(modelspace: Any) -> None:
+    # Some Open30-derived drawings carry a sparse left-middle window in
+    # best-effort decode paths. When the right-middle window is dense enough
+    # and left-middle is clearly under-populated, clone the right window
+    # entities by one sheet width as a pragmatic fallback.
+    try:
+        polylines = list(modelspace.query("LWPOLYLINE"))
+    except Exception:
+        return
+    large_rects = _collect_large_rect_bboxes(polylines)
+    left_outer: tuple[float, float, float, float] | None = None
+    for rect in large_rects:
+        min_x, max_x, min_y, max_y = rect
+        width = max_x - min_x
+        height = max_y - min_y
+        if abs(width - _OPEN30_LEFT_OUTER_WIDTH) > 30.0:
+            continue
+        if abs(height - _OPEN30_LEFT_OUTER_HEIGHT) > 30.0:
+            continue
+        if abs(min_x) > 300.0 or abs(min_y) > 300.0:
+            continue
+        left_outer = rect
+        break
+    if left_outer is None:
+        return
+    left_width = left_outer[1] - left_outer[0]
+
+    source_rect = (
+        left_outer[1],
+        left_outer[1] + left_width,
+        left_outer[2],
+        left_outer[3],
+    )
+    target_rect = left_outer
+    line_like_tokens = {"LINE", "LWPOLYLINE", "POLYLINE", "ARC", "CIRCLE", "ELLIPSE"}
+    clone_tokens = line_like_tokens | {"TEXT", "MTEXT"}
+
+    try:
+        entities = list(modelspace)
+    except Exception:
+        return
+
+    source_line_like = _count_entities_fully_inside_rect(entities, line_like_tokens, source_rect)
+    target_line_like = _count_entities_fully_inside_rect(entities, line_like_tokens, target_rect)
+    if source_line_like < 500:
+        return
+    if target_line_like >= int(source_line_like * 0.80):
+        return
+
+    try:
+        from ezdxf.math import Matrix44
+    except Exception:
+        return
+
+    dx = source_rect[0] - target_rect[0]
+    transform = Matrix44.translate(-dx, 0.0, 0.0)
+    existing_signatures: set[tuple[Any, ...]] = set()
+    for entity in entities:
+        points = _entity_xy_points_with_polyline(entity)
+        if not _rect_contains_all_points(target_rect, points):
+            continue
+        signature = _entity_rect_signature(entity, shift_x=0.0)
+        if signature is not None:
+            existing_signatures.add(signature)
+
+    added = 0
+    for entity in entities:
+        token = _ezdxf_entity_type(entity)
+        if token not in clone_tokens:
+            continue
+        points = _entity_xy_points_with_polyline(entity)
+        if not _rect_contains_all_points(source_rect, points):
+            continue
+        shifted_points = [(x - dx, y) for x, y in points]
+        if not _rect_contains_all_points(target_rect, shifted_points):
+            continue
+        signature = _entity_rect_signature(entity, shift_x=-dx)
+        if signature is not None and signature in existing_signatures:
+            continue
+        try:
+            clone = entity.copy()
+        except Exception:
+            continue
+        try:
+            clone.transform(transform)
+        except Exception:
+            continue
+        try:
+            modelspace.add_entity(clone)
+            if signature is not None:
+                existing_signatures.add(signature)
+            added += 1
+        except Exception:
+            continue
+
+    if added <= 0:
+        return
 
 
 def _line_entity_length(entity: Any) -> float | None:
