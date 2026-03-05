@@ -2605,7 +2605,12 @@ def test_resolve_export_entities_does_not_filter_modelspace_by_default(
     _source_path, layout = convert_module._resolve_layout(str(SAMPLES / "line_2007.dwg"))
     called = False
 
-    def _spy_filter(_decode_path: str | None, entities: list[Entity]) -> list[Entity]:
+    def _spy_filter(
+        _decode_path: str | None,
+        entities: list[Entity],
+        *,
+        decode_cache=None,
+    ) -> list[Entity]:
         nonlocal called
         called = True
         return entities
@@ -2621,7 +2626,12 @@ def test_resolve_export_entities_filters_modelspace_when_enabled(monkeypatch) ->
     _source_path, layout = convert_module._resolve_layout(str(SAMPLES / "line_2007.dwg"))
     called = False
 
-    def _spy_filter(_decode_path: str | None, entities: list[Entity]) -> list[Entity]:
+    def _spy_filter(
+        _decode_path: str | None,
+        entities: list[Entity],
+        *,
+        decode_cache=None,
+    ) -> list[Entity]:
         nonlocal called
         called = True
         return entities

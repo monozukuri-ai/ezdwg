@@ -60,3 +60,13 @@ def test_decode_block_entity_names_r2018_contains_dynamic_names_on_both_sides() 
     assert "my-dynamic-block" in endblk_names
     assert "my_block_v2" in block_names
     assert "my_block_v2" in endblk_names
+
+
+def test_decode_block_entity_name_maps_r2018_contains_dynamic_names_on_both_sides() -> None:
+    block_rows, endblk_rows = ezdwg.raw.decode_block_entity_name_maps(
+        str(SAMPLES / "acadsharp" / "sample_AC1032.dwg")
+    )
+    block_names = {name for _handle, name in block_rows}
+    endblk_names = {name for _handle, name in endblk_rows}
+    assert "my-dynamic-block" in block_names
+    assert "my-dynamic-block" in endblk_names

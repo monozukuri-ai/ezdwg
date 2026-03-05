@@ -133,6 +133,7 @@ type InsertMInsertDimensionRows = (
 );
 type BlockHeaderNameRow = (u64, String);
 type BlockEntityNameRow = (u64, String, String);
+type BlockEntityNameMapsRows = (Vec<BlockHeaderNameRow>, Vec<BlockHeaderNameRow>);
 type Polyline2dEntityRow = (u64, u16, u16, f64, f64, f64, f64);
 type Polyline2dInterpretedRow = (
     u64,

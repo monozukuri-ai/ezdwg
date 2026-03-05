@@ -13,6 +13,7 @@ from .document import (
     Layout,
     SUPPORTED_ENTITY_TYPES,
     TYPE_ALIASES,
+    _block_header_name_rows,
     _present_supported_types,
     read,
 )
@@ -128,6 +129,16 @@ class _DimensionWriteContext:
     written_block_refs: set[
         tuple[str, tuple[float, float, float], tuple[float, float, float], float]
     ] = field(default_factory=set)
+
+
+@dataclass
+class _ConvertDecodeCache:
+    block_header_name_rows: list[tuple[Any, ...]] | None = None
+    block_header_name_rows_complete: bool = False
+    block_entity_name_maps: tuple[dict[int, str], dict[int, str]] | None = None
+    block_name_by_handle_cache: dict[tuple[str, ...] | None, dict[int, str]] = field(
+        default_factory=dict
+    )
 
 
 def to_dwg(
@@ -491,6 +502,7 @@ def to_dxf(
     ezdxf = _require_ezdxf()
     source_path, layout = _resolve_layout(source)
     normalized_dim_block_policy = _normalize_dim_block_policy(dim_block_policy)
+    decode_cache = _ConvertDecodeCache()
 
     dxf_doc = ezdxf.new(dxfversion=dxf_version)
     modelspace = dxf_doc.modelspace()
@@ -502,9 +514,13 @@ def to_dxf(
         include_unsupported=include_unsupported,
         include_styles=preserve_colors,
         modelspace_only=modelspace_only,
+        decode_cache=decode_cache,
     )
     if _has_problematic_i_inserts(source_entities):
-        available_block_names = _available_block_names(layout.doc.decode_path or layout.doc.path)
+        available_block_names = _available_block_names(
+            layout.doc.decode_path or layout.doc.path,
+            decode_cache=decode_cache,
+        )
         if "_Open30" in available_block_names:
             source_entities = [
                 _normalize_problematic_insert_name(
@@ -551,6 +567,7 @@ def to_dxf(
             explode_dimensions=explode_dimensions,
             layer_name_by_handle=layer_name_by_handle,
             dim_block_policy=normalized_dim_block_policy,
+            decode_cache=decode_cache,
         )
 
     total = 0
@@ -1676,6 +1693,7 @@ def _resolve_export_entities(
     include_unsupported: bool = False,
     include_styles: bool = True,
     modelspace_only: bool = False,
+    decode_cache: _ConvertDecodeCache | None = None,
 ) -> list[Entity]:
     query_types: str | Iterable[str] | None
     if types is not None:
@@ -1687,7 +1705,11 @@ def _resolve_export_entities(
         query_types = tuple(sorted(present_types & _WRITABLE_ENTITY_TYPES))
     selected_entities = list(layout.query(query_types, include_styles=include_styles))
     if modelspace_only:
-        selected_entities = _filter_modelspace_entities(layout.doc.decode_path, selected_entities)
+        selected_entities = _filter_modelspace_entities(
+            layout.doc.decode_path,
+            selected_entities,
+            decode_cache=decode_cache,
+        )
     return _materialize_export_entities(layout, selected_entities)
 
 
@@ -1708,10 +1730,15 @@ def _resolve_dwg_export_entities(
 def _filter_modelspace_entities(
     decode_path: str | None,
     entities: list[Entity],
+    *,
+    decode_cache: _ConvertDecodeCache | None = None,
 ) -> list[Entity]:
     if not decode_path or not entities:
         return entities
-    modelspace_handles = _resolve_modelspace_entity_handles(decode_path)
+    modelspace_handles = _resolve_modelspace_entity_handles(
+        decode_path,
+        decode_cache=decode_cache,
+    )
     if modelspace_handles is None:
         return entities
     filtered: list[Entity] = []
@@ -1728,7 +1755,11 @@ def _filter_modelspace_entities(
     return filtered
 
 
-def _resolve_modelspace_entity_handles(decode_path: str) -> set[int] | None:
+def _resolve_modelspace_entity_handles(
+    decode_path: str,
+    *,
+    decode_cache: _ConvertDecodeCache | None = None,
+) -> set[int] | None:
     try:
         header_rows = raw.list_object_headers_with_type(decode_path)
     except Exception:
@@ -1739,6 +1770,7 @@ def _resolve_modelspace_entity_handles(decode_path: str) -> set[int] | None:
     block_name_by_handle = _resolve_block_name_by_handle(
         decode_path,
         header_rows,
+        decode_cache=decode_cache,
     )
     if not block_name_by_handle:
         return None
@@ -2017,6 +2049,7 @@ def _populate_block_definitions(
     explode_dimensions: bool = True,
     layer_name_by_handle: dict[int, str] | None = None,
     dim_block_policy: str = "smart",
+    decode_cache: _ConvertDecodeCache | None = None,
 ) -> None:
     if reference_entities is None:
         reference_entities = []
@@ -2067,6 +2100,7 @@ def _populate_block_definitions(
         decode_path,
         header_rows,
         referenced_names=referenced_names,
+        decode_cache=decode_cache,
     )
     if not block_name_by_handle:
         return
@@ -2079,6 +2113,7 @@ def _populate_block_definitions(
         decode_path,
         header_rows=header_rows,
         block_name_by_handle=block_name_by_handle,
+        decode_cache=decode_cache,
     )
     block_members_by_name = _collect_block_members_by_name(
         sorted_header_rows,
@@ -2093,9 +2128,6 @@ def _populate_block_definitions(
     selected_block_names = {
         name for name in referenced_names if name in block_members_by_name
     }
-    if not selected_block_names:
-        return
-
     has_member_candidates = any(block_members_by_name.get(name) for name in selected_block_names)
     insert_entities_by_handle: dict[int, Entity] = {}
     if has_member_candidates:
@@ -2119,20 +2151,30 @@ def _populate_block_definitions(
         selected_block_names,
         insert_entities_by_handle,
     )
-    if _has_unresolved_selected_block_targets(
+    missing_direct_references = referenced_names - selected_block_names
+    if (
+        missing_direct_references
+        or not has_member_candidates
+        or _has_unresolved_selected_block_targets(
         selected_block_names,
         block_members_by_name,
         insert_entities_by_handle,
+        )
     ):
         # Fallback to exact BLOCK<->name mapping only when the fast map cannot
         # resolve nested INSERT targets required by selected blocks.
-        exact_block_name_by_handle = _resolve_block_name_by_handle(decode_path, header_rows)
+        exact_block_name_by_handle = _resolve_block_name_by_handle(
+            decode_path,
+            header_rows,
+            decode_cache=decode_cache,
+        )
         if exact_block_name_by_handle:
             block_name_by_handle = exact_block_name_by_handle
             endblk_name_by_handle = _resolve_block_end_name_by_handle_exact(
                 decode_path,
                 header_rows=header_rows,
                 block_name_by_handle=block_name_by_handle,
+                decode_cache=decode_cache,
             )
             block_members_by_name = _collect_block_members_by_name(
                 sorted_header_rows,
@@ -2570,11 +2612,69 @@ def _deduplicate_layout_pseudo_inserts_by_handle(entities: list[Entity]) -> list
     return result
 
 
-def _available_block_names(decode_path: str) -> set[str]:
+def _decode_block_header_name_rows(
+    decode_path: str,
+    *,
+    limit: int | None = None,
+    decode_cache: _ConvertDecodeCache | None = None,
+) -> list[tuple[Any, ...]]:
+    if decode_cache is not None and decode_cache.block_header_name_rows is not None:
+        cached_rows = decode_cache.block_header_name_rows
+        if decode_cache.block_header_name_rows_complete or (
+            limit is not None and len(cached_rows) >= limit
+        ):
+            return cached_rows
+
+    # Reuse document-level cached decode rows when already materialized by
+    # query() paths (e.g. DIMENSION anonymous block-name resolution).
+    if decode_cache is not None:
+        try:
+            shared_rows = list(_block_header_name_rows(decode_path))
+        except Exception:
+            shared_rows = []
+        if shared_rows:
+            decode_cache.block_header_name_rows = shared_rows
+            decode_cache.block_header_name_rows_complete = True
+            return shared_rows
+
     try:
-        rows = raw.decode_block_header_names(decode_path)
+        if limit is not None:
+            rows = raw.decode_block_header_names(decode_path, limit)
+        else:
+            rows = raw.decode_block_header_names(decode_path)
+    except TypeError:
+        # Backward compatibility for extension builds without optional limit support.
+        try:
+            rows = raw.decode_block_header_names(decode_path)
+        except Exception:
+            rows = []
     except Exception:
-        return set()
+        rows = []
+
+    rows_list = list(rows)
+    if decode_cache is not None:
+        if limit is None:
+            decode_cache.block_header_name_rows = rows_list
+            decode_cache.block_header_name_rows_complete = True
+        elif decode_cache.block_header_name_rows is None:
+            decode_cache.block_header_name_rows = rows_list
+            decode_cache.block_header_name_rows_complete = False
+        elif len(rows_list) > len(decode_cache.block_header_name_rows):
+            decode_cache.block_header_name_rows = rows_list
+            decode_cache.block_header_name_rows_complete = False
+    return rows_list
+
+
+def _available_block_names(
+    decode_path: str,
+    *,
+    decode_cache: _ConvertDecodeCache | None = None,
+) -> set[str]:
+    if decode_cache is not None:
+        cached_name_map = decode_cache.block_name_by_handle_cache.get(None)
+        if cached_name_map:
+            return set(cached_name_map.values())
+    rows = _decode_block_header_name_rows(decode_path, decode_cache=decode_cache)
     names: set[str] = set()
     for row in rows:
         if not isinstance(row, tuple) or len(row) < 2:
@@ -2634,7 +2734,16 @@ def _resolve_block_name_by_handle(
     header_rows: list[tuple[Any, ...]],
     *,
     referenced_names: set[str] | None = None,
+    decode_cache: _ConvertDecodeCache | None = None,
 ) -> dict[int, str]:
+    cache_key: tuple[str, ...] | None = (
+        None if referenced_names is None else tuple(sorted(referenced_names))
+    )
+    if decode_cache is not None:
+        cached = decode_cache.block_name_by_handle_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+
     block_handles_in_order: list[int] = []
     for row in header_rows:
         if not isinstance(row, tuple) or len(row) < 6:
@@ -2654,21 +2763,13 @@ def _resolve_block_name_by_handle(
     block_handles_set = set(block_handles_in_order)
 
     if referenced_names is None:
-        try:
-            rows = raw.decode_block_header_names(decode_path, len(block_handles_in_order))
-        except TypeError:
-            # Backward compatibility for extension builds without optional limit support.
-            try:
-                rows = raw.decode_block_header_names(decode_path)
-            except Exception:
-                rows = []
-        except Exception:
-            rows = []
+        rows = _decode_block_header_name_rows(
+            decode_path,
+            limit=len(block_handles_in_order),
+            decode_cache=decode_cache,
+        )
     else:
-        try:
-            rows = raw.decode_block_header_names(decode_path)
-        except Exception:
-            rows = []
+        rows = _decode_block_header_name_rows(decode_path, decode_cache=decode_cache)
 
     by_header_handle: dict[int, str] = {}
     for row in rows:
@@ -2710,16 +2811,33 @@ def _resolve_block_name_by_handle(
                 candidate_map[handle] = ordered_names[index]
         candidate_names = set(candidate_map.values())
         if referenced_names.issubset(candidate_names):
+            if decode_cache is not None:
+                decode_cache.block_name_by_handle_cache[cache_key] = candidate_map
+            return candidate_map
+        # Keep the fast map and defer the exact fallback until block graph
+        # resolution confirms we truly need it.
+        if candidate_map:
+            if decode_cache is not None:
+                decode_cache.block_name_by_handle_cache[cache_key] = candidate_map
             return candidate_map
 
     # Prefer exact BLOCK<->name mapping from BLOCK entity names when available.
-    exact_map = _resolve_block_name_by_handle_exact(decode_path)
+    try:
+        exact_map = _resolve_block_name_by_handle_exact(
+            decode_path,
+            decode_cache=decode_cache,
+        )
+    except TypeError:
+        # Backward compatibility for tests that monkeypatch this helper.
+        exact_map = _resolve_block_name_by_handle_exact(decode_path)
     block_name_by_handle: dict[int, str] = {
         handle: name
         for handle, name in exact_map.items()
         if handle in block_handles_set
     }
     if len(block_name_by_handle) >= len(block_handles_in_order):
+        if decode_cache is not None:
+            decode_cache.block_name_by_handle_cache[cache_key] = block_name_by_handle
         return block_name_by_handle
 
     for handle in block_handles_in_order:
@@ -2730,27 +2848,22 @@ def _resolve_block_name_by_handle(
             block_name_by_handle[handle] = name
 
     if block_name_by_handle:
+        if decode_cache is not None:
+            decode_cache.block_name_by_handle_cache[cache_key] = block_name_by_handle
         return block_name_by_handle
 
     # Fallback for environments that mock only decode_block_entity_names.
+    if decode_cache is not None:
+        decode_cache.block_name_by_handle_cache[cache_key] = exact_map
     return exact_map
 
 
-def _resolve_block_name_by_handle_exact(decode_path: str) -> dict[int, str]:
-    try:
-        entity_rows = raw.decode_block_entity_names(decode_path)
-    except Exception:
-        return {}
-    if not entity_rows:
-        return {}
-
+def _rows_to_named_handle_map(rows: Any) -> dict[int, str]:
     result: dict[int, str] = {}
-    for row in entity_rows:
-        if not isinstance(row, tuple) or len(row) < 3:
+    for row in list(rows or []):
+        if not isinstance(row, tuple) or len(row) < 2:
             continue
-        raw_handle, raw_type_name, raw_name = row[0], row[1], row[2]
-        if str(raw_type_name).strip().upper() != "BLOCK":
-            continue
+        raw_handle, raw_name = row[0], row[1]
         normalized_name = _normalize_block_name(raw_name)
         if normalized_name is None:
             continue
@@ -2761,31 +2874,85 @@ def _resolve_block_name_by_handle_exact(decode_path: str) -> dict[int, str]:
     return result
 
 
+def _decode_block_entity_name_maps_exact(
+    decode_path: str,
+    *,
+    decode_cache: _ConvertDecodeCache | None = None,
+) -> tuple[dict[int, str], dict[int, str]]:
+    if decode_cache is not None and decode_cache.block_entity_name_maps is not None:
+        return decode_cache.block_entity_name_maps
+
+    block_map: dict[int, str] = {}
+    endblk_map: dict[int, str] = {}
+    decode_maps = getattr(raw, "decode_block_entity_name_maps", None)
+    if callable(decode_maps):
+        try:
+            rows = decode_maps(decode_path)
+        except Exception:
+            rows = None
+        if isinstance(rows, tuple) and len(rows) >= 2:
+            block_map = _rows_to_named_handle_map(rows[0])
+            endblk_map = _rows_to_named_handle_map(rows[1])
+
+    if not block_map or not endblk_map:
+        try:
+            entity_rows = raw.decode_block_entity_names(decode_path)
+        except Exception:
+            entity_rows = []
+        if entity_rows:
+            fallback_block_map: dict[int, str] = {}
+            fallback_endblk_map: dict[int, str] = {}
+            for row in entity_rows:
+                if not isinstance(row, tuple) or len(row) < 3:
+                    continue
+                raw_handle, raw_type_name, raw_name = row[0], row[1], row[2]
+                normalized_name = _normalize_block_name(raw_name)
+                if normalized_name is None:
+                    continue
+                type_name = str(raw_type_name).strip().upper()
+                try:
+                    handle = int(raw_handle)
+                except Exception:
+                    continue
+                if type_name == "BLOCK":
+                    fallback_block_map[handle] = normalized_name
+                elif type_name == "ENDBLK":
+                    fallback_endblk_map[handle] = normalized_name
+            if not block_map:
+                block_map = fallback_block_map
+            if not endblk_map:
+                endblk_map = fallback_endblk_map
+
+    resolved = (block_map, endblk_map)
+    if decode_cache is not None:
+        decode_cache.block_entity_name_maps = resolved
+    return resolved
+
+
+def _resolve_block_name_by_handle_exact(
+    decode_path: str,
+    *,
+    decode_cache: _ConvertDecodeCache | None = None,
+) -> dict[int, str]:
+    block_map, _endblk_map = _decode_block_entity_name_maps_exact(
+        decode_path,
+        decode_cache=decode_cache,
+    )
+    return dict(block_map)
+
+
 def _resolve_block_end_name_by_handle_exact(
     decode_path: str,
     *,
     header_rows: list[tuple[Any, ...]] | None = None,
     block_name_by_handle: dict[int, str] | None = None,
+    decode_cache: _ConvertDecodeCache | None = None,
 ) -> dict[int, str]:
-    try:
-        entity_rows = raw.decode_block_entity_names(decode_path)
-    except Exception:
-        entity_rows = []
-
-    result: dict[int, str] = {}
-    for row in entity_rows:
-        if not isinstance(row, tuple) or len(row) < 3:
-            continue
-        raw_handle, raw_type_name, raw_name = row[0], row[1], row[2]
-        if str(raw_type_name).strip().upper() != "ENDBLK":
-            continue
-        normalized_name = _normalize_block_name(raw_name)
-        if normalized_name is None:
-            continue
-        try:
-            result[int(raw_handle)] = normalized_name
-        except Exception:
-            continue
+    _block_map, exact_endblk_map = _decode_block_entity_name_maps_exact(
+        decode_path,
+        decode_cache=decode_cache,
+    )
+    result: dict[int, str] = dict(exact_endblk_map)
 
     # Some snapshots expose incomplete ENDBLK names via decode_block_entity_names.
     # Fill missing names by declaration order to stabilize BLOCK membership windows.
@@ -2823,7 +2990,11 @@ def _resolve_block_end_name_by_handle_exact(
         return result
 
     if block_name_by_handle is None:
-        block_name_by_handle = _resolve_block_name_by_handle(decode_path, header_rows)
+        block_name_by_handle = _resolve_block_name_by_handle(
+            decode_path,
+            header_rows,
+            decode_cache=decode_cache,
+        )
     if not block_name_by_handle:
         return result
 

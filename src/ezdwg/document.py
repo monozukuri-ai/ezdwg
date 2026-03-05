@@ -2964,10 +2964,7 @@ def _block_and_endblk_name_maps(path: str) -> tuple[dict[int, str], dict[int, st
         if block_map or endblk_map:
             return block_map, endblk_map
 
-    try:
-        rows = raw.decode_block_header_names(path)
-    except Exception:
-        rows = []
+    rows = _block_header_name_rows(path)
 
     by_header_handle: dict[int, str] = {}
     ordered_names: list[str] = []
@@ -3021,10 +3018,7 @@ def _block_and_endblk_name_maps(path: str) -> tuple[dict[int, str], dict[int, st
 @lru_cache(maxsize=16)
 def _block_header_name_map(path: str) -> dict[int, str]:
     valid_handles = set(_entity_handles_by_type_name(path, "BLOCK_HEADER"))
-    try:
-        rows = raw.decode_block_header_names(path)
-    except Exception:
-        rows = []
+    rows = _block_header_name_rows(path)
     mapping: dict[int, str] = {}
     for row in rows:
         if not isinstance(row, tuple) or len(row) < 2:
@@ -3043,6 +3037,14 @@ def _block_header_name_map(path: str) -> dict[int, str]:
             continue
         mapping[handle] = name
     return mapping
+
+
+@lru_cache(maxsize=16)
+def _block_header_name_rows(path: str) -> list[tuple]:
+    try:
+        return list(raw.decode_block_header_names(path))
+    except Exception:
+        return []
 
 
 @lru_cache(maxsize=16)

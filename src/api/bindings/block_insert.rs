@@ -838,6 +838,24 @@ pub fn decode_block_entity_names(
     Ok(rows)
 }
 
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_block_entity_name_maps(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<BlockEntityNameMapsRows> {
+    let rows = decode_block_entity_names(path, limit)?;
+    let mut block_rows: Vec<BlockHeaderNameRow> = Vec::new();
+    let mut endblk_rows: Vec<BlockHeaderNameRow> = Vec::new();
+    for (handle, type_name, name) in rows {
+        if type_name.eq_ignore_ascii_case("BLOCK") {
+            block_rows.push((handle, name));
+        } else if type_name.eq_ignore_ascii_case("ENDBLK") {
+            endblk_rows.push((handle, name));
+        }
+    }
+    Ok((block_rows, endblk_rows))
+}
+
 fn decode_insert_for_version(
     reader: &mut BitReader<'_>,
     version: &version::DwgVersion,
