@@ -3210,6 +3210,38 @@ def test_write_insert_keeps_scaled_anonymous_dimension_block_in_smart_policy() -
     assert len(list(modelspace.query("INSERT"))) == 1
 
 
+def test_write_insert_skips_scaled_anonymous_dimension_block_in_smart_policy_with_context() -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+
+    doc = ezdxf.new(dxfversion="R2010")
+    block = doc.blocks.new(name="*D_BIG")
+    block.add_line((20000.0, 30000.0), (20100.0, 30000.0))
+    modelspace = doc.modelspace()
+    dimension_context = convert_module._DimensionWriteContext()
+
+    written = convert_module._write_entity_to_modelspace_unsafe(
+        modelspace,
+        Entity(
+            dxftype="INSERT",
+            handle=41061,
+            dxf={
+                "name": "*D_BIG",
+                "insert": (100.0, 200.0, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+                "rotation": 0.0,
+            },
+        ),
+        explode_dimensions=False,
+        dim_block_policy="smart",
+        dimension_context=dimension_context,
+    )
+
+    assert written is True
+    assert len(list(modelspace.query("INSERT"))) == 0
+
+
 def test_write_insert_skips_anonymous_dimension_block_with_implausible_extent() -> None:
     ezdxf = pytest.importorskip("ezdxf")
 

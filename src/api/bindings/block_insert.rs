@@ -322,11 +322,24 @@ fn decode_minsert_entities_with_state(
             Err(err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
-        if !_is_reasonable_minsert(&entity) {
+        if let Some(reason) = _minsert_reasonableness_failure(&entity) {
             if debug_minsert {
                 eprintln!(
-                    "[minsert-decode] handle={} rejected=implausible-values",
-                    obj.handle.0
+                    "[minsert-decode] handle={} rejected=implausible-values reason={} pos=({:.6e},{:.6e},{:.6e}) scale=({:.6e},{:.6e},{:.6e}) rot={:.6e} cols={} rows={} spacing=({:.6e},{:.6e}) block={:?}",
+                    obj.handle.0,
+                    reason,
+                    entity.position.0,
+                    entity.position.1,
+                    entity.position.2,
+                    entity.scale.0,
+                    entity.scale.1,
+                    entity.scale.2,
+                    entity.rotation,
+                    entity.num_columns,
+                    entity.num_rows,
+                    entity.column_spacing,
+                    entity.row_spacing,
+                    entity.block_header_handle
                 );
             }
             continue;
@@ -418,7 +431,7 @@ fn decode_minsert_entities_with_state(
             ) else {
                 continue;
             };
-            if !_is_reasonable_minsert(&entity) {
+            if _minsert_reasonableness_failure(&entity).is_some() {
                 continue;
             }
             let candidates = collect_insert_block_handle_candidates_r2010_plus(
@@ -958,22 +971,47 @@ fn _insert_as_single_minsert(insert: entities::InsertEntity) -> entities::MInser
     }
 }
 
+#[derive(Clone, Copy)]
+enum MInsertFallbackInsertMode {
+    None,
+    Version,
+    R2007,
+    R2000,
+}
+
 fn decode_minsert_attempt(
     record: &objects::ObjectRecord<'_>,
     version: &version::DwgVersion,
     header: &ApiObjectHeader,
     object_handle: u64,
     with_prefix: bool,
+    skip_size_word: bool,
     legacy_minsert_parser: bool,
-    as_insert_fallback: bool,
+    insert_fallback_mode: MInsertFallbackInsertMode,
 ) -> crate::core::result::Result<entities::MInsertEntity> {
     let mut reader = record.bit_reader();
     if with_prefix {
         skip_object_type_prefix(&mut reader, version)?;
     }
-    if as_insert_fallback {
-        let insert = decode_insert_for_version(&mut reader, version, header, object_handle)?;
-        return Ok(_insert_as_single_minsert(insert));
+    if skip_size_word {
+        let _ = reader.read_rl(Endian::Little)?;
+    }
+    match insert_fallback_mode {
+        MInsertFallbackInsertMode::None => {}
+        MInsertFallbackInsertMode::Version => {
+            let insert = decode_insert_for_version(&mut reader, version, header, object_handle)?;
+            return Ok(_insert_as_single_minsert(insert));
+        }
+        MInsertFallbackInsertMode::R2007 => {
+            let mut insert = entities::decode_insert_r2007(&mut reader)?;
+            insert.handle = object_handle;
+            return Ok(_insert_as_single_minsert(insert));
+        }
+        MInsertFallbackInsertMode::R2000 => {
+            let mut insert = entities::decode_insert(&mut reader)?;
+            insert.handle = object_handle;
+            return Ok(_insert_as_single_minsert(insert));
+        }
     }
     if legacy_minsert_parser {
         entities::decode_minsert(&mut reader)
@@ -999,29 +1037,176 @@ fn decode_minsert_with_fallback(
             true,
             false,
             false,
+            MInsertFallbackInsertMode::None,
         );
     }
 
     let attempts = [
-        (true, false, false, "prefixed/minsert"),
-        (false, false, false, "plain/minsert"),
-        (true, true, false, "prefixed/minsert-legacy"),
-        (false, true, false, "plain/minsert-legacy"),
-        (true, false, true, "prefixed/insert-fallback"),
-        (false, false, true, "plain/insert-fallback"),
+        (
+            true,
+            false,
+            false,
+            MInsertFallbackInsertMode::None,
+            "prefixed/minsert",
+        ),
+        (
+            true,
+            true,
+            false,
+            MInsertFallbackInsertMode::None,
+            "prefixed+size/minsert",
+        ),
+        (
+            false,
+            false,
+            false,
+            MInsertFallbackInsertMode::None,
+            "plain/minsert",
+        ),
+        (
+            false,
+            true,
+            false,
+            MInsertFallbackInsertMode::None,
+            "plain+size/minsert",
+        ),
+        (
+            true,
+            false,
+            true,
+            MInsertFallbackInsertMode::None,
+            "prefixed/minsert-legacy",
+        ),
+        (
+            true,
+            true,
+            true,
+            MInsertFallbackInsertMode::None,
+            "prefixed+size/minsert-legacy",
+        ),
+        (
+            false,
+            false,
+            true,
+            MInsertFallbackInsertMode::None,
+            "plain/minsert-legacy",
+        ),
+        (
+            false,
+            true,
+            true,
+            MInsertFallbackInsertMode::None,
+            "plain+size/minsert-legacy",
+        ),
+        (
+            true,
+            false,
+            false,
+            MInsertFallbackInsertMode::Version,
+            "prefixed/insert-fallback",
+        ),
+        (
+            true,
+            true,
+            false,
+            MInsertFallbackInsertMode::Version,
+            "prefixed+size/insert-fallback",
+        ),
+        (
+            false,
+            false,
+            false,
+            MInsertFallbackInsertMode::Version,
+            "plain/insert-fallback",
+        ),
+        (
+            false,
+            true,
+            false,
+            MInsertFallbackInsertMode::Version,
+            "plain+size/insert-fallback",
+        ),
+        (
+            true,
+            false,
+            false,
+            MInsertFallbackInsertMode::R2007,
+            "prefixed/insert-r2007-fallback",
+        ),
+        (
+            true,
+            true,
+            false,
+            MInsertFallbackInsertMode::R2007,
+            "prefixed+size/insert-r2007-fallback",
+        ),
+        (
+            false,
+            false,
+            false,
+            MInsertFallbackInsertMode::R2007,
+            "plain/insert-r2007-fallback",
+        ),
+        (
+            false,
+            true,
+            false,
+            MInsertFallbackInsertMode::R2007,
+            "plain+size/insert-r2007-fallback",
+        ),
+        (
+            true,
+            false,
+            false,
+            MInsertFallbackInsertMode::R2000,
+            "prefixed/insert-r2000-fallback",
+        ),
+        (
+            true,
+            true,
+            false,
+            MInsertFallbackInsertMode::R2000,
+            "prefixed+size/insert-r2000-fallback",
+        ),
+        (
+            false,
+            false,
+            false,
+            MInsertFallbackInsertMode::R2000,
+            "plain/insert-r2000-fallback",
+        ),
+        (
+            false,
+            true,
+            false,
+            MInsertFallbackInsertMode::R2000,
+            "plain+size/insert-r2000-fallback",
+        ),
     ];
-    for (with_prefix, legacy_minsert_parser, as_insert_fallback, label) in attempts {
+    for (
+        with_prefix,
+        skip_size_word,
+        legacy_minsert_parser,
+        insert_fallback_mode,
+        label,
+    ) in attempts
+    {
         match decode_minsert_attempt(
             record,
             version,
             header,
             object_handle,
             with_prefix,
+            skip_size_word,
             legacy_minsert_parser,
-            as_insert_fallback,
+            insert_fallback_mode,
         ) {
             Ok(entity) => {
-                if debug_minsert && (as_insert_fallback || !with_prefix) {
+                if debug_minsert
+                    && (!matches!(insert_fallback_mode, MInsertFallbackInsertMode::None)
+                        || !with_prefix
+                        || skip_size_word)
+                {
                     eprintln!(
                         "[minsert-decode] handle={} recovered={}",
                         object_handle, label
@@ -1047,8 +1232,15 @@ fn decode_minsert_with_fallback(
 }
 
 fn _is_reasonable_minsert(entity: &entities::MInsertEntity) -> bool {
-    if entity.num_columns == 0 || entity.num_rows == 0 {
-        return false;
+    _minsert_reasonableness_failure(entity).is_none()
+}
+
+fn _minsert_reasonableness_failure(entity: &entities::MInsertEntity) -> Option<&'static str> {
+    if entity.num_columns == 0 {
+        return Some("num_columns=0");
+    }
+    if entity.num_rows == 0 {
+        return Some("num_rows=0");
     }
     let values = [
         entity.position.0,
@@ -1061,9 +1253,13 @@ fn _is_reasonable_minsert(entity: &entities::MInsertEntity) -> bool {
         entity.column_spacing,
         entity.row_spacing,
     ];
-    values
-        .iter()
-        .all(|v| v.is_finite() && v.abs() <= 1.0e15_f64)
+    if values.iter().any(|v| !v.is_finite()) {
+        return Some("non-finite");
+    }
+    if values.iter().any(|v| v.abs() > 1.0e15_f64) {
+        return Some("magnitude>1e15");
+    }
+    None
 }
 
 fn collect_block_header_name_entries_in_order(

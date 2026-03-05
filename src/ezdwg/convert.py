@@ -4663,7 +4663,7 @@ def _write_dimension_block_fallback(
     dim_block_policy: str = "smart",
     dimension_context: _DimensionWriteContext | None = None,
 ) -> bool:
-    normalized_dim_block_policy = _normalize_dim_block_policy(dim_block_policy)
+    _ = _normalize_dim_block_policy(dim_block_policy)
     name = _dimension_anonymous_block_name(dxf)
     if name is None:
         return False
@@ -4682,9 +4682,11 @@ def _write_dimension_block_fallback(
             (not math.isfinite(local_center_abs)) or local_center_abs > _MAX_COORD_ABS
         ):
             return False
+        # Large-scale anonymous dimension blocks with far-away local centers
+        # are unstable across viewers and commonly duplicate/scatter geometry.
+        # Reject fallback blockrefs for these cases regardless of policy.
         if (
-            normalized_dim_block_policy == "legacy"
-            and name.upper().startswith("*D")
+            name.upper().startswith("*D")
             and max(abs(xscale), abs(yscale), abs(zscale)) >= 10.0
             and local_center_abs is not None
             and local_center_abs > 1000.0
@@ -5045,13 +5047,18 @@ def _should_skip_anonymous_dimension_block_insert(
     ):
         return True
 
+    if (
+        max(abs(xscale), abs(yscale), abs(zscale)) >= 10.0
+        and local_center_abs is not None
+        and local_center_abs > 1000.0
+        and (
+            normalized_policy == "legacy"
+            or dimension_context is not None
+        )
+    ):
+        return True
+
     if normalized_policy == "legacy":
-        if (
-            max(abs(xscale), abs(yscale), abs(zscale)) >= 10.0
-            and local_center_abs is not None
-            and local_center_abs > 1000.0
-        ):
-            return True
         return False
 
     if dimension_context is None:
