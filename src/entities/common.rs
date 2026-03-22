@@ -71,14 +71,175 @@ pub fn parse_common_entity_header_r2010(
     reader: &mut BitReader<'_>,
     object_data_end_bit: u32,
 ) -> Result<CommonEntityHeader> {
-    parse_common_entity_header_impl(reader, true, true, false, Some(object_data_end_bit))
+    parse_common_entity_header_with_byte_align_fallback(
+        reader,
+        true,
+        true,
+        false,
+        Some(object_data_end_bit),
+    )
+}
+
+pub fn parse_common_entity_header_with_proxy_graphics_r2010(
+    reader: &mut BitReader<'_>,
+    object_data_end_bit: u32,
+) -> Result<(CommonEntityHeader, Option<Vec<u8>>)> {
+    parse_common_entity_header_with_proxy_graphics_with_byte_align_fallback(
+        reader,
+        true,
+        true,
+        false,
+        Some(object_data_end_bit),
+    )
 }
 
 pub fn parse_common_entity_header_r2013(
     reader: &mut BitReader<'_>,
     object_data_end_bit: u32,
 ) -> Result<CommonEntityHeader> {
-    parse_common_entity_header_impl(reader, true, true, true, Some(object_data_end_bit))
+    parse_common_entity_header_with_byte_align_fallback(
+        reader,
+        true,
+        true,
+        true,
+        Some(object_data_end_bit),
+    )
+}
+
+pub fn parse_common_entity_header_with_proxy_graphics_r2013(
+    reader: &mut BitReader<'_>,
+    object_data_end_bit: u32,
+) -> Result<(CommonEntityHeader, Option<Vec<u8>>)> {
+    parse_common_entity_header_with_proxy_graphics_with_byte_align_fallback(
+        reader,
+        true,
+        true,
+        true,
+        Some(object_data_end_bit),
+    )
+}
+
+pub fn parse_embedded_common_entity_header_r2010(
+    reader: &mut BitReader<'_>,
+    base_handle: u64,
+    r2013_plus: bool,
+) -> Result<CommonEntityHeader> {
+    parse_common_entity_header_fields_from_entmode(
+        reader,
+        0,
+        base_handle,
+        true,
+        true,
+        r2013_plus,
+        false,
+    )
+}
+
+fn parse_common_entity_header_with_byte_align_fallback(
+    reader: &mut BitReader<'_>,
+    with_material_and_shadow: bool,
+    r2010_plus: bool,
+    r2013_plus: bool,
+    object_data_end_bit: Option<u32>,
+) -> Result<CommonEntityHeader> {
+    let start = reader.get_pos();
+    match parse_common_entity_header_impl(
+        reader,
+        with_material_and_shadow,
+        r2010_plus,
+        r2013_plus,
+        object_data_end_bit,
+    ) {
+        Ok(header) => Ok(header),
+        Err(err)
+            if r2010_plus
+                && matches!(
+                    err.kind,
+                    ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
+                ) =>
+        {
+            let start_abs_bits = (start.0 as u64)
+                .saturating_mul(8)
+                .saturating_add(start.1 as u64);
+            let mut candidates: Vec<(usize, u8)> = Vec::new();
+            if start.1 != 0 {
+                candidates.push((start.0.saturating_add(1), 0));
+            }
+            for delta_bits in 1..=64u64 {
+                let candidate_abs_bits = start_abs_bits.saturating_add(delta_bits);
+                let Ok(byte_pos) = usize::try_from(candidate_abs_bits / 8) else {
+                    continue;
+                };
+                let bit_pos = (candidate_abs_bits % 8) as u8;
+                let candidate = (byte_pos, bit_pos);
+                if candidate != start && !candidates.contains(&candidate) {
+                    candidates.push(candidate);
+                }
+            }
+            for (byte_pos, bit_pos) in candidates {
+                reader.set_pos(byte_pos, bit_pos);
+                if let Ok(header) = parse_common_entity_header_impl(
+                    reader,
+                    with_material_and_shadow,
+                    r2010_plus,
+                    r2013_plus,
+                    object_data_end_bit,
+                ) {
+                    return Ok(header);
+                }
+            }
+            reader.set_pos(start.0, start.1);
+            Err(err)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn parse_common_entity_header_with_proxy_graphics_with_byte_align_fallback(
+    reader: &mut BitReader<'_>,
+    with_material_and_shadow: bool,
+    r2010_plus: bool,
+    r2013_plus: bool,
+    object_data_end_bit: Option<u32>,
+) -> Result<(CommonEntityHeader, Option<Vec<u8>>)> {
+    let start = reader.get_pos();
+    match parse_common_entity_header_impl_with_proxy_graphics(
+        reader,
+        with_material_and_shadow,
+        r2010_plus,
+        r2013_plus,
+        object_data_end_bit,
+    ) {
+        Ok(decoded) => Ok(decoded),
+        Err(err)
+            if matches!(
+                err.kind,
+                crate::core::error::ErrorKind::Format
+                    | crate::core::error::ErrorKind::Decode
+                    | crate::core::error::ErrorKind::Io
+            ) && start.1 != 0 =>
+        {
+            let mut candidates = vec![(start.0, 0u8)];
+            if start.0 > 0 {
+                candidates.push((start.0 - 1, 0));
+            }
+            for (byte_pos, bit_pos) in candidates {
+                reader.set_pos(byte_pos, bit_pos);
+                if let Ok(decoded) = parse_common_entity_header_impl_with_proxy_graphics(
+                    reader,
+                    with_material_and_shadow,
+                    r2010_plus,
+                    r2013_plus,
+                    object_data_end_bit,
+                ) {
+                    return Ok(decoded);
+                }
+            }
+            reader.set_pos(start.0, start.1);
+            Err(err)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn parse_common_entity_header_impl(
@@ -88,6 +249,44 @@ fn parse_common_entity_header_impl(
     r2013_plus: bool,
     object_data_end_bit: Option<u32>,
 ) -> Result<CommonEntityHeader> {
+    let (header, _proxy_graphics) = parse_common_entity_header_impl_with_proxy_graphics(
+        reader,
+        with_material_and_shadow,
+        r2010_plus,
+        r2013_plus,
+        object_data_end_bit,
+    )?;
+    Ok(header)
+}
+
+fn parse_common_entity_header_impl_with_proxy_graphics(
+    reader: &mut BitReader<'_>,
+    with_material_and_shadow: bool,
+    r2010_plus: bool,
+    r2013_plus: bool,
+    object_data_end_bit: Option<u32>,
+) -> Result<(CommonEntityHeader, Option<Vec<u8>>)> {
+    let (obj_size, handle, proxy_graphics) =
+        read_common_entity_header_preamble(reader, r2010_plus, object_data_end_bit)?;
+
+    let header = parse_common_entity_header_fields_from_entmode(
+        reader,
+        obj_size,
+        handle,
+        with_material_and_shadow,
+        r2010_plus,
+        r2013_plus,
+        false,
+    )?;
+
+    Ok((header, proxy_graphics))
+}
+
+fn read_common_entity_header_preamble(
+    reader: &mut BitReader<'_>,
+    r2010_plus: bool,
+    object_data_end_bit: Option<u32>,
+) -> Result<(u32, u64, Option<Vec<u8>>)> {
     let obj_size = match object_data_end_bit {
         Some(bits) => bits,
         None => reader.read_rl(Endian::Little)?,
@@ -108,15 +307,29 @@ fn parse_common_entity_header_impl(
     }
 
     let graphic_present_flag = reader.read_b()?;
-    if graphic_present_flag == 1 {
+    let proxy_graphics = if graphic_present_flag == 1 {
         let graphic_size = if r2010_plus {
             reader.read_bll()? as usize
         } else {
             reader.read_rl(Endian::Little)? as usize
         };
-        let _ = reader.read_rcs(graphic_size)?;
-    }
+        Some(reader.read_rcs(graphic_size)?.to_vec())
+    } else {
+        None
+    };
 
+    Ok((obj_size, handle, proxy_graphics))
+}
+
+fn parse_common_entity_header_fields_from_entmode(
+    reader: &mut BitReader<'_>,
+    obj_size: u32,
+    handle: u64,
+    with_material_and_shadow: bool,
+    r2010_plus: bool,
+    r2013_plus: bool,
+    has_legacy_entity_links: bool,
+) -> Result<CommonEntityHeader> {
     let entity_mode = reader.read_bb()?;
     let num_of_reactors = reader.read_bl()?;
     if num_of_reactors > MAX_COMMON_ENTITY_REACTORS {
@@ -192,7 +405,7 @@ fn parse_common_entity_header_impl(
         has_full_visual_style,
         has_face_visual_style,
         has_edge_visual_style,
-        has_legacy_entity_links: false,
+        has_legacy_entity_links,
     })
 }
 
@@ -280,6 +493,115 @@ fn read_common_entity_color_cmc(reader: &mut BitReader<'_>) -> Result<CommonEnti
         index: Some(color_index),
         true_color,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_common_entity_header_r2010, parse_common_entity_header_r2013};
+    use crate::bit::{BitReader, BitWriter};
+
+    fn build_minimal_common_header_bytes(r2013_plus: bool) -> Vec<u8> {
+        let mut writer = BitWriter::new();
+        writer.write_h(4, 0).expect("write handle");
+        writer.write_bs(0).expect("write ext size");
+        writer.write_b(0).expect("write graphic flag");
+        writer.write_bb(0).expect("write entity mode");
+        writer.write_bl(0).expect("write reactors");
+        writer.write_b(1).expect("write xdic missing flag");
+        if r2013_plus {
+            writer.write_b(0).expect("write ds binary flag");
+        }
+        writer.write_b(1).expect("write no links");
+        writer.write_b(0).expect("write color unknown");
+        writer.write_bd(1.0).expect("write ltype scale");
+        writer.write_bb(0).expect("write ltype flags");
+        writer.write_bb(0).expect("write plotstyle flags");
+        writer.write_bb(0).expect("write material flags");
+        writer.write_rc(0).expect("write shadow flags");
+        writer.write_b(0).expect("write full visual style flag");
+        writer.write_b(0).expect("write face visual style flag");
+        writer.write_b(0).expect("write edge visual style flag");
+        writer.write_bs(0).expect("write invisibility");
+        writer.write_rc(0).expect("write line weight");
+        writer.into_bytes()
+    }
+
+    fn build_prefixed_r2010_entity_bytes(type_code: u16, r2013_plus: bool) -> Vec<u8> {
+        let mut writer = BitWriter::new();
+        writer.write_umc(0).expect("write handle stream size");
+        writer.write_ot_r2010(type_code).expect("write type code");
+        writer.align_byte();
+        writer
+            .write_rcs(&build_minimal_common_header_bytes(r2013_plus))
+            .expect("write header body");
+        writer.into_bytes()
+    }
+
+    fn build_shifted_r2010_entity_bytes(
+        type_code: u16,
+        r2013_plus: bool,
+        padding_bits: u8,
+    ) -> Vec<u8> {
+        let mut writer = BitWriter::new();
+        writer.write_umc(0).expect("write handle stream size");
+        writer.write_ot_r2010(type_code).expect("write type code");
+        for _ in 0..padding_bits {
+            writer.write_b(0).expect("write padding bit");
+        }
+        writer
+            .write_rcs(&build_minimal_common_header_bytes(r2013_plus))
+            .expect("write shifted header body");
+        writer.into_bytes()
+    }
+
+    #[test]
+    fn parse_common_entity_header_r2010_recovers_from_byte_aligned_body() {
+        let bytes = build_prefixed_r2010_entity_bytes(0x02, false);
+        let mut reader = BitReader::new(&bytes);
+        let _ = reader.read_umc().expect("read handle stream size");
+        let _ = reader.read_ot_r2010().expect("read type code");
+        assert_eq!(reader.get_pos(), (2, 2));
+
+        let header =
+            parse_common_entity_header_r2010(&mut reader, 64).expect("parse common header");
+
+        assert_eq!(header.handle, 0);
+        assert_eq!(header.obj_size, 64);
+        assert!(reader.tell_bits() >= 24);
+    }
+
+    #[test]
+    fn parse_common_entity_header_r2013_recovers_from_byte_aligned_body() {
+        let bytes = build_prefixed_r2010_entity_bytes(0x03, true);
+        let mut reader = BitReader::new(&bytes);
+        let _ = reader.read_umc().expect("read handle stream size");
+        let _ = reader.read_ot_r2010().expect("read type code");
+        assert_eq!(reader.get_pos(), (2, 2));
+
+        let header =
+            parse_common_entity_header_r2013(&mut reader, 72).expect("parse common header");
+
+        assert_eq!(header.handle, 0);
+        assert_eq!(header.obj_size, 72);
+        assert!(!header.has_ds_binary_data);
+        assert!(reader.tell_bits() >= 24);
+    }
+
+    #[test]
+    fn parse_common_entity_header_r2010_recovers_from_shifted_body() {
+        let bytes = build_shifted_r2010_entity_bytes(0x02, false, 3);
+        let mut reader = BitReader::new(&bytes);
+        let _ = reader.read_umc().expect("read handle stream size");
+        let _ = reader.read_ot_r2010().expect("read type code");
+        assert_eq!(reader.get_pos(), (2, 2));
+
+        let header =
+            parse_common_entity_header_r2010(&mut reader, 64).expect("parse common header");
+
+        assert_eq!(header.handle, 0);
+        assert_eq!(header.obj_size, 64);
+        assert!(reader.tell_bits() >= 24);
+    }
 }
 
 fn skip_eed(reader: &mut BitReader<'_>) -> Result<()> {

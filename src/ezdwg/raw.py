@@ -1,6 +1,9 @@
+from functools import lru_cache
+
 from ._core import (
     decode_entity_styles,
     decode_layer_colors,
+    decode_layer_names,
     decode_arc_entities,
     decode_line_arc_circle_entities,
     decode_3dface_entities,
@@ -70,12 +73,17 @@ from ._core import (
     list_object_headers_with_type,
     list_object_map_entries,
     list_section_locators,
+    decode_object_entity_layer_handles,
     read_object_records_by_handle,
+    read_object_records_by_offset,
     read_object_records_by_type,
     read_section_bytes,
     decode_object_handle_stream_refs,
     decode_acis_candidate_infos,
+    decode_proxy_graphic_chunk_infos,
+    decode_proxy_graphic_text_entities,
 )
+from ._embedded_text import collect_unknown_embedded_text_entities
 
 __all__ = [
     "detect_version",
@@ -86,11 +94,17 @@ __all__ = [
     "list_object_headers_by_type",
     "list_object_headers_with_type",
     "read_object_records_by_handle",
+    "read_object_records_by_offset",
     "read_object_records_by_type",
+    "decode_object_entity_layer_handles",
     "decode_object_handle_stream_refs",
     "decode_acis_candidate_infos",
+    "decode_unknown_embedded_text_entities",
+    "decode_proxy_graphic_chunk_infos",
+    "decode_proxy_graphic_text_entities",
     "decode_entity_styles",
     "decode_layer_colors",
+    "decode_layer_names",
     "decode_line_entities",
     "decode_point_entities",
     "decode_3dface_entities",
@@ -155,3 +169,32 @@ __all__ = [
     "write_ac1015_dwg",
     "write_ac1015_line_dwg",
 ]
+
+
+@lru_cache(maxsize=16)
+def _decode_unknown_embedded_text_entities_cached(
+    path: str,
+    modelspace_owner_handle: int | None,
+    limit: int | None,
+) -> tuple[tuple[int, str, tuple[float, float, float], float, float, int | None], ...]:
+    return collect_unknown_embedded_text_entities(
+        path,
+        list_object_headers_with_type,
+        read_object_records_by_handle,
+        modelspace_owner_handle=modelspace_owner_handle,
+        limit=limit,
+    )
+
+
+def decode_unknown_embedded_text_entities(
+    path: str,
+    modelspace_owner_handle: int | None = None,
+    limit: int | None = None,
+) -> list[tuple[int, str, tuple[float, float, float], float, float, int | None]]:
+    return list(
+        _decode_unknown_embedded_text_entities_cached(
+            str(path),
+            None if modelspace_owner_handle is None else int(modelspace_owner_handle),
+            None if limit is None else int(limit),
+        )
+    )

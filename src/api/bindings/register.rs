@@ -10,10 +10,15 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(list_object_headers_by_type, module)?)?;
     module.add_function(wrap_pyfunction!(read_object_records_by_type, module)?)?;
     module.add_function(wrap_pyfunction!(read_object_records_by_handle, module)?)?;
+    module.add_function(wrap_pyfunction!(read_object_records_by_offset, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_object_entity_layer_handles, module)?)?;
     module.add_function(wrap_pyfunction!(decode_object_handle_stream_refs, module)?)?;
     module.add_function(wrap_pyfunction!(decode_acis_candidate_infos, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_proxy_graphic_chunk_infos, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_proxy_graphic_text_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_entity_styles, module)?)?;
     module.add_function(wrap_pyfunction!(decode_layer_colors, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_layer_names, module)?)?;
     module.add_function(wrap_pyfunction!(decode_line_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_point_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_3dface_entities, module)?)?;

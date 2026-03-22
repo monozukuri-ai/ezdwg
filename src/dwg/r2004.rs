@@ -6,9 +6,11 @@ use crate::container::{SectionDirectory, SectionLocatorRecord, SectionSlice};
 use crate::core::config::ParseConfig;
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
+use crate::dwg::version::{detect_version, DwgVersion};
+use crate::entities;
 use crate::io::ByteReader;
 use crate::objects::object_record::parse_object_record_owned;
-use crate::objects::{Handle, ObjectIndex, ObjectRecord, ObjectRef};
+use crate::objects::{Handle, ObjectClass, ObjectIndex, ObjectRecord, ObjectRef};
 
 const HEADER_OFFSET: usize = 0x80;
 const HEADER_SIZE: usize = 0x6c;
@@ -70,7 +72,17 @@ struct DataSectionHeader {
 
 #[derive(Debug, Clone)]
 struct ClassEntry {
+    class_number: u16,
+    item_class_id: u16,
     dxf_name: String,
+}
+
+#[derive(Debug, Clone)]
+struct R21ClassesHeaderCandidate<'a> {
+    reader: BitReader<'a>,
+    absolute_end_bit: u32,
+    max_class_number: u16,
+    score: i32,
 }
 
 pub fn parse_section_directory(bytes: &[u8], _config: &ParseConfig) -> Result<SectionDirectory> {
@@ -169,6 +181,7 @@ pub fn build_object_index(bytes: &[u8], config: &ParseConfig) -> Result<ObjectIn
     let handles_data = load_named_section_data(bytes, config, "AcDb:Handles")?;
     let objects_data = load_objects_section_data(bytes, config)?;
     let index = parse_object_map_handles(&handles_data, config)?;
+    let version = detect_version(bytes)?;
 
     if config.strict {
         let mut valid_objects = Vec::with_capacity(index.objects.len());
@@ -188,7 +201,354 @@ pub fn build_object_index(bytes: &[u8], config: &ParseConfig) -> Result<ObjectIn
         .into_iter()
         .filter(|object| (object.offset as usize) < max_offset)
         .collect();
+    let objects = match version {
+        DwgVersion::R2010 | DwgVersion::R2013 | DwgVersion::R2018 => {
+            select_best_r21_duplicate_handle_candidates(&objects_data, objects, version)
+        }
+        _ => objects,
+    };
     Ok(ObjectIndex::from_objects(objects))
+}
+
+fn select_best_r21_duplicate_handle_candidates(
+    objects_data: &[u8],
+    objects: Vec<ObjectRef>,
+    version: DwgVersion,
+) -> Vec<ObjectRef> {
+    let mut grouped: HashMap<u64, Vec<ObjectRef>> = HashMap::new();
+    for object in objects.iter().copied() {
+        grouped.entry(object.handle.0).or_default().push(object);
+    }
+
+    let mut candidate_infos: HashMap<(u64, u32), R21DuplicateCandidateInfo> = HashMap::new();
+    for candidates in grouped.values() {
+        if candidates.len() < 2 {
+            continue;
+        }
+        for candidate in candidates.iter().copied() {
+            candidate_infos.insert(
+                (candidate.handle.0, candidate.offset),
+                inspect_r21_duplicate_handle_candidate(objects_data, candidate, &version),
+            );
+        }
+    }
+
+    let mut selected_offsets: HashMap<u64, u32> = HashMap::with_capacity(grouped.len());
+    for (handle, candidates) in grouped.iter() {
+        if candidates.len() == 1 {
+            selected_offsets.insert(*handle, candidates[0].offset);
+            continue;
+        }
+
+        let mut best_score = i32::MIN;
+        let mut best_offset = candidates
+            .iter()
+            .map(|candidate| candidate.offset)
+            .max()
+            .unwrap_or(0);
+        for candidate in candidates.iter().copied() {
+            let score = score_r21_duplicate_handle_candidate(
+                candidate,
+                grouped.get(&(handle.saturating_sub(1))),
+                grouped.get(&(handle.saturating_add(1))),
+                &candidate_infos,
+            );
+            if score > best_score || (score == best_score && candidate.offset > best_offset) {
+                best_score = score;
+                best_offset = candidate.offset;
+            }
+        }
+        selected_offsets.insert(*handle, best_offset);
+    }
+
+    let mut out = Vec::with_capacity(selected_offsets.len());
+    for object in objects {
+        if selected_offsets
+            .get(&object.handle.0)
+            .is_some_and(|offset| *offset == object.offset)
+        {
+            out.push(object);
+            selected_offsets.remove(&object.handle.0);
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, Copy)]
+struct R21DuplicateCandidateInfo {
+    parsed_ok: bool,
+    type_code: u16,
+    data_size: u32,
+    class: ObjectClass,
+    decoded_common_entity_handle: Option<u64>,
+}
+
+impl Default for R21DuplicateCandidateInfo {
+    fn default() -> Self {
+        Self {
+            parsed_ok: false,
+            type_code: 0,
+            data_size: 0,
+            class: ObjectClass::Unused,
+            decoded_common_entity_handle: None,
+        }
+    }
+}
+
+fn inspect_r21_duplicate_handle_candidate(
+    objects_data: &[u8],
+    object: ObjectRef,
+    version: &DwgVersion,
+) -> R21DuplicateCandidateInfo {
+    let record = match parse_object_record_owned(objects_data, object.offset) {
+        Ok(record) => record,
+        Err(_) => return R21DuplicateCandidateInfo::default(),
+    };
+    let header = match crate::objects::object_header_r2010::parse_from_record(&record) {
+        Ok(header) => header,
+        Err(_) => return R21DuplicateCandidateInfo::default(),
+    };
+
+    R21DuplicateCandidateInfo {
+        parsed_ok: true,
+        type_code: header.type_code,
+        data_size: header.data_size,
+        class: crate::objects::object_type_info(header.type_code).class,
+        decoded_common_entity_handle: decode_r21_candidate_common_entity_handle(
+            &record,
+            &header,
+            version,
+        ),
+    }
+}
+
+fn score_r21_duplicate_handle_candidate(
+    object: ObjectRef,
+    prev_candidates: Option<&Vec<ObjectRef>>,
+    next_candidates: Option<&Vec<ObjectRef>>,
+    candidate_infos: &HashMap<(u64, u32), R21DuplicateCandidateInfo>,
+) -> i32 {
+    let Some(info) = candidate_infos.get(&(object.handle.0, object.offset)).copied() else {
+        return i32::MIN / 8;
+    };
+    if !info.parsed_ok {
+        return i32::MIN / 4;
+    }
+    let mut score = 0i32;
+    if info.type_code != 0 {
+        score += 32;
+    }
+    if info.data_size > 0 {
+        score += 8;
+    }
+
+    match info.class {
+        ObjectClass::Entity => score += 16,
+        ObjectClass::Object => score -= 8,
+        ObjectClass::Unused => {}
+    }
+
+    if let Some(decoded_handle) = info.decoded_common_entity_handle {
+        if decoded_handle == object.handle.0 {
+            score += 10_000;
+        } else if decoded_handle != 0 {
+            score -= 5_000;
+        }
+    }
+
+    score += score_r21_contiguous_layer_table_bonus(
+        object,
+        info.type_code,
+        prev_candidates,
+        next_candidates,
+        candidate_infos,
+    );
+
+    score
+}
+
+fn score_r21_contiguous_layer_table_bonus(
+    object: ObjectRef,
+    type_code: u16,
+    prev_candidates: Option<&Vec<ObjectRef>>,
+    next_candidates: Option<&Vec<ObjectRef>>,
+    candidate_infos: &HashMap<(u64, u32), R21DuplicateCandidateInfo>,
+) -> i32 {
+    if type_code != 0x33 {
+        return 0;
+    }
+
+    let mut matching_neighbors = 0;
+    if has_nearby_same_type_candidate(object.offset, type_code, prev_candidates, candidate_infos) {
+        matching_neighbors += 1;
+    }
+    if has_nearby_same_type_candidate(object.offset, type_code, next_candidates, candidate_infos) {
+        matching_neighbors += 1;
+    }
+
+    match matching_neighbors {
+        2 => 12_000,
+        1 => 6_000,
+        _ => 0,
+    }
+}
+
+fn has_nearby_same_type_candidate(
+    offset: u32,
+    type_code: u16,
+    candidates: Option<&Vec<ObjectRef>>,
+    candidate_infos: &HashMap<(u64, u32), R21DuplicateCandidateInfo>,
+) -> bool {
+    candidates.is_some_and(|rows| {
+        rows.iter().any(|candidate| {
+            candidate_infos
+                .get(&(candidate.handle.0, candidate.offset))
+                .is_some_and(|info| {
+                    info.parsed_ok
+                        && info.type_code == type_code
+                        && candidate.offset.abs_diff(offset) <= 256
+                })
+        })
+    })
+}
+
+fn decode_r21_candidate_common_entity_handle(
+    record: &ObjectRecord<'_>,
+    header: &crate::objects::object_header_r2010::ObjectHeaderR2010,
+    version: &DwgVersion,
+) -> Option<u64> {
+    let mut end_bits = resolve_r21_object_data_end_bit_candidates(
+        header.data_size,
+        header.handle_stream_size_bits,
+    );
+    if let Some(primary) =
+        resolve_r21_object_data_end_bit(header.data_size, header.handle_stream_size_bits)
+    {
+        end_bits.retain(|candidate| *candidate != primary);
+        end_bits.insert(0, primary);
+    }
+
+    for end_bit in end_bits {
+        let mut reader = record.bit_reader();
+        if skip_r21_object_type_prefix(&mut reader).is_err() {
+            return None;
+        }
+        let decoded = if header.type_code == 0x1F2 {
+            match version {
+                DwgVersion::R2010 => {
+                    entities::common::parse_common_entity_header_with_proxy_graphics_r2010(
+                        &mut reader,
+                        end_bit,
+                    )
+                    .ok()
+                    .map(|(header, _graphics)| header.handle)
+                }
+                DwgVersion::R2013 | DwgVersion::R2018 => {
+                    entities::common::parse_common_entity_header_with_proxy_graphics_r2013(
+                        &mut reader,
+                        end_bit,
+                    )
+                    .ok()
+                    .map(|(header, _graphics)| header.handle)
+                }
+                _ => None,
+            }
+        } else {
+            match version {
+                DwgVersion::R2010 => entities::common::parse_common_entity_header_r2010(
+                    &mut reader,
+                    end_bit,
+                )
+                .ok()
+                .map(|header| header.handle),
+                DwgVersion::R2013 | DwgVersion::R2018 => {
+                    entities::common::parse_common_entity_header_r2013(&mut reader, end_bit)
+                        .ok()
+                        .map(|header| header.handle)
+                }
+                _ => None,
+            }
+        };
+        if let Some(decoded) = decoded {
+            return Some(decoded);
+        }
+
+        if header.type_code != 0x1F2 {
+            continue;
+        }
+
+        let mut fallback_reader = record.bit_reader();
+        if skip_r21_object_type_prefix(&mut fallback_reader).is_err() {
+            return None;
+        }
+        let fallback = match version {
+            DwgVersion::R2010 => entities::common::parse_common_entity_header_r2010(
+                &mut fallback_reader,
+                end_bit,
+            )
+            .ok()
+            .map(|header| header.handle),
+            DwgVersion::R2013 | DwgVersion::R2018 => {
+                entities::common::parse_common_entity_header_r2013(
+                    &mut fallback_reader,
+                    end_bit,
+                )
+                .ok()
+                .map(|header| header.handle)
+            }
+            _ => None,
+        };
+        if let Some(decoded) = fallback {
+            return Some(decoded);
+        }
+    }
+
+    None
+}
+
+fn resolve_r21_object_data_end_bit(data_size: u32, handle_stream_size_bits: u32) -> Option<u32> {
+    data_size.checked_mul(8)?.checked_sub(handle_stream_size_bits)
+}
+
+fn resolve_r21_object_data_end_bit_candidates(
+    data_size: u32,
+    handle_stream_size_bits: u32,
+) -> Vec<u32> {
+    let total_bits = data_size.saturating_mul(8);
+    let bases = [
+        total_bits.saturating_sub(handle_stream_size_bits),
+        total_bits.saturating_sub(handle_stream_size_bits.saturating_sub(8)),
+    ];
+    let deltas = [-16i32, -8, 0, 8, 16];
+
+    let mut out = Vec::new();
+    for base in bases {
+        for delta in deltas {
+            let candidate_i64 = i64::from(base) + i64::from(delta);
+            if candidate_i64 < 0 {
+                continue;
+            }
+            let Ok(candidate) = u32::try_from(candidate_i64) else {
+                continue;
+            };
+            if candidate > total_bits {
+                continue;
+            }
+            out.push(candidate);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn skip_r21_object_type_prefix(reader: &mut BitReader<'_>) -> Result<()> {
+    let _handle_stream_size_bits = reader.read_umc()?;
+    let type_code = reader.read_ot_r2010()?;
+    if type_code == 0 {
+        return Err(DwgError::new(ErrorKind::Format, "object type code is zero"));
+    }
+    Ok(())
 }
 
 pub fn load_objects_section_data(bytes: &[u8], config: &ParseConfig) -> Result<Vec<u8>> {
@@ -214,15 +574,91 @@ pub fn parse_object_record<'a>(
 pub fn load_dynamic_type_map(bytes: &[u8], config: &ParseConfig) -> Result<HashMap<u16, String>> {
     let data = load_named_section_data(bytes, config, "AcDb:Classes")?;
     let classes = parse_classes_section(&data)?;
+    Ok(dynamic_type_map_from_classes(&classes))
+}
+
+pub fn load_dynamic_type_class_map(
+    bytes: &[u8],
+    config: &ParseConfig,
+) -> Result<HashMap<u16, ObjectClass>> {
+    let data = load_named_section_data(bytes, config, "AcDb:Classes")?;
+    let classes = parse_classes_section(&data)?;
+    Ok(dynamic_type_class_map_from_classes(&classes))
+}
+
+pub fn load_dynamic_type_map_r21(
+    bytes: &[u8],
+    config: &ParseConfig,
+) -> Result<HashMap<u16, String>> {
+    let data = load_named_section_data(bytes, config, "AcDb:Classes")?;
+    if let Ok(classes) = parse_classes_section_r21(&data) {
+        let map = dynamic_type_map_from_classes(&classes);
+        if !map.is_empty() {
+            return Ok(map);
+        }
+    }
+    match parse_classes_section(&data) {
+        Ok(classes) => Ok(dynamic_type_map_from_classes(&classes)),
+        Err(_) => Ok(HashMap::new()),
+    }
+}
+
+pub fn load_dynamic_type_class_map_r21(
+    bytes: &[u8],
+    config: &ParseConfig,
+) -> Result<HashMap<u16, ObjectClass>> {
+    let data = load_named_section_data(bytes, config, "AcDb:Classes")?;
+    if let Ok(classes) = parse_classes_section_r21(&data) {
+        let map = dynamic_type_class_map_from_classes(&classes);
+        if !map.is_empty() {
+            return Ok(map);
+        }
+    }
+    match parse_classes_section(&data) {
+        Ok(classes) => Ok(dynamic_type_class_map_from_classes(&classes)),
+        Err(_) => Ok(HashMap::new()),
+    }
+}
+
+fn dynamic_type_map_from_classes(classes: &[ClassEntry]) -> HashMap<u16, String> {
     let mut map = HashMap::with_capacity(classes.len());
+    let has_explicit_codes = classes.iter().any(|entry| entry.class_number >= 500);
     for (idx, class) in classes.iter().enumerate() {
-        let code = 500usize + idx;
+        let code = if has_explicit_codes {
+            class.class_number as usize
+        } else {
+            500usize + idx
+        };
         if code > u16::MAX as usize {
             break;
         }
-        map.insert(code as u16, class.dxf_name.to_ascii_uppercase());
+        if !class.dxf_name.is_empty() {
+            map.insert(code as u16, class.dxf_name.to_ascii_uppercase());
+        }
     }
-    Ok(map)
+    map
+}
+
+fn dynamic_type_class_map_from_classes(classes: &[ClassEntry]) -> HashMap<u16, ObjectClass> {
+    let mut map = HashMap::with_capacity(classes.len());
+    let has_explicit_codes = classes.iter().any(|entry| entry.class_number >= 500);
+    for (idx, class) in classes.iter().enumerate() {
+        let code = if has_explicit_codes {
+            class.class_number as usize
+        } else {
+            500usize + idx
+        };
+        if code > u16::MAX as usize {
+            break;
+        }
+        let class_kind = match class.item_class_id {
+            0x1F2 => ObjectClass::Entity,
+            0x1F3 => ObjectClass::Object,
+            _ => continue,
+        };
+        map.insert(code as u16, class_kind);
+    }
+    map
 }
 
 fn load_named_section_data(bytes: &[u8], config: &ParseConfig, name: &str) -> Result<Vec<u8>> {
@@ -584,17 +1020,96 @@ fn parse_classes_section(data: &[u8]) -> Result<Vec<ClassEntry>> {
         let _cpp_name = reader.read_tv()?;
         let dxf_name = reader.read_tv()?;
         let _was_a_zombie = reader.read_b()?;
-        let _item_class_id = reader.read_bs()?;
+        let item_class_id = reader.read_bs()?;
         let _number_of_objects = reader.read_bl()?;
         let _dwg_version = reader.read_bs()?;
         let _maintenance_version = reader.read_bs()?;
         let _unknown0 = reader.read_bl()?;
         let _unknown1 = reader.read_bl()?;
 
-        classes.push(ClassEntry { dxf_name });
+        classes.push(ClassEntry {
+            class_number,
+            item_class_id,
+            dxf_name,
+        });
 
         if class_number == max_class_number {
             break;
+        }
+    }
+
+    let _crc = reader.read_crc()?;
+    let sentinel_after = reader.read_rcs(SENTINEL_CLASSES_AFTER.len())?;
+    if sentinel_after.as_slice() != SENTINEL_CLASSES_AFTER && classes.is_empty() {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            "AcDb:Classes sentinel(after) mismatch",
+        ));
+    }
+
+    Ok(classes)
+}
+
+fn parse_classes_section_r21(data: &[u8]) -> Result<Vec<ClassEntry>> {
+    let mut reader = BitReader::new(data);
+
+    let sentinel_before = reader.read_rcs(SENTINEL_CLASSES_BEFORE.len())?;
+    if sentinel_before.as_slice() != SENTINEL_CLASSES_BEFORE {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            "AcDb:Classes sentinel(before) mismatch",
+        ));
+    }
+
+    let size = reader.read_rl(Endian::Little)? as usize;
+    let total_bits = u32::try_from(data.len().saturating_mul(8)).unwrap_or(u32::MAX);
+    let header = parse_r21_classes_header_candidates(&reader, size, total_bits)?;
+    reader = header.reader;
+    let absolute_end_bit = header.absolute_end_bit;
+    let max_class_number = header.max_class_number;
+
+    let mut classes = Vec::new();
+    while reader.get_pos().0 <= size {
+        let class_number = reader.read_bs()?;
+        let _proxy_flags = reader.read_bs()?;
+        let dxf_name = String::new();
+        let _was_a_zombie = reader.read_b()?;
+        let item_class_id = reader.read_bs()?;
+        let _number_of_objects = reader.read_bl()?;
+        let _dwg_version = reader.read_bl()?;
+        let _maintenance_version = reader.read_bl()?;
+        let _unknown0 = reader.read_bl()?;
+        let _unknown1 = reader.read_bl()?;
+
+        classes.push(ClassEntry {
+            class_number,
+            item_class_id,
+            dxf_name,
+        });
+
+        if class_number == max_class_number {
+            break;
+        }
+    }
+
+    if let Some((candidate_classes, validated_end_bit)) =
+        parse_r21_class_names_best_candidate(&reader, &classes, absolute_end_bit)
+    {
+        classes = candidate_classes;
+        if let Some(end_bit) = validated_end_bit {
+            reader.set_bit_pos(end_bit);
+            let _crc = reader.read_crc()?;
+            let sentinel_after = reader.read_rcs(SENTINEL_CLASSES_AFTER.len())?;
+            if sentinel_after.as_slice() != SENTINEL_CLASSES_AFTER && classes.is_empty() {
+                return Err(DwgError::new(
+                    ErrorKind::Format,
+                    "AcDb:Classes sentinel(after) mismatch",
+                ));
+            }
+            return Ok(classes);
+        }
+        if classes.iter().any(|class| !class.dxf_name.is_empty()) {
+            return Ok(classes);
         }
     }
 
@@ -610,10 +1125,352 @@ fn parse_classes_section(data: &[u8]) -> Result<Vec<ClassEntry>> {
     Ok(classes)
 }
 
+fn parse_r21_class_names_best_candidate(
+    numeric_end_reader: &BitReader<'_>,
+    template_classes: &[ClassEntry],
+    absolute_end_bit: u32,
+) -> Option<(Vec<ClassEntry>, Option<u32>)> {
+    let mut start_candidates = Vec::new();
+    let direct_start = numeric_end_reader.tell_bits() as u32;
+    push_r21_class_name_start_candidates(&mut start_candidates, direct_start);
+    if let Some((stream_start_bit, _stream_end_bit)) =
+        resolve_r21_string_stream_range(numeric_end_reader, absolute_end_bit)
+    {
+        push_r21_class_name_start_candidates(&mut start_candidates, stream_start_bit);
+    }
+
+    let mut best: Option<(i32, Vec<ClassEntry>, Option<u32>)> = None;
+    for start_bit in start_candidates {
+        let mut candidate_reader = numeric_end_reader.clone();
+        candidate_reader.set_bit_pos(start_bit);
+        let mut candidate_classes = template_classes.to_vec();
+        if fill_r21_class_names_from_reader(&mut candidate_reader, &mut candidate_classes).is_err() {
+            continue;
+        }
+        let mut score = score_r21_class_names(&candidate_classes);
+        let mut validated_end_bit = None;
+        let mut end_candidates = vec![candidate_reader.tell_bits() as u32];
+        if absolute_end_bit > 0 && !end_candidates.contains(&absolute_end_bit) {
+            end_candidates.push(absolute_end_bit);
+        }
+        for end_bit in end_candidates {
+            let mut end_reader = numeric_end_reader.clone();
+            end_reader.set_bit_pos(end_bit);
+            let Ok(_crc) = end_reader.read_crc() else {
+                continue;
+            };
+            let Ok(sentinel_after) = end_reader.read_rcs(SENTINEL_CLASSES_AFTER.len()) else {
+                continue;
+            };
+            if sentinel_after.as_slice() == SENTINEL_CLASSES_AFTER {
+                score += 64;
+                validated_end_bit = Some(end_bit);
+                break;
+            }
+        }
+        match &best {
+            Some((best_score, ..)) if score <= *best_score => {}
+            _ => best = Some((score, candidate_classes, validated_end_bit)),
+        }
+    }
+
+    best.map(|(_score, classes, validated_end_bit)| (classes, validated_end_bit))
+}
+
+fn parse_r21_classes_header_candidates<'a>(
+    reader: &BitReader<'a>,
+    size: usize,
+    total_bits: u32,
+) -> Result<R21ClassesHeaderCandidate<'a>> {
+    let mut best: Option<R21ClassesHeaderCandidate<'a>> = None;
+    let mut first_err: Option<DwgError> = None;
+
+    for has_high32_size in [false, true] {
+        let mut candidate_reader = reader.clone();
+        let high32 = if has_high32_size {
+            match candidate_reader.read_rl(Endian::Little) {
+                Ok(value) => value,
+                Err(err) => {
+                    if first_err.is_none() {
+                        first_err = Some(err);
+                    }
+                    continue;
+                }
+            }
+        } else {
+            0
+        };
+        let low32 = match candidate_reader.read_rl(Endian::Little) {
+            Ok(value) => value,
+            Err(err) => {
+                if first_err.is_none() {
+                    first_err = Some(err);
+                }
+                continue;
+            }
+        };
+        let max_class_number = match candidate_reader.read_bs() {
+            Ok(value) => value,
+            Err(err) => {
+                if first_err.is_none() {
+                    first_err = Some(err);
+                }
+                continue;
+            }
+        };
+        let zero0 = match candidate_reader.read_rc() {
+            Ok(value) => value,
+            Err(err) => {
+                if first_err.is_none() {
+                    first_err = Some(err);
+                }
+                continue;
+            }
+        };
+        let zero1 = match candidate_reader.read_rc() {
+            Ok(value) => value,
+            Err(err) => {
+                if first_err.is_none() {
+                    first_err = Some(err);
+                }
+                continue;
+            }
+        };
+        let bit_flag = match candidate_reader.read_b() {
+            Ok(value) => value,
+            Err(err) => {
+                if first_err.is_none() {
+                    first_err = Some(err);
+                }
+                continue;
+            }
+        };
+
+        let absolute_end_bit_u64 = 20u64
+            .saturating_mul(8)
+            .saturating_add(u64::from(low32))
+            .saturating_add(u64::from(high32) << 32);
+        let absolute_end_bit = u32::try_from(absolute_end_bit_u64).ok();
+
+        let mut score = 0i32;
+        if zero0 == 0 {
+            score += 8;
+        } else {
+            score -= 16;
+        }
+        if zero1 == 0 {
+            score += 8;
+        } else {
+            score -= 16;
+        }
+        if bit_flag == 1 {
+            score += 8;
+        } else {
+            score -= 8;
+        }
+        if (500..=4096).contains(&max_class_number) {
+            score += 24;
+        } else if max_class_number > 0 {
+            score -= 8;
+        } else {
+            score -= 24;
+        }
+        if has_high32_size {
+            score += 4;
+        }
+        if let Some(end_bit) = absolute_end_bit {
+            if end_bit > candidate_reader.tell_bits() as u32 && end_bit <= total_bits {
+                score += 8;
+            } else {
+                score -= 8;
+            }
+        } else {
+            score -= 12;
+        }
+
+        let mut probe_reader = candidate_reader.clone();
+        let mut last_class_number: Option<u16> = None;
+        for _ in 0..8usize {
+            if probe_reader.get_pos().0 > size {
+                break;
+            }
+            let Ok(class_number) = probe_reader.read_bs() else {
+                break;
+            };
+            let Ok(_proxy_flags) = probe_reader.read_bs() else {
+                break;
+            };
+            let Ok(_was_a_zombie) = probe_reader.read_b() else {
+                break;
+            };
+            let Ok(item_class_id) = probe_reader.read_bs() else {
+                break;
+            };
+            let Ok(_number_of_objects) = probe_reader.read_bl() else {
+                break;
+            };
+            let Ok(_dwg_version) = probe_reader.read_bl() else {
+                break;
+            };
+            let Ok(_maintenance_version) = probe_reader.read_bl() else {
+                break;
+            };
+            let Ok(_unknown0) = probe_reader.read_bl() else {
+                break;
+            };
+            let Ok(_unknown1) = probe_reader.read_bl() else {
+                break;
+            };
+
+            if (500..=4096).contains(&class_number) {
+                score += 6;
+            } else {
+                score -= 6;
+            }
+            if item_class_id == 0x1F2 || item_class_id == 0x1F3 {
+                score += 4;
+            } else {
+                score -= 4;
+            }
+            if let Some(last) = last_class_number {
+                if class_number == last.saturating_add(1) {
+                    score += 4;
+                }
+            }
+            last_class_number = Some(class_number);
+        }
+
+        let Some(absolute_end_bit) = absolute_end_bit else {
+            continue;
+        };
+        let candidate = R21ClassesHeaderCandidate {
+            reader: candidate_reader,
+            absolute_end_bit,
+            max_class_number,
+            score,
+        };
+        match &best {
+            Some(best_candidate) if candidate.score <= best_candidate.score => {}
+            _ => best = Some(candidate),
+        }
+    }
+
+    best.ok_or_else(|| {
+        first_err.unwrap_or_else(|| {
+            DwgError::new(ErrorKind::Format, "failed to parse R21 classes section header")
+        })
+    })
+}
+
+fn push_r21_class_name_start_candidates(out: &mut Vec<u32>, start_bit: u32) {
+    for delta in [-16i32, -8, -4, 0, 4, 8, 16] {
+        let candidate = i64::from(start_bit) + i64::from(delta);
+        if candidate < 0 {
+            continue;
+        }
+        let Ok(candidate) = u32::try_from(candidate) else {
+            continue;
+        };
+        if !out.contains(&candidate) {
+            out.push(candidate);
+        }
+    }
+}
+
+fn fill_r21_class_names_from_reader(reader: &mut BitReader<'_>, classes: &mut [ClassEntry]) -> Result<()> {
+    for class in classes {
+        let _app_name = read_tu(reader)?;
+        let _cpp_name = read_tu(reader)?;
+        class.dxf_name = read_tu(reader)?;
+    }
+    Ok(())
+}
+
+fn score_r21_class_names(classes: &[ClassEntry]) -> i32 {
+    classes
+        .iter()
+        .map(|class| score_r21_class_name(&class.dxf_name))
+        .sum()
+}
+
+fn score_r21_class_name(name: &str) -> i32 {
+    if name.is_empty() {
+        return -16;
+    }
+    let mut score = 0i32;
+    for ch in name.chars() {
+        if ch.is_ascii_uppercase() || ch.is_ascii_digit() {
+            score += 4;
+        } else if matches!(ch, '_' | '$' | '*') {
+            score += 2;
+        } else if ch.is_ascii_lowercase() {
+            score += 1;
+        } else if ch.is_ascii_whitespace() {
+            score -= 1;
+        } else if ch.is_ascii_control() || ch == '\u{FFFD}' {
+            score -= 12;
+        } else {
+            score -= 4;
+        }
+    }
+    score
+}
+
+fn resolve_r21_string_stream_range(
+    base_reader: &BitReader<'_>,
+    absolute_end_bit: u32,
+) -> Option<(u32, u32)> {
+    const STRING_STREAM_METADATA_BITS: u32 = 16 * 8;
+
+    if absolute_end_bit <= 1 {
+        return None;
+    }
+
+    let mut present_reader = base_reader.clone();
+    present_reader.set_bit_pos(absolute_end_bit.saturating_sub(1));
+    if present_reader.read_b().ok()? == 0 {
+        return None;
+    }
+
+    let mut size_field_start = absolute_end_bit.checked_sub(STRING_STREAM_METADATA_BITS)?;
+    let mut size_reader = base_reader.clone();
+    size_reader.set_bit_pos(size_field_start);
+    let low_size = u32::from(size_reader.read_rs(Endian::Little).ok()? as u16);
+
+    let mut stream_size_bits = low_size;
+    if (stream_size_bits & 0x8000) != 0 {
+        size_field_start = size_field_start.checked_sub(STRING_STREAM_METADATA_BITS)?;
+        let mut hi_reader = base_reader.clone();
+        hi_reader.set_bit_pos(size_field_start);
+        let high_size = u32::from(hi_reader.read_rs(Endian::Little).ok()? as u16);
+        stream_size_bits = (stream_size_bits & 0x7FFF) | (high_size << 15);
+    }
+
+    let stream_start_bit = size_field_start.checked_sub(stream_size_bits)?;
+    if stream_start_bit >= size_field_start {
+        return None;
+    }
+    if u64::from(size_field_start) > base_reader.total_bits() {
+        return None;
+    }
+    Some((stream_start_bit, size_field_start))
+}
+
+fn read_tu(reader: &mut BitReader<'_>) -> Result<String> {
+    let length = reader.read_bs()? as usize;
+    let mut units = Vec::with_capacity(length);
+    for _ in 0..length {
+        units.push(reader.read_rs(Endian::Little)?);
+    }
+    Ok(String::from_utf16_lossy(&units))
+}
+
 fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<ObjectIndex> {
     let mut reader = ByteReader::new(bytes);
     let mut objects = Vec::new();
 
+    let mut last_handle: i64 = 0;
+    let mut last_offset: i64 = 0;
     loop {
         if reader.remaining() < 2 {
             break;
@@ -638,8 +1495,10 @@ fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<Object
         }
 
         let start = reader.tell();
-        let mut last_handle: i64 = 0;
-        let mut last_offset: i64 = 0;
+        if !config.strict {
+            last_handle = 0;
+            last_offset = 0;
+        }
 
         while (reader.tell() - start) < (section_size as u64 - 2) {
             let prev_handle = last_handle;
@@ -1241,6 +2100,43 @@ mod tests {
     }
 
     #[test]
+    fn loads_r2010_classes_section_without_error() {
+        let bytes = std::fs::read("test_dwg/line_2010.dwg").expect("r2010 sample");
+        let dynamic_map =
+            load_dynamic_type_map_r21(&bytes, &ParseConfig::default()).expect("dynamic map");
+        assert_eq!(
+            dynamic_map.get(&500).map(String::as_str),
+            Some("ACDBDICTIONARYWDFLT")
+        );
+        assert_eq!(dynamic_map.get(&501).map(String::as_str), Some("MATERIAL"));
+        assert_eq!(dynamic_map.get(&502).map(String::as_str), Some("VISUALSTYLE"));
+    }
+
+    #[test]
+    fn dynamic_type_maps_preserve_explicit_class_numbers_and_kinds() {
+        let classes = vec![
+            ClassEntry {
+                class_number: 644,
+                item_class_id: 0x1F2,
+                dxf_name: "CUSTOM_ENTITY".to_string(),
+            },
+            ClassEntry {
+                class_number: 694,
+                item_class_id: 0x1F3,
+                dxf_name: "CUSTOM_OBJECT".to_string(),
+            },
+        ];
+
+        let type_map = dynamic_type_map_from_classes(&classes);
+        assert_eq!(type_map.get(&644).map(String::as_str), Some("CUSTOM_ENTITY"));
+        assert_eq!(type_map.get(&694).map(String::as_str), Some("CUSTOM_OBJECT"));
+
+        let class_map = dynamic_type_class_map_from_classes(&classes);
+        assert_eq!(class_map.get(&644), Some(&ObjectClass::Entity));
+        assert_eq!(class_map.get(&694), Some(&ObjectClass::Object));
+    }
+
+    #[test]
     fn parse_object_map_handles_skips_negative_deltas_in_permissive_mode() {
         // One handles block with three entries:
         // 1) (+5, +10) -> valid
@@ -1278,4 +2174,147 @@ mod tests {
             .to_string()
             .contains("AcDb:Handles contains negative handle or offset"));
     }
+
+    #[test]
+    fn parse_object_map_handles_keeps_running_deltas_across_blocks() {
+        let bytes = vec![
+            0x00, 0x06, // block 1: 2-byte header + 4-byte payload
+            0x01, 0x0A, // +1, +10
+            0x02, 0x04, // +2, +4
+            0x00, 0x00, // crc
+            0x00, 0x06, // block 2: continue from previous handle/offset
+            0x07, 0x08, // +7, +8
+            0x02, 0x03, // +2, +3
+            0x00, 0x00, // crc
+            0x00, 0x02, // terminator section
+        ];
+        let mut config = ParseConfig::default();
+        config.strict = true;
+        let index = parse_object_map_handles(&bytes, &config).expect("index");
+        let refs: Vec<(u64, u32)> = index
+            .objects
+            .iter()
+            .map(|obj| (obj.handle.0, obj.offset))
+            .collect();
+        assert_eq!(refs, vec![(1, 10), (3, 14), (10, 22), (12, 25)]);
+    }
+
+    #[test]
+    fn contiguous_layer_candidates_receive_large_bonus() {
+        let prev = vec![ObjectRef {
+            handle: Handle(129),
+            offset: 40_275,
+        }];
+        let next = vec![ObjectRef {
+            handle: Handle(131),
+            offset: 40_393,
+        }];
+        let current = ObjectRef {
+            handle: Handle(130),
+            offset: 40_340,
+        };
+        let infos = HashMap::from([
+            (
+                (129, 40_275),
+                R21DuplicateCandidateInfo {
+                    parsed_ok: true,
+                    type_code: 0x33,
+                    data_size: 60,
+                    class: ObjectClass::Object,
+                    decoded_common_entity_handle: None,
+                },
+            ),
+            (
+                (130, 40_340),
+                R21DuplicateCandidateInfo {
+                    parsed_ok: true,
+                    type_code: 0x33,
+                    data_size: 48,
+                    class: ObjectClass::Object,
+                    decoded_common_entity_handle: None,
+                },
+            ),
+            (
+                (131, 40_393),
+                R21DuplicateCandidateInfo {
+                    parsed_ok: true,
+                    type_code: 0x33,
+                    data_size: 58,
+                    class: ObjectClass::Object,
+                    decoded_common_entity_handle: None,
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            score_r21_contiguous_layer_table_bonus(
+                current,
+                0x33,
+                Some(&prev),
+                Some(&next),
+                &infos,
+            ),
+            12_000
+        );
+    }
+
+    #[test]
+    fn non_layer_candidates_do_not_receive_layer_table_bonus() {
+        let prev = vec![ObjectRef {
+            handle: Handle(129),
+            offset: 40_275,
+        }];
+        let next = vec![ObjectRef {
+            handle: Handle(131),
+            offset: 40_393,
+        }];
+        let current = ObjectRef {
+            handle: Handle(130),
+            offset: 40_340,
+        };
+        let infos = HashMap::from([
+            (
+                (129, 40_275),
+                R21DuplicateCandidateInfo {
+                    parsed_ok: true,
+                    type_code: 0x33,
+                    data_size: 60,
+                    class: ObjectClass::Object,
+                    decoded_common_entity_handle: None,
+                },
+            ),
+            (
+                (130, 40_340),
+                R21DuplicateCandidateInfo {
+                    parsed_ok: true,
+                    type_code: 0x1F2,
+                    data_size: 685,
+                    class: ObjectClass::Entity,
+                    decoded_common_entity_handle: Some(130),
+                },
+            ),
+            (
+                (131, 40_393),
+                R21DuplicateCandidateInfo {
+                    parsed_ok: true,
+                    type_code: 0x33,
+                    data_size: 58,
+                    class: ObjectClass::Object,
+                    decoded_common_entity_handle: None,
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            score_r21_contiguous_layer_table_bonus(
+                current,
+                0x1F2,
+                Some(&prev),
+                Some(&next),
+                &infos,
+            ),
+            0
+        );
+    }
+
 }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ezdwg.document as document_module
+import ezdwg.raw as raw_module
 
 
 def _patch_empty_color_maps(monkeypatch) -> None:

@@ -4,7 +4,8 @@ use crate::core::result::Result;
 use crate::entities::common::{
     parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r2007,
     parse_common_entity_header_r2010, parse_common_entity_header_r2013,
-    parse_common_entity_layer_handle, CommonEntityHeader,
+    parse_common_entity_layer_handle, parse_embedded_common_entity_header_r2010,
+    read_handle_reference, CommonEntityHeader,
 };
 
 #[derive(Debug, Clone)]
@@ -12,6 +13,7 @@ pub struct MTextEntity {
     pub handle: u64,
     pub color_index: Option<u16>,
     pub true_color: Option<u32>,
+    pub owner_handle: Option<u64>,
     pub layer_handle: u64,
     pub text: String,
     pub insertion: (f64, f64, f64),
@@ -26,6 +28,38 @@ pub struct MTextEntity {
     pub background_color_index: Option<u16>,
     pub background_true_color: Option<u32>,
     pub background_transparency: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EmbeddedMTextData {
+    pub text: String,
+    pub insertion: (f64, f64, f64),
+    pub extrusion: (f64, f64, f64),
+    pub x_axis_dir: (f64, f64, f64),
+    pub rect_width: f64,
+    pub text_height: f64,
+    pub attachment: u16,
+    pub drawing_dir: u16,
+    pub owner_handle: Option<u64>,
+    pub layer_handle: u64,
+    pub style_handle: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedMTextBody {
+    insertion: (f64, f64, f64),
+    extrusion: (f64, f64, f64),
+    x_axis_dir: (f64, f64, f64),
+    rect_width: f64,
+    text_height: f64,
+    attachment: u16,
+    drawing_dir: u16,
+    text: String,
+    background_flags: u32,
+    background_scale_factor: Option<f64>,
+    background_color_index: Option<u16>,
+    background_true_color: Option<u32>,
+    background_transparency: Option<u32>,
 }
 
 pub fn decode_mtext(reader: &mut BitReader<'_>) -> Result<MTextEntity> {
@@ -71,6 +105,91 @@ fn decode_mtext_with_header(
     use_unicode_text: bool,
     has_rect_height: bool,
 ) -> Result<MTextEntity> {
+    let body = parse_mtext_body(reader, has_background_data, use_unicode_text, has_rect_height)?;
+
+    // Handles are stored in the handle stream at obj_size bit offset.
+    reader.set_bit_pos(header.obj_size);
+    let handles_pos = reader.get_pos();
+    let (owner_handle, layer_handle) = match parse_common_entity_handles(reader, &header) {
+        Ok(common_handles) => (common_handles.owner_ref, common_handles.layer),
+        Err(err)
+            if allow_handle_decode_failure
+                && matches!(
+                    err.kind,
+                    ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
+                ) =>
+        {
+            reader.set_pos(handles_pos.0, handles_pos.1);
+            (
+                None,
+                parse_common_entity_layer_handle(reader, &header).unwrap_or(0),
+            )
+        }
+        Err(err) => return Err(err),
+    };
+
+    Ok(MTextEntity {
+        handle: header.handle,
+        color_index: header.color.index,
+        true_color: header.color.true_color,
+        owner_handle,
+        layer_handle,
+        text: body.text,
+        insertion: body.insertion,
+        extrusion: body.extrusion,
+        x_axis_dir: body.x_axis_dir,
+        rect_width: body.rect_width,
+        text_height: body.text_height,
+        attachment: body.attachment,
+        drawing_dir: body.drawing_dir,
+        background_flags: body.background_flags,
+        background_scale_factor: body.background_scale_factor,
+        background_color_index: body.background_color_index,
+        background_true_color: body.background_true_color,
+        background_transparency: body.background_transparency,
+    })
+}
+
+pub(crate) fn decode_embedded_mtext_r2010(
+    reader: &mut BitReader<'_>,
+    base_handle: u64,
+    r2013_plus: bool,
+    parse_handles_inline: bool,
+) -> Result<EmbeddedMTextData> {
+    let header = parse_embedded_common_entity_header_r2010(reader, base_handle, r2013_plus)?;
+    let body = parse_mtext_body(reader, true, true, true)?;
+    let (owner_handle, layer_handle, style_handle) = if parse_handles_inline {
+        let common_handles = parse_common_entity_handles(reader, &header)?;
+        (
+            common_handles.owner_ref,
+            common_handles.layer,
+            read_handle_reference(reader, header.handle).ok(),
+        )
+    } else {
+        (None, 0, None)
+    };
+
+    Ok(EmbeddedMTextData {
+        text: body.text,
+        insertion: body.insertion,
+        extrusion: body.extrusion,
+        x_axis_dir: body.x_axis_dir,
+        rect_width: body.rect_width,
+        text_height: body.text_height,
+        attachment: body.attachment,
+        drawing_dir: body.drawing_dir,
+        owner_handle,
+        layer_handle,
+        style_handle,
+    })
+}
+
+fn parse_mtext_body(
+    reader: &mut BitReader<'_>,
+    has_background_data: bool,
+    use_unicode_text: bool,
+    has_rect_height: bool,
+) -> Result<ParsedMTextBody> {
     let insertion = reader.read_3bd()?;
     let extrusion = reader.read_3bd()?;
     let x_axis_dir = reader.read_3bd()?;
@@ -149,30 +268,7 @@ fn decode_mtext_with_header(
         }
     }
 
-    // Handles are stored in the handle stream at obj_size bit offset.
-    reader.set_bit_pos(header.obj_size);
-    let handles_pos = reader.get_pos();
-    let layer_handle = match parse_common_entity_handles(reader, &header) {
-        Ok(common_handles) => common_handles.layer,
-        Err(err)
-            if allow_handle_decode_failure
-                && matches!(
-                    err.kind,
-                    ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
-                ) =>
-        {
-            reader.set_pos(handles_pos.0, handles_pos.1);
-            parse_common_entity_layer_handle(reader, &header).unwrap_or(0)
-        }
-        Err(err) => return Err(err),
-    };
-
-    Ok(MTextEntity {
-        handle: header.handle,
-        color_index: header.color.index,
-        true_color: header.color.true_color,
-        layer_handle,
-        text,
+    Ok(ParsedMTextBody {
         insertion,
         extrusion,
         x_axis_dir,
@@ -180,6 +276,7 @@ fn decode_mtext_with_header(
         text_height,
         attachment,
         drawing_dir,
+        text,
         background_flags,
         background_scale_factor,
         background_color_index,

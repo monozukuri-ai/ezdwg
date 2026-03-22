@@ -985,6 +985,7 @@ fn decode_minsert_attempt(
     header: &ApiObjectHeader,
     object_handle: u64,
     with_prefix: bool,
+    align_after_prefix: bool,
     skip_size_word: bool,
     legacy_minsert_parser: bool,
     insert_fallback_mode: MInsertFallbackInsertMode,
@@ -992,6 +993,9 @@ fn decode_minsert_attempt(
     let mut reader = record.bit_reader();
     if with_prefix {
         skip_object_type_prefix(&mut reader, version)?;
+        if align_after_prefix {
+            reader.align_byte();
+        }
     }
     if skip_size_word {
         let _ = reader.read_rl(Endian::Little)?;
@@ -1037,33 +1041,40 @@ fn decode_minsert_with_fallback(
             true,
             false,
             false,
+            false,
             MInsertFallbackInsertMode::None,
         );
     }
 
     let attempts = [
+        (true, false, false, false, MInsertFallbackInsertMode::None, "prefixed/minsert"),
         (
             true,
             false,
-            false,
-            MInsertFallbackInsertMode::None,
-            "prefixed/minsert",
-        ),
-        (
-            true,
             true,
             false,
             MInsertFallbackInsertMode::None,
             "prefixed+size/minsert",
         ),
         (
-            false,
+            true,
+            true,
             false,
             false,
             MInsertFallbackInsertMode::None,
-            "plain/minsert",
+            "prefixed+align/minsert",
         ),
         (
+            true,
+            true,
+            true,
+            false,
+            MInsertFallbackInsertMode::None,
+            "prefixed+align+size/minsert",
+        ),
+        (false, false, false, false, MInsertFallbackInsertMode::None, "plain/minsert"),
+        (
+            false,
             false,
             true,
             false,
@@ -1073,18 +1084,37 @@ fn decode_minsert_with_fallback(
         (
             true,
             false,
+            false,
             true,
             MInsertFallbackInsertMode::None,
             "prefixed/minsert-legacy",
         ),
         (
             true,
+            false,
             true,
             true,
             MInsertFallbackInsertMode::None,
             "prefixed+size/minsert-legacy",
         ),
         (
+            true,
+            true,
+            false,
+            true,
+            MInsertFallbackInsertMode::None,
+            "prefixed+align/minsert-legacy",
+        ),
+        (
+            true,
+            true,
+            true,
+            true,
+            MInsertFallbackInsertMode::None,
+            "prefixed+align+size/minsert-legacy",
+        ),
+        (
+            false,
             false,
             false,
             true,
@@ -1092,6 +1122,7 @@ fn decode_minsert_with_fallback(
             "plain/minsert-legacy",
         ),
         (
+            false,
             false,
             true,
             true,
@@ -1102,17 +1133,36 @@ fn decode_minsert_with_fallback(
             true,
             false,
             false,
+            false,
             MInsertFallbackInsertMode::Version,
             "prefixed/insert-fallback",
         ),
         (
             true,
+            false,
             true,
             false,
             MInsertFallbackInsertMode::Version,
             "prefixed+size/insert-fallback",
         ),
         (
+            true,
+            true,
+            false,
+            false,
+            MInsertFallbackInsertMode::Version,
+            "prefixed+align/insert-fallback",
+        ),
+        (
+            true,
+            true,
+            true,
+            false,
+            MInsertFallbackInsertMode::Version,
+            "prefixed+align+size/insert-fallback",
+        ),
+        (
+            false,
             false,
             false,
             false,
@@ -1120,6 +1170,7 @@ fn decode_minsert_with_fallback(
             "plain/insert-fallback",
         ),
         (
+            false,
             false,
             true,
             false,
@@ -1130,17 +1181,36 @@ fn decode_minsert_with_fallback(
             true,
             false,
             false,
+            false,
             MInsertFallbackInsertMode::R2007,
             "prefixed/insert-r2007-fallback",
         ),
         (
             true,
+            false,
             true,
             false,
             MInsertFallbackInsertMode::R2007,
             "prefixed+size/insert-r2007-fallback",
         ),
         (
+            true,
+            true,
+            false,
+            false,
+            MInsertFallbackInsertMode::R2007,
+            "prefixed+align/insert-r2007-fallback",
+        ),
+        (
+            true,
+            true,
+            true,
+            false,
+            MInsertFallbackInsertMode::R2007,
+            "prefixed+align+size/insert-r2007-fallback",
+        ),
+        (
+            false,
             false,
             false,
             false,
@@ -1148,6 +1218,7 @@ fn decode_minsert_with_fallback(
             "plain/insert-r2007-fallback",
         ),
         (
+            false,
             false,
             true,
             false,
@@ -1158,17 +1229,36 @@ fn decode_minsert_with_fallback(
             true,
             false,
             false,
+            false,
             MInsertFallbackInsertMode::R2000,
             "prefixed/insert-r2000-fallback",
         ),
         (
             true,
+            false,
             true,
             false,
             MInsertFallbackInsertMode::R2000,
             "prefixed+size/insert-r2000-fallback",
         ),
         (
+            true,
+            true,
+            false,
+            false,
+            MInsertFallbackInsertMode::R2000,
+            "prefixed+align/insert-r2000-fallback",
+        ),
+        (
+            true,
+            true,
+            true,
+            false,
+            MInsertFallbackInsertMode::R2000,
+            "prefixed+align+size/insert-r2000-fallback",
+        ),
+        (
+            false,
             false,
             false,
             false,
@@ -1177,14 +1267,17 @@ fn decode_minsert_with_fallback(
         ),
         (
             false,
+            false,
             true,
             false,
             MInsertFallbackInsertMode::R2000,
             "plain+size/insert-r2000-fallback",
         ),
     ];
+    let mut first_success: Option<entities::MInsertEntity> = None;
     for (
         with_prefix,
+        align_after_prefix,
         skip_size_word,
         legacy_minsert_parser,
         insert_fallback_mode,
@@ -1197,14 +1290,42 @@ fn decode_minsert_with_fallback(
             header,
             object_handle,
             with_prefix,
+            align_after_prefix,
             skip_size_word,
             legacy_minsert_parser,
             insert_fallback_mode,
         ) {
             Ok(entity) => {
+                if first_success.is_none() {
+                    first_success = Some(entity.clone());
+                }
+                if let Some(reason) = _minsert_reasonableness_failure(&entity) {
+                    if debug_minsert {
+                        eprintln!(
+                            "[minsert-decode] handle={} attempt={} rejected={} pos=({:.6e},{:.6e},{:.6e}) scale=({:.6e},{:.6e},{:.6e}) rot={:.6e} cols={} rows={} spacing=({:.6e},{:.6e}) block={:?}",
+                            object_handle,
+                            label,
+                            reason,
+                            entity.position.0,
+                            entity.position.1,
+                            entity.position.2,
+                            entity.scale.0,
+                            entity.scale.1,
+                            entity.scale.2,
+                            entity.rotation,
+                            entity.num_columns,
+                            entity.num_rows,
+                            entity.column_spacing,
+                            entity.row_spacing,
+                            entity.block_header_handle
+                        );
+                    }
+                    continue;
+                }
                 if debug_minsert
                     && (!matches!(insert_fallback_mode, MInsertFallbackInsertMode::None)
                         || !with_prefix
+                        || align_after_prefix
                         || skip_size_word)
                 {
                     eprintln!(
@@ -1225,6 +1346,10 @@ fn decode_minsert_with_fallback(
         }
     }
 
+    if let Some(entity) = first_success {
+        return Ok(entity);
+    }
+
     Err(DwgError::new(
         ErrorKind::Format,
         "failed to decode MINSERT with all fallback paths",
@@ -1242,13 +1367,20 @@ fn _minsert_reasonableness_failure(entity: &entities::MInsertEntity) -> Option<&
     if entity.num_rows == 0 {
         return Some("num_rows=0");
     }
+    let scale_values = [entity.scale.0, entity.scale.1, entity.scale.2];
+    if scale_values.iter().any(|v| !v.is_finite()) {
+        return Some("non-finite-scale");
+    }
+    if scale_values.iter().any(|v| v.abs() < 1.0e-9_f64) {
+        return Some("scale-near-zero");
+    }
+    if scale_values.iter().any(|v| v.abs() > 1.0e9_f64) {
+        return Some("scale-magnitude>1e9");
+    }
     let values = [
         entity.position.0,
         entity.position.1,
         entity.position.2,
-        entity.scale.0,
-        entity.scale.1,
-        entity.scale.2,
         entity.rotation,
         entity.column_spacing,
         entity.row_spacing,

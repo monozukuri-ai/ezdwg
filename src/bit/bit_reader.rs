@@ -1,5 +1,6 @@
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
+use encoding_rs::Encoding;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Endian {
@@ -19,16 +20,22 @@ pub struct BitReader<'a> {
     data: &'a [u8],
     byte_pos: usize,
     bit_pos: u8,
+    codepage: Option<u16>,
 }
 
 impl<'a> BitReader<'a> {
     const MAX_TEXT_UNITS: usize = 1 << 20; // 1,048,576 chars
 
     pub fn new(data: &'a [u8]) -> Self {
+        Self::new_with_codepage(data, None)
+    }
+
+    pub fn new_with_codepage(data: &'a [u8], codepage: Option<u16>) -> Self {
         Self {
             data,
             byte_pos: 0,
             bit_pos: 0,
+            codepage,
         }
     }
 
@@ -384,16 +391,13 @@ impl<'a> BitReader<'a> {
         }
         let mut text = Vec::with_capacity(length);
         for _ in 0..length {
-            let mut ch = self.read_rc()?;
+            let ch = self.read_rc()?;
             if ch == 0x00 {
                 continue;
             }
-            if ch >= 0x7F {
-                ch = 0x2A;
-            }
             text.push(ch);
         }
-        Ok(String::from_utf8_lossy(&text).to_string())
+        Ok(decode_tv_bytes(&text, self.codepage))
     }
 
     pub fn read_tu(&mut self) -> Result<String> {
@@ -437,6 +441,65 @@ impl<'a> BitReader<'a> {
         self.byte_pos += (pos_end / 8) as usize;
         self.bit_pos = (pos_end % 8) as u8;
     }
+}
+
+pub(crate) fn decode_tv_bytes(bytes: &[u8], codepage: Option<u16>) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+
+    if matches!(codepage, Some(0) | Some(1)) {
+        return bytes
+            .iter()
+            .copied()
+            .filter(|byte| *byte != 0)
+            .map(char::from)
+            .collect();
+    }
+
+    if let Some(encoding) = dwg_codepage_encoding(codepage) {
+        let (decoded, _, _) = encoding.decode(bytes);
+        return decoded.into_owned();
+    }
+
+    String::from_utf8_lossy(bytes).to_string()
+}
+
+pub(crate) fn dwg_codepage_encoding(codepage: Option<u16>) -> Option<&'static Encoding> {
+    let label: &'static [u8] = match codepage? {
+        2 => b"windows-1252",
+        3 => b"iso-8859-2",
+        5 => b"iso-8859-4",
+        6 => b"iso-8859-5",
+        7 => b"iso-8859-6",
+        8 => b"iso-8859-7",
+        9 => b"iso-8859-8",
+        10 => b"iso-8859-9",
+        11 => b"windows-1252",
+        12 => b"windows-1252",
+        13 => b"windows-1250",
+        14 => b"windows-1251",
+        15 => b"windows-1254",
+        19 => b"windows-1256",
+        21 => b"windows-1253",
+        22 | 38 => b"shift_jis",
+        23 => b"macintosh",
+        24 | 41 => b"big5",
+        25 | 40 => b"euc-kr",
+        27 => b"ibm866",
+        28 => b"windows-1250",
+        29 => b"windows-1251",
+        30 => b"windows-1252",
+        31 | 39 => b"gbk",
+        32 => b"windows-1253",
+        33 => b"windows-1254",
+        34 => b"windows-1255",
+        35 => b"windows-1256",
+        36 => b"windows-1257",
+        37 => b"windows-874",
+        _ => return None,
+    };
+    Encoding::for_label(label)
 }
 
 #[cfg(test)]
@@ -516,5 +579,19 @@ mod tests {
         let _ = reader.read_b().expect("consume one bit");
         let err = reader.read_rcs(3).expect_err("expected raw-byte overflow");
         assert!(format!("{err}").contains("exceeds remaining bytes"));
+    }
+
+    #[test]
+    fn read_tv_decodes_ansi_932_text() {
+        let bytes = [0x8E, 0xB7, 0x96, 0xB1, 0x8E, 0xBA, 0x31, 0x32, 0x6C, 0x31];
+        let mut writer = BitWriter::new();
+        writer.write_bs(bytes.len() as u16).expect("write tv len");
+        for byte in bytes {
+            writer.write_rc(byte).expect("write tv byte");
+        }
+
+        let data = writer.into_bytes();
+        let mut reader = BitReader::new_with_codepage(&data, Some(38));
+        assert_eq!(reader.read_tv().expect("read tv"), "執務室12l1");
     }
 }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import unicodedata
 import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -101,6 +102,7 @@ _OPEN30_INNER_WIDTH = 23130.0
 _OPEN30_INNER_HEIGHT = 15720.0
 _OPEN30_SHEET_GAP = 1050.0
 _LAYOUT_PSEUDO_MODELSPACE_ALIAS_PREFIX = "__EZDWG_LAYOUT_ALIAS_MODEL_SPACE"
+_INVALID_DXF_LAYER_NAME_CHARS = frozenset('<>/\\":;?*|=')
 
 
 @dataclass(frozen=True)
@@ -516,6 +518,7 @@ def to_dxf(
         modelspace_only=modelspace_only,
         decode_cache=decode_cache,
     )
+    prefilter_has_right_side_open30_signal = _has_right_side_open30_i_proxies(source_entities)
     if not modelspace_only:
         source_entities = _maybe_prefer_modelspace_filtered_entities(
             layout,
@@ -535,6 +538,10 @@ def to_dxf(
                 )
                 for entity in source_entities
             ]
+    has_right_side_open30_i_proxies = (
+        prefilter_has_right_side_open30_signal
+        or _has_right_side_open30_i_proxies(source_entities)
+    )
     source_entities = _deduplicate_layout_pseudo_inserts_by_handle(source_entities)
     cached_entities_by_handle: dict[int, Entity] | None = None
     if types is None and not include_unsupported:
@@ -546,7 +553,12 @@ def to_dxf(
                 continue
 
     layer_styles_by_handle = _layer_styles_by_handle(layout.doc.decode_path or layout.doc.path)
-    layer_name_by_handle = _prepare_dxf_layers(dxf_doc, layer_styles_by_handle)
+    layer_names_by_handle = _layer_names_by_handle(layout.doc.decode_path or layout.doc.path)
+    layer_name_by_handle = _prepare_dxf_layers(
+        dxf_doc,
+        layer_styles_by_handle,
+        layer_names_by_handle,
+    )
 
     block_reference_entities = [
         entity
@@ -607,8 +619,12 @@ def to_dxf(
 
     _restore_sparse_open30_left_window(modelspace)
     _restore_known_layout_frame_polylines(modelspace)
-    _replace_layout_alias_with_open30_right_sheet_inserts(modelspace)
+    _replace_layout_alias_with_open30_right_sheet_inserts(
+        modelspace,
+        has_right_side_open30_i_proxies=has_right_side_open30_i_proxies,
+    )
     _rebalance_sparse_open30_right_sheet_geometry(modelspace)
+    _rebalance_sparse_open30_right_sheet_text(modelspace)
 
     if flatten_inserts:
         _flatten_modelspace_inserts(modelspace)
@@ -1942,7 +1958,11 @@ def _open30_insert_signature(insert: Any) -> tuple[float, float, float, float, f
     )
 
 
-def _replace_layout_alias_with_open30_right_sheet_inserts(modelspace: Any) -> None:
+def _replace_layout_alias_with_open30_right_sheet_inserts(
+    modelspace: Any,
+    *,
+    has_right_side_open30_i_proxies: bool = False,
+) -> None:
     try:
         all_inserts = list(modelspace.query("INSERT"))
     except Exception:
@@ -1969,7 +1989,9 @@ def _replace_layout_alias_with_open30_right_sheet_inserts(modelspace: Any) -> No
         }
         if _looks_like_open30_insert(dxf_like):
             open30_inserts.append(insert)
-    if not alias_inserts or len(open30_inserts) < 3:
+    if len(open30_inserts) < 3:
+        return
+    if not alias_inserts and not has_right_side_open30_i_proxies:
         return
 
     def _insert_x(entry: Any) -> float:
@@ -2230,6 +2252,61 @@ def _entity_overlap_signature(entity: Any) -> tuple[Any, ...] | None:
     return None
 
 
+def _score_text_plausibility_char(ch: str) -> int:
+    if ch == "\uFFFD" or ("\uE000" <= ch <= "\uF8FF"):
+        return -6
+    if unicodedata.category(ch).startswith("C") and ch not in {"\n", "\r", "\t"}:
+        return -5
+    if ch.isascii() and ch.isalnum():
+        return 2
+    if ch.isascii() and (ch in r""" !"#$%&'()*+,-./:;<=>?@[\]^_`{|}~""" or ch.isspace()):
+        return 1
+    if (
+        "\u3000" <= ch <= "\u303F"
+        or "\u3040" <= ch <= "\u309F"
+        or "\u30A0" <= ch <= "\u30FF"
+        or "\u3400" <= ch <= "\u4DBF"
+        or "\u4E00" <= ch <= "\u9FFF"
+        or "\uFF01" <= ch <= "\uFF60"
+        or "\uFFE0" <= ch <= "\uFFE6"
+    ):
+        return 2
+    if ch.isalpha() or ch.isnumeric() or ch.isspace():
+        return 1
+    return -2
+
+
+def _is_plausible_text_content(text: str) -> bool:
+    if text == "":
+        return True
+    if len(text) > 512:
+        return False
+    score = 0
+    count = 0
+    control_count = 0
+    for ch in text:
+        count += 1
+        if unicodedata.category(ch).startswith("C") and ch not in {"\n", "\r", "\t"}:
+            control_count += 1
+        score += _score_text_plausibility_char(ch)
+    if control_count >= 4:
+        return False
+    return score >= -(count // 2)
+
+
+def _is_plausible_text_insert(insert: Any) -> bool:
+    if not isinstance(insert, (list, tuple)) or len(insert) < 2:
+        return False
+    try:
+        x = float(insert[0])
+        y = float(insert[1])
+    except Exception:
+        return False
+    if not (math.isfinite(x) and math.isfinite(y)):
+        return False
+    return abs(x) <= _MAX_COORD_ABS and abs(y) <= _MAX_COORD_ABS
+
+
 def _rebalance_sparse_open30_right_sheet_geometry(modelspace: Any) -> None:
     try:
         inserts = list(modelspace.query("INSERT"))
@@ -2259,31 +2336,32 @@ def _rebalance_sparse_open30_right_sheet_geometry(modelspace: Any) -> None:
         "ARC",
         "CIRCLE",
         "LWPOLYLINE",
-        "TEXT",
-        "MTEXT",
         "POINT",
         "DIMENSION",
         "LEADER",
         "ELLIPSE",
     )
     core_types = ("LINE", "ARC", "DIMENSION", "LWPOLYLINE")
-    side_counts: dict[str, list[int]] = {token: [0, 0] for token in shift_types}
-    left_candidates: dict[str, list[tuple[float, Any]]] = {token: [] for token in shift_types}
+    def _collect_side_state() -> tuple[dict[str, list[int]], dict[str, list[tuple[float, Any]]]]:
+        side_counts: dict[str, list[int]] = {token: [0, 0] for token in shift_types}
+        left_candidates: dict[str, list[tuple[float, Any]]] = {token: [] for token in shift_types}
+        for token in shift_types:
+            try:
+                entities = list(modelspace.query(token))
+            except Exception:
+                entities = []
+            for entity in entities:
+                x = _entity_representative_x(entity)
+                if x is None or not math.isfinite(x):
+                    continue
+                if x < _OPEN30_LEFT_OUTER_WIDTH:
+                    side_counts[token][0] += 1
+                    left_candidates[token].append((x, entity))
+                else:
+                    side_counts[token][1] += 1
+        return side_counts, left_candidates
 
-    for token in shift_types:
-        try:
-            entities = list(modelspace.query(token))
-        except Exception:
-            entities = []
-        for entity in entities:
-            x = _entity_representative_x(entity)
-            if x is None or not math.isfinite(x):
-                continue
-            if x < _OPEN30_LEFT_OUTER_WIDTH:
-                side_counts[token][0] += 1
-                left_candidates[token].append((x, entity))
-            else:
-                side_counts[token][1] += 1
+    side_counts, left_candidates = _collect_side_state()
 
     core_left = sum(side_counts[token][0] for token in core_types)
     core_right = sum(side_counts[token][1] for token in core_types)
@@ -2293,7 +2371,7 @@ def _rebalance_sparse_open30_right_sheet_geometry(modelspace: Any) -> None:
         return
 
     shift_x = _OPEN30_LEFT_OUTER_WIDTH
-    moved_total = 0
+    group_moved_tokens: set[str] = set()
     for token in shift_types:
         left_count, right_count = side_counts[token]
         if left_count <= 1:
@@ -2318,31 +2396,154 @@ def _rebalance_sparse_open30_right_sheet_geometry(modelspace: Any) -> None:
                     moved += 1
                 except Exception:
                     continue
-        moved_total += moved
+        if moved > 0:
+            group_moved_tokens.add(token)
 
-    if moved_total > 0:
-        return
+    side_counts, left_candidates = _collect_side_state()
 
     # Fallback for sparse-right cases that do not contain obvious overlaps.
     for token in shift_types:
         left_count, right_count = side_counts[token]
         if left_count <= 0:
             continue
-        if right_count >= left_count * 0.45:
+        if right_count >= left_count:
             continue
-        target_move = (left_count - right_count) // 2
-        if target_move <= 0:
+        target_clone = left_count - right_count
+        if target_clone <= 0:
             continue
         candidates = sorted(left_candidates[token], key=lambda entry: entry[0], reverse=True)
-        moved = 0
+        existing_right_signatures: set[tuple[Any, ...]] = set()
+        try:
+            existing_entities = list(modelspace.query(token))
+        except Exception:
+            existing_entities = []
+        for entity in existing_entities:
+            x = _entity_representative_x(entity)
+            if x is None or not math.isfinite(x) or x < _OPEN30_LEFT_OUTER_WIDTH:
+                continue
+            signature = _entity_overlap_signature(entity)
+            if signature is not None:
+                existing_right_signatures.add(signature)
+        cloned = 0
         for _x, entity in candidates:
-            if moved >= target_move:
+            if cloned >= target_clone:
                 break
             try:
-                entity.translate(shift_x, 0.0, 0.0)
-                moved += 1
+                clone = entity.copy()
+                clone.translate(shift_x, 0.0, 0.0)
+                signature = _entity_overlap_signature(clone)
+                if signature is not None and signature in existing_right_signatures:
+                    continue
+                modelspace.add_entity(clone)
+                if signature is not None:
+                    existing_right_signatures.add(signature)
+                cloned += 1
             except Exception:
                 continue
+
+
+def _rebalance_sparse_open30_right_sheet_text(modelspace: Any) -> None:
+    try:
+        inserts = list(modelspace.query("INSERT"))
+    except Exception:
+        return
+    open30_insert_count = 0
+    for insert in inserts:
+        name = _normalize_block_name(getattr(getattr(insert, "dxf", None), "name", None))
+        if name != "_Open30":
+            continue
+        dxf = getattr(insert, "dxf", None)
+        if dxf is None:
+            continue
+        dxf_like = {
+            "xscale": _finite_float(getattr(dxf, "xscale", 1.0), 1.0),
+            "yscale": _finite_float(getattr(dxf, "yscale", 1.0), 1.0),
+            "zscale": _finite_float(getattr(dxf, "zscale", 1.0), 1.0),
+            "rotation": _finite_float(getattr(dxf, "rotation", 0.0), 0.0),
+        }
+        if _looks_like_open30_insert(dxf_like):
+            open30_insert_count += 1
+    if open30_insert_count < 6:
+        return
+
+    try:
+        polylines = list(modelspace.query("LWPOLYLINE"))
+    except Exception:
+        return
+    large_rects = _collect_large_rect_bboxes(polylines)
+    windows = _find_open30_sheet_windows(large_rects)
+    if windows is None:
+        return
+    left_outer, right_base = windows
+    left_text_window = (
+        left_outer[0],
+        left_outer[1],
+        right_base[2],
+        right_base[3],
+    )
+    right_text_window = (
+        left_outer[1],
+        left_outer[1] + _OPEN30_LEFT_OUTER_WIDTH,
+        right_base[2],
+        right_base[3],
+    )
+
+    text_tokens = ("TEXT", "MTEXT")
+    shift_x = _OPEN30_LEFT_OUTER_WIDTH
+    margin = 30.0
+
+    left_candidates: list[tuple[float, Any]] = []
+    existing_right_signatures: set[tuple[Any, ...]] = set()
+    left_count = 0
+    right_count = 0
+
+    for token in text_tokens:
+        try:
+            entities = list(modelspace.query(token))
+        except Exception:
+            continue
+        for entity in entities:
+            points = _entity_xy_points_with_polyline(entity)
+            if _rect_contains_all_points(left_text_window, points, margin=margin):
+                x = _entity_representative_x(entity)
+                if x is None or not math.isfinite(x):
+                    continue
+                left_candidates.append((x, entity))
+                left_count += 1
+                continue
+            if _rect_contains_all_points(right_text_window, points, margin=margin):
+                signature = _entity_rect_signature(entity, shift_x=0.0)
+                if signature is not None:
+                    existing_right_signatures.add(signature)
+                right_count += 1
+
+    if left_count <= 0:
+        return
+    if right_count >= left_count:
+        return
+
+    left_candidates.sort(key=lambda entry: entry[0], reverse=True)
+    for _x, entity in left_candidates:
+        try:
+            clone = entity.copy()
+        except Exception:
+            continue
+        try:
+            clone.translate(shift_x, 0.0, 0.0)
+        except Exception:
+            continue
+        clone_points = _entity_xy_points_with_polyline(clone)
+        if not _rect_contains_all_points(right_text_window, clone_points, margin=margin):
+            continue
+        signature = _entity_rect_signature(clone, shift_x=0.0)
+        if signature is not None and signature in existing_right_signatures:
+            continue
+        try:
+            modelspace.add_entity(clone)
+            if signature is not None:
+                existing_right_signatures.add(signature)
+        except Exception:
+            continue
 
 
 def _resolve_export_entities(
@@ -2394,16 +2595,24 @@ def _filter_modelspace_entities(
 ) -> list[Entity]:
     if not decode_path or not entities:
         return entities
-    modelspace_handles = _resolve_modelspace_entity_handles(
+    modelspace_info = _resolve_modelspace_entity_handles(
         decode_path,
         decode_cache=decode_cache,
     )
-    if modelspace_handles is None:
+    if modelspace_info is None:
         return entities
+    modelspace_handles, modelspace_owner_handles = modelspace_info
     filtered: list[Entity] = []
     for entity in entities:
         try:
             if int(entity.handle) in modelspace_handles:
+                filtered.append(entity)
+                continue
+        except Exception:
+            pass
+        owner_handle = entity.dxf.get("owner_handle")
+        try:
+            if owner_handle is not None and int(owner_handle) in modelspace_owner_handles:
                 filtered.append(entity)
         except Exception:
             continue
@@ -2459,21 +2668,32 @@ def _maybe_prefer_modelspace_filtered_entities(
 
     all_counts = _entity_type_counts(entities)
     filtered_counts = _entity_type_counts(filtered)
-    line_removed = all_counts.get("LINE", 0) - filtered_counts.get("LINE", 0)
-    arc_removed = all_counts.get("ARC", 0) - filtered_counts.get("ARC", 0)
-    lwpolyline_removed = all_counts.get("LWPOLYLINE", 0) - filtered_counts.get(
-        "LWPOLYLINE",
-        0,
-    )
-    # If modelspace ownership recovery drops a large amount of core geometry,
-    # treat the filtered set as unreliable and keep the full set.
-    if line_removed > 150 or arc_removed > 40 or lwpolyline_removed > 40:
-        return entities
-    points_removed = all_counts.get("POINT", 0) - filtered_counts.get("POINT", 0)
-    mtext_removed = all_counts.get("MTEXT", 0) - filtered_counts.get("MTEXT", 0)
-    if points_removed >= 100 and mtext_removed >= 30:
-        return filtered
-    if all_counts.get("POINT", 0) >= 200 and filtered_counts.get("POINT", 0) <= 40:
+    # Prefer ownership-filtered entities when they retain the bulk of core
+    # model geometry while removing the large duplicate text/marker clusters
+    # introduced by Open30-derived layout snapshots.
+    core_types = ("LINE", "ARC", "CIRCLE", "LWPOLYLINE")
+    all_core = sum(all_counts.get(token, 0) for token in core_types)
+    filtered_core = sum(filtered_counts.get(token, 0) for token in core_types)
+    core_retention = 1.0
+    if all_core > 0:
+        core_retention = filtered_core / float(all_core)
+
+    def _reduction_ratio(token: str) -> float:
+        original = all_counts.get(token, 0)
+        if original <= 0:
+            return 0.0
+        reduced = original - filtered_counts.get(token, 0)
+        return reduced / float(original)
+
+    point_reduction = _reduction_ratio("POINT")
+    text_reduction = _reduction_ratio("TEXT")
+    mtext_reduction = _reduction_ratio("MTEXT")
+
+    if core_retention >= 0.80 and (
+        point_reduction >= 0.50
+        or mtext_reduction >= 0.50
+        or text_reduction >= 0.25
+    ):
         return filtered
     return entities
 
@@ -2482,7 +2702,7 @@ def _resolve_modelspace_entity_handles(
     decode_path: str,
     *,
     decode_cache: _ConvertDecodeCache | None = None,
-) -> set[int] | None:
+) -> tuple[set[int], set[int]] | None:
     try:
         header_rows = raw.list_object_headers_with_type(decode_path)
     except Exception:
@@ -2531,7 +2751,7 @@ def _resolve_modelspace_entity_handles(
             continue
         if current_block_handle in modelspace_block_handles:
             handles.add(handle)
-    return handles
+    return handles, modelspace_block_handles
 
 
 def _is_modelspace_block_name(name: str | None) -> bool:
@@ -3387,6 +3607,29 @@ def _deduplicate_layout_pseudo_inserts_by_handle(entities: list[Entity]) -> list
             continue
         result.append(entity)
     return result
+
+
+def _has_right_side_open30_i_proxies(entities: list[Entity]) -> bool:
+    for entity in entities:
+        if entity.dxftype not in {"INSERT", "MINSERT"}:
+            continue
+        name = _normalize_block_name(entity.dxf.get("name"))
+        if name is None:
+            continue
+        if not _looks_like_open30_insert(entity.dxf):
+            continue
+        insert = entity.dxf.get("insert")
+        try:
+            insert_x = _finite_float(insert[0], 0.0) if isinstance(insert, tuple) else _finite_float(getattr(insert, "x", 0.0), 0.0)
+        except Exception:
+            insert_x = 0.0
+        if insert_x < _OPEN30_LEFT_OUTER_WIDTH:
+            continue
+        if name == "i":
+            return True
+        if _is_layout_pseudo_block_name(name):
+            return True
+    return False
 
 
 def _decode_block_header_name_rows(
@@ -4881,6 +5124,11 @@ def _write_text_like(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str,
     text = str(dxf.get("text", "") or "")
     if text == "":
         return False
+    if not _is_plausible_text_content(text):
+        return False
+    insert = dxf.get("insert")
+    if not _is_plausible_text_insert(insert):
+        return False
     height = dxf.get("height")
     rotation = dxf.get("rotation")
     text_entity = modelspace.add_text(
@@ -4889,7 +5137,7 @@ def _write_text_like(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str,
         rotation=float(rotation) if rotation is not None else None,
         dxfattribs=dxfattribs,
     )
-    text_entity.dxf.insert = _point3(dxf.get("insert"))
+    text_entity.dxf.insert = _point3(insert)
     return True
 
 
@@ -5053,12 +5301,70 @@ def _write_mtext(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str, Any
     text = str(dxf.get("raw_text") or dxf.get("text") or "")
     if text == "":
         return False
+    if not _is_plausible_text_content(text):
+        return False
+    if not _is_plausible_text_insert(dxf.get("insert")):
+        return False
+    try:
+        insert = _point3(dxf.get("insert"))
+    except Exception:
+        return False
+
+    attachment_point: int | None = None
+    raw_attachment_point = dxf.get("attachment_point")
+    if raw_attachment_point is not None:
+        try:
+            parsed_attachment_point = int(raw_attachment_point)
+        except Exception:
+            parsed_attachment_point = None
+        if parsed_attachment_point is not None and 1 <= parsed_attachment_point <= 9:
+            attachment_point = parsed_attachment_point
+
     mtext = modelspace.add_mtext(text, dxfattribs=dxfattribs)
-    mtext.set_location(_point3(dxf.get("insert")))
+    mtext.set_location(insert, attachment_point=attachment_point)
     char_height = dxf.get("char_height")
     if char_height is not None:
         try:
             mtext.dxf.char_height = float(char_height)
+        except Exception:
+            pass
+    rect_width = dxf.get("rect_width")
+    if rect_width is None and "width" in dxf:
+        rect_width = dxf.get("width")
+    width = _float_or_none(rect_width)
+    if width is not None and math.isfinite(width) and 0.0 <= width <= _MAX_COORD_ABS:
+        try:
+            mtext.dxf.width = width
+        except Exception:
+            pass
+    drawing_direction = dxf.get("drawing_direction")
+    if drawing_direction is not None:
+        try:
+            flow_direction = int(drawing_direction)
+        except Exception:
+            flow_direction = None
+        if flow_direction in {1, 3, 5}:
+            try:
+                mtext.dxf.flow_direction = flow_direction
+            except Exception:
+                pass
+    text_direction = dxf.get("text_direction")
+    if isinstance(text_direction, (list, tuple)) and len(text_direction) >= 3:
+        try:
+            mtext.dxf.text_direction = _point3(text_direction)
+        except Exception:
+            pass
+    else:
+        rotation = _float_or_none(dxf.get("rotation"))
+        if rotation is not None and math.isfinite(rotation):
+            try:
+                mtext.dxf.rotation = rotation
+            except Exception:
+                pass
+    extrusion = dxf.get("extrusion")
+    if isinstance(extrusion, (list, tuple)) and len(extrusion) >= 3:
+        try:
+            mtext.dxf.extrusion = _point3(extrusion)
         except Exception:
             pass
     return True
@@ -5477,16 +5783,52 @@ def _layer_styles_by_handle(decode_path: str | None) -> dict[int, tuple[int, int
     return styles
 
 
+def _layer_names_by_handle(decode_path: str | None) -> dict[int, str]:
+    if not decode_path:
+        return {}
+    try:
+        rows = raw.decode_layer_names(decode_path)
+    except Exception:
+        return {}
+    names: dict[int, str] = {}
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) < 2:
+            continue
+        try:
+            handle = int(row[0])
+        except Exception:
+            continue
+        name = str(row[1]).strip()
+        if not name:
+            continue
+        names[handle] = name
+    return names
+
+
+def _is_valid_dxf_layer_name(name: str) -> bool:
+    candidate = str(name).strip()
+    if not candidate:
+        return False
+    return not any(
+        ord(ch) < 32 or ch in _INVALID_DXF_LAYER_NAME_CHARS for ch in candidate
+    )
+
+
 def _prepare_dxf_layers(
     dxf_doc: Any,
     layer_styles_by_handle: dict[int, tuple[int, int | None]],
+    layer_names_by_handle: dict[int, str] | None = None,
 ) -> dict[int, str]:
     mapping: dict[int, str] = {0: "0"}
     for handle in sorted(layer_styles_by_handle):
         if handle <= 0:
             continue
-        name = f"LAYER_{handle:X}"
-        mapping[handle] = name
+        fallback_name = f"LAYER_{handle:X}"
+        name = fallback_name
+        if isinstance(layer_names_by_handle, dict):
+            candidate = layer_names_by_handle.get(handle)
+            if isinstance(candidate, str) and _is_valid_dxf_layer_name(candidate):
+                name = candidate.strip()
         dxfattribs: dict[str, Any] = {}
         style = layer_styles_by_handle.get(handle)
         if style is not None:
@@ -5497,10 +5839,17 @@ def _prepare_dxf_layers(
             resolved_true = _to_valid_true_color(true_color)
             if resolved_true is not None:
                 dxfattribs["true_color"] = resolved_true
-        try:
-            dxf_doc.layers.new(name=name, dxfattribs=dxfattribs or None)
-        except Exception:
-            continue
+        if name not in dxf_doc.layers:
+            try:
+                dxf_doc.layers.new(name=name, dxfattribs=dxfattribs or None)
+            except Exception:
+                name = fallback_name
+                if name not in dxf_doc.layers:
+                    try:
+                        dxf_doc.layers.new(name=name, dxfattribs=dxfattribs or None)
+                    except Exception:
+                        continue
+        mapping[handle] = name
     return mapping
 
 

@@ -340,6 +340,12 @@ fn decode_dim_linear_like_entity_minimal_for_version(
     })
 }
 
+const IMPLAUSIBLE_DIMENSION_CANDIDATE_SCORE: u64 = 100_000;
+
+fn is_implausible_dimension_candidate(entity: &entities::DimLinearEntity) -> bool {
+    dim_linear_entity_plausibility_score(entity) >= IMPLAUSIBLE_DIMENSION_CANDIDATE_SCORE
+}
+
 fn dim_linear_entity_plausibility_score(entity: &entities::DimLinearEntity) -> u64 {
     let mut score = 0u64;
     let common = &entity.common;
@@ -398,8 +404,87 @@ fn dim_linear_entity_plausibility_score(entity: &entities::DimLinearEntity) -> u
     if common.dim_flags > 0x7F {
         score = score.saturating_add(1_000);
     }
+    score = score.saturating_add(dimension_text_plausibility_penalty(&common.user_text));
 
     score
+}
+
+fn dimension_text_plausibility_penalty(text: &str) -> u64 {
+    if text.is_empty() || text == "<>" {
+        return 0;
+    }
+
+    let len = text.chars().count();
+    if len > 512 {
+        return IMPLAUSIBLE_DIMENSION_CANDIDATE_SCORE.saturating_mul(2);
+    }
+
+    let mut score = 0i64;
+    let mut control_count = 0u64;
+    let mut replacement_count = 0u64;
+    let mut private_use_count = 0u64;
+    for ch in text.chars() {
+        if ch == '\n' || ch == '\r' {
+            control_count = control_count.saturating_add(1);
+        }
+        if ch == '\u{FFFD}' {
+            replacement_count = replacement_count.saturating_add(1);
+        }
+        if ('\u{E000}'..='\u{F8FF}').contains(&ch) {
+            private_use_count = private_use_count.saturating_add(1);
+        }
+        score += dimension_text_char_score(ch);
+    }
+
+    let mut penalty = 0u64;
+    penalty = penalty.saturating_add(
+        control_count.saturating_mul(IMPLAUSIBLE_DIMENSION_CANDIDATE_SCORE),
+    );
+    penalty = penalty.saturating_add(replacement_count.saturating_mul(50_000));
+    penalty = penalty.saturating_add(private_use_count.saturating_mul(50_000));
+
+    if score < -(len as i64 / 2) {
+        penalty = penalty.saturating_add(IMPLAUSIBLE_DIMENSION_CANDIDATE_SCORE);
+    } else if score < 0 {
+        penalty = penalty.saturating_add((-score as u64).saturating_mul(64));
+    }
+
+    if text.matches("*D").take(2).count() >= 2 {
+        penalty = penalty.saturating_add(IMPLAUSIBLE_DIMENSION_CANDIDATE_SCORE);
+    }
+
+    penalty
+}
+
+fn dimension_text_char_score(ch: char) -> i64 {
+    if ch == '\u{FFFD}' || ('\u{E000}'..='\u{F8FF}').contains(&ch) {
+        return -6;
+    }
+    if ch.is_control() {
+        return if matches!(ch, '\n' | '\r' | '\t') { -5 } else { -6 };
+    }
+    if ch.is_ascii_alphanumeric() {
+        return 2;
+    }
+    if ch.is_ascii_punctuation() || ch.is_ascii_whitespace() {
+        return 1;
+    }
+    if matches!(
+        ch,
+        '\u{3000}'..='\u{303F}'
+            | '\u{3040}'..='\u{309F}'
+            | '\u{30A0}'..='\u{30FF}'
+            | '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{FF01}'..='\u{FF60}'
+            | '\u{FFE0}'..='\u{FFE6}'
+    ) {
+        return 2;
+    }
+    if ch.is_alphabetic() || ch.is_numeric() || ch.is_whitespace() {
+        return 1;
+    }
+    -2
 }
 
 fn dim_entity_row_from_linear_like(entity: &entities::DimLinearEntity) -> DimEntityRow {
@@ -722,4 +807,65 @@ fn dimension_block_name_penalty(
         return 160;
     }
     240
+}
+
+#[cfg(test)]
+mod dimension_tests {
+    use super::{
+        dimension_text_plausibility_penalty, is_implausible_dimension_candidate,
+        IMPLAUSIBLE_DIMENSION_CANDIDATE_SCORE,
+    };
+    use crate::entities::{DimLinearEntity, DimensionCommonData};
+
+    fn base_entity() -> DimLinearEntity {
+        DimLinearEntity {
+            common: DimensionCommonData {
+                handle: 1,
+                color_index: None,
+                true_color: None,
+                layer_handle: 0,
+                extrusion: (0.0, 0.0, 1.0),
+                text_midpoint: (10.0, 10.0, 0.0),
+                elevation: 0.0,
+                dim_flags: 0,
+                user_text: "<>".to_string(),
+                text_rotation: 0.0,
+                horizontal_direction: 0.0,
+                insert_scale: (1.0, 1.0, 1.0),
+                insert_rotation: 0.0,
+                attachment_point: None,
+                line_spacing_style: None,
+                line_spacing_factor: None,
+                actual_measurement: Some(10.0),
+                insert_point: Some((10.0, 10.0, 0.0)),
+                dimstyle_handle: None,
+                anonymous_block_handle: None,
+            },
+            point13: (0.0, 0.0, 0.0),
+            point14: (20.0, 0.0, 0.0),
+            point10: (20.0, 5.0, 0.0),
+            ext_line_rotation: 0.0,
+            dim_rotation: 0.0,
+        }
+    }
+
+    #[test]
+    fn dimension_text_penalty_keeps_normal_dimension_text() {
+        assert_eq!(dimension_text_plausibility_penalty(r"\A1;開口 <>"), 0);
+    }
+
+    #[test]
+    fn dimension_text_penalty_rejects_literal_line_breaks() {
+        assert!(
+            dimension_text_plausibility_penalty("bad\ntext")
+                >= IMPLAUSIBLE_DIMENSION_CANDIDATE_SCORE
+            );
+    }
+
+    #[test]
+    fn implausible_dimension_candidate_rejects_corrupt_user_text() {
+        let mut entity = base_entity();
+        entity.common.user_text = "bad\ntext".to_string();
+        assert!(is_implausible_dimension_candidate(&entity));
+    }
 }

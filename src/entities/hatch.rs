@@ -29,17 +29,23 @@ pub struct HatchEntity {
 
 pub fn decode_hatch(reader: &mut BitReader<'_>) -> Result<HatchEntity> {
     let header = parse_common_entity_header(reader)?;
-    decode_hatch_with_header(reader, header, false, false, false)
+    decode_hatch_with_header(reader, header, false, false, false, false)
 }
 
 pub fn decode_hatch_r2004(reader: &mut BitReader<'_>) -> Result<HatchEntity> {
     let header = parse_common_entity_header(reader)?;
-    decode_hatch_with_header(reader, header, false, false, true)
+    decode_hatch_with_header(reader, header, false, false, true, false)
 }
 
 pub fn decode_hatch_r2007(reader: &mut BitReader<'_>) -> Result<HatchEntity> {
-    let header = parse_common_entity_header_r2007(reader)?;
-    decode_hatch_with_header(reader, header, true, true, true)
+    decode_hatch_with_header_start_candidates(
+        reader,
+        parse_common_entity_header_r2007,
+        true,
+        true,
+        true,
+        true,
+    )
 }
 
 pub fn decode_hatch_r2010(
@@ -47,9 +53,18 @@ pub fn decode_hatch_r2010(
     object_data_end_bit: u32,
     object_handle: u64,
 ) -> Result<HatchEntity> {
-    let mut header = parse_common_entity_header_r2010(reader, object_data_end_bit)?;
-    header.handle = object_handle;
-    decode_hatch_with_header(reader, header, true, true, true)
+    decode_hatch_with_header_start_candidates(
+        reader,
+        |attempt_reader| {
+            let mut header = parse_common_entity_header_r2010(attempt_reader, object_data_end_bit)?;
+            header.handle = object_handle;
+            Ok(header)
+        },
+        true,
+        true,
+        true,
+        true,
+    )
 }
 
 pub fn decode_hatch_r2013(
@@ -57,9 +72,91 @@ pub fn decode_hatch_r2013(
     object_data_end_bit: u32,
     object_handle: u64,
 ) -> Result<HatchEntity> {
-    let mut header = parse_common_entity_header_r2013(reader, object_data_end_bit)?;
-    header.handle = object_handle;
-    decode_hatch_with_header(reader, header, true, true, true)
+    decode_hatch_with_header_start_candidates(
+        reader,
+        |attempt_reader| {
+            let mut header = parse_common_entity_header_r2013(attempt_reader, object_data_end_bit)?;
+            header.handle = object_handle;
+            Ok(header)
+        },
+        true,
+        true,
+        true,
+        true,
+    )
+}
+
+fn decode_hatch_with_header_start_candidates<F>(
+    reader: &mut BitReader<'_>,
+    mut parse_header: F,
+    allow_handle_decode_failure: bool,
+    r2007_layer_only: bool,
+    has_gradient_payload: bool,
+    use_unicode_text: bool,
+) -> Result<HatchEntity>
+where
+    F: FnMut(&mut BitReader<'_>) -> Result<CommonEntityHeader>,
+{
+    let start = reader.get_pos();
+    let align_candidates = if start.1 == 0 {
+        [false, false]
+    } else {
+        [false, true]
+    };
+    let mut first_err: Option<DwgError> = None;
+    let mut best: Option<(i32, BitReader<'_>, HatchEntity)> = None;
+
+    for align_after_prefix in align_candidates {
+        if align_after_prefix && start.1 == 0 {
+            continue;
+        }
+        let mut attempt_reader = reader.clone();
+        if align_after_prefix {
+            attempt_reader.align_byte();
+        }
+        let header = match parse_header(&mut attempt_reader) {
+            Ok(header) => header,
+            Err(err) => {
+                if first_err.is_none() {
+                    first_err = Some(err);
+                }
+                continue;
+            }
+        };
+        match decode_hatch_with_header(
+            &mut attempt_reader,
+            header,
+            allow_handle_decode_failure,
+            r2007_layer_only,
+            has_gradient_payload,
+            use_unicode_text,
+        ) {
+            Ok(entity) => {
+                let score = score_hatch_candidate(&entity);
+                match &best {
+                    Some((best_score, ..)) if score <= *best_score => {}
+                    _ => best = Some((score, attempt_reader, entity)),
+                }
+            }
+            Err(err) => {
+                if first_err.is_none() {
+                    first_err = Some(err);
+                }
+            }
+        }
+    }
+
+    if let Some((_score, chosen_reader, entity)) = best {
+        *reader = chosen_reader;
+        return Ok(entity);
+    }
+
+    Err(first_err.unwrap_or_else(|| {
+        DwgError::new(
+            ErrorKind::Format,
+            "failed to decode HATCH header-alignment candidates",
+        )
+    }))
 }
 
 fn decode_hatch_with_header(
@@ -68,14 +165,178 @@ fn decode_hatch_with_header(
     allow_handle_decode_failure: bool,
     r2007_layer_only: bool,
     has_gradient_payload: bool,
+    use_unicode_text: bool,
 ) -> Result<HatchEntity> {
-    if has_gradient_payload {
-        skip_gradient_payload(reader)?;
+    let base_reader = reader.clone();
+    if !has_gradient_payload {
+        return decode_hatch_body(
+            reader,
+            header,
+            allow_handle_decode_failure,
+            r2007_layer_only,
+            false,
+            use_unicode_text,
+        );
+    }
+
+    let mut first_err: Option<DwgError> = None;
+    let mut best: Option<(i32, BitReader<'_>, HatchEntity)> = None;
+
+    for skip_gradient in [false, true] {
+        for string_is_unicode in [use_unicode_text, !use_unicode_text] {
+            let mut attempt_reader = reader.clone();
+            match decode_hatch_body(
+                &mut attempt_reader,
+                header.clone(),
+                allow_handle_decode_failure,
+                r2007_layer_only,
+                skip_gradient,
+                string_is_unicode,
+            ) {
+                Ok(entity) => {
+                    let score = score_hatch_candidate(&entity);
+                    match &best {
+                        Some((best_score, ..)) if score <= *best_score => {}
+                        _ => best = Some((score, attempt_reader, entity)),
+                    }
+                }
+                Err(err) => {
+                    if first_err.is_none() {
+                        first_err = Some(err);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Ok((candidate_reader, entity)) = decode_hatch_with_polyline_path_scan(
+        &base_reader,
+        &header,
+        allow_handle_decode_failure,
+        r2007_layer_only,
+    ) {
+        let score = score_hatch_candidate(&entity);
+        match &best {
+            Some((best_score, ..)) if score <= *best_score => {}
+            _ => best = Some((score, candidate_reader, entity)),
+        }
+    }
+
+    if let Some((_score, chosen_reader, entity)) = best {
+        *reader = chosen_reader;
+        return Ok(entity);
+    }
+
+    Err(first_err.unwrap_or_else(|| {
+        DwgError::new(
+            ErrorKind::Format,
+            "failed to decode HATCH with all candidates",
+        )
+    }))
+}
+
+fn decode_hatch_with_polyline_path_scan<'a>(
+    base_reader: &BitReader<'a>,
+    header: &CommonEntityHeader,
+    allow_handle_decode_failure: bool,
+    r2007_layer_only: bool,
+) -> Result<(BitReader<'a>, HatchEntity)> {
+    let body_start_bit = base_reader.tell_bits().min(u64::from(u32::MAX)) as u32;
+    let total_bits = base_reader.total_bits().min(u64::from(u32::MAX)) as u32;
+    let search_end_bit = header.obj_size.min(total_bits);
+    if search_end_bit <= body_start_bit.saturating_add(96) {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            "HATCH scan fallback has no room for path data",
+        ));
+    }
+
+    let max_start_bit = search_end_bit
+        .saturating_sub(96)
+        .min(body_start_bit.saturating_add(2048));
+    let mut best: Option<(i32, BitReader<'_>, HatchEntity)> = None;
+
+    for start_bit in body_start_bit..=max_start_bit {
+        let mut attempt_reader = base_reader.clone();
+        attempt_reader.set_bit_pos(start_bit);
+        let Ok(paths) = scan_hatch_polyline_paths(&mut attempt_reader, search_end_bit) else {
+            continue;
+        };
+
+        let solid_fill = hatch_flag_bit_before(base_reader, start_bit, 2).unwrap_or(false);
+        let associative = hatch_flag_bit_before(base_reader, start_bit, 1).unwrap_or(false);
+
+        let mut handle_reader = attempt_reader.clone();
+        handle_reader.set_bit_pos(header.obj_size);
+        let layer_handle = match if r2007_layer_only {
+            parse_common_entity_layer_handle(&mut handle_reader, header)
+        } else {
+            parse_common_entity_handles(&mut handle_reader, header)
+                .map(|common_handles| common_handles.layer)
+        } {
+            Ok(layer_handle) => layer_handle,
+            Err(err)
+                if allow_handle_decode_failure
+                    && matches!(
+                        err.kind,
+                        ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
+                    ) =>
+            {
+                0
+            }
+            Err(err) => return Err(err),
+        };
+
+        let entity = HatchEntity {
+            handle: header.handle,
+            color_index: header.color.index,
+            true_color: header.color.true_color,
+            layer_handle,
+            name: String::new(),
+            solid_fill,
+            associative,
+            elevation: 0.0,
+            extrusion: (0.0, 0.0, 1.0),
+            paths,
+        };
+
+        let start_penalty =
+            i32::try_from(start_bit.saturating_sub(body_start_bit) / 8).unwrap_or(0);
+        let score = score_hatch_candidate(&entity).saturating_sub(start_penalty);
+        match &best {
+            Some((best_score, ..)) if score <= *best_score => {}
+            _ => best = Some((score, handle_reader, entity)),
+        }
+    }
+
+    best.map(|(_, reader, entity)| (reader, entity))
+        .ok_or_else(|| {
+            DwgError::new(
+                ErrorKind::Format,
+                "failed to recover HATCH polyline paths by scanning",
+            )
+        })
+}
+
+fn decode_hatch_body(
+    reader: &mut BitReader<'_>,
+    header: CommonEntityHeader,
+    allow_handle_decode_failure: bool,
+    r2007_layer_only: bool,
+    skip_gradient: bool,
+    use_unicode_text: bool,
+) -> Result<HatchEntity> {
+    if skip_gradient {
+        skip_gradient_payload(reader, use_unicode_text)?;
     }
 
     let elevation = reader.read_bd()?;
     let extrusion = reader.read_3bd()?;
-    let name = reader.read_tv()?;
+    let name = if use_unicode_text {
+        reader.read_tu()?
+    } else {
+        reader.read_tv()?
+    };
     let solid_fill = reader.read_b()? != 0;
     let associative = reader.read_b()? != 0;
 
@@ -216,7 +477,138 @@ fn decode_hatch_with_header(
     })
 }
 
-fn skip_gradient_payload(reader: &mut BitReader<'_>) -> Result<()> {
+fn scan_hatch_polyline_paths(
+    reader: &mut BitReader<'_>,
+    search_end_bit: u32,
+) -> Result<Vec<HatchPath>> {
+    let num_paths = bounded_count(reader.read_bl()?, "hatch paths")?;
+    if !(1..=32).contains(&num_paths) {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            format!("unsupported scanned HATCH path count: {num_paths}"),
+        ));
+    }
+
+    let mut paths = Vec::with_capacity(num_paths);
+    for _ in 0..num_paths {
+        let path_flag = reader.read_bl()?;
+        if path_flag > 0x1F || (path_flag & 0x02) == 0 {
+            return Err(DwgError::new(
+                ErrorKind::Format,
+                format!("unsupported scanned HATCH path flag: {path_flag}"),
+            ));
+        }
+
+        let bulges_present = reader.read_b()? != 0;
+        let closed = reader.read_b()? != 0;
+        let num_vertices = bounded_count(reader.read_bl()?, "hatch polyline vertices")?;
+        if !(3..=4096).contains(&num_vertices) {
+            return Err(DwgError::new(
+                ErrorKind::Format,
+                format!("unsupported scanned HATCH vertex count: {num_vertices}"),
+            ));
+        }
+
+        let mut vertices: Vec<(f64, f64)> = Vec::with_capacity(num_vertices);
+        let mut bulges: Vec<f64> = Vec::with_capacity(num_vertices);
+        for _ in 0..num_vertices {
+            let point = read_point2rd(reader)?;
+            if !is_plausible_hatch_point(point) {
+                return Err(DwgError::new(
+                    ErrorKind::Format,
+                    format!(
+                        "implausible scanned HATCH point: ({}, {})",
+                        point.0, point.1
+                    ),
+                ));
+            }
+            vertices.push(point);
+            if bulges_present {
+                let bulge = reader.read_bd()?;
+                if !bulge.is_finite() || bulge.abs() > 1.0e6 {
+                    return Err(DwgError::new(
+                        ErrorKind::Format,
+                        format!("implausible scanned HATCH bulge: {bulge}"),
+                    ));
+                }
+                bulges.push(bulge);
+            }
+        }
+        let _num_boundary_obj_handles = reader.read_bl()?;
+
+        if reader.tell_bits() > u64::from(search_end_bit) {
+            return Err(DwgError::new(
+                ErrorKind::Format,
+                "scanned HATCH path exceeds object data boundary",
+            ));
+        }
+
+        let mut points = if bulges_present {
+            polyline_with_bulges_points(&vertices, &bulges, closed, 64)
+        } else {
+            vertices
+        };
+        if closed {
+            close_path_if_needed(&mut points);
+        }
+        if points.len() < 3 {
+            return Err(DwgError::new(
+                ErrorKind::Format,
+                "scanned HATCH path is too short",
+            ));
+        }
+        paths.push(HatchPath { closed, points });
+    }
+
+    Ok(paths)
+}
+
+fn score_hatch_candidate(entity: &HatchEntity) -> i32 {
+    let mut score = 0i32;
+    if !entity.name.is_empty() {
+        score += 8;
+    }
+    if entity.paths.is_empty() {
+        return i32::MIN / 4;
+    }
+    score += (entity.paths.len().min(32) as i32) * 4;
+    for path in &entity.paths {
+        if path.points.len() >= 3 {
+            score += 3;
+        }
+        if path.closed {
+            score += 2;
+        }
+        for (x, y) in &path.points {
+            if !x.is_finite() || !y.is_finite() {
+                return i32::MIN / 4;
+            }
+            if x.abs() > 1.0e9 || y.abs() > 1.0e9 {
+                return i32::MIN / 4;
+            }
+        }
+    }
+    score
+}
+
+fn hatch_flag_bit_before(base_reader: &BitReader<'_>, start_bit: u32, offset: u32) -> Option<bool> {
+    if start_bit < offset {
+        return None;
+    }
+    let bit_pos = start_bit.saturating_sub(offset);
+    if u64::from(bit_pos) >= base_reader.total_bits() {
+        return None;
+    }
+    let mut reader = base_reader.clone();
+    reader.set_bit_pos(bit_pos);
+    reader.read_b().ok().map(|bit| bit != 0)
+}
+
+fn is_plausible_hatch_point(point: (f64, f64)) -> bool {
+    point.0.is_finite() && point.1.is_finite() && point.0.abs() <= 1.0e8 && point.1.abs() <= 1.0e8
+}
+
+fn skip_gradient_payload(reader: &mut BitReader<'_>, use_unicode_text: bool) -> Result<()> {
     let _is_gradient = reader.read_bl()?;
     let _reserved = reader.read_bl()?;
     let _gradient_angle = reader.read_bd()?;
@@ -230,7 +622,11 @@ fn skip_gradient_payload(reader: &mut BitReader<'_>) -> Result<()> {
         let _rgb_color = reader.read_bl()?;
         let _ignored_color_byte = reader.read_rc()?;
     }
-    let _gradient_name = reader.read_tv()?;
+    let _gradient_name = if use_unicode_text {
+        reader.read_tu()?
+    } else {
+        reader.read_tv()?
+    };
     Ok(())
 }
 

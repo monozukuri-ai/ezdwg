@@ -158,6 +158,9 @@ where
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let best_effort = is_best_effort_compat_version(&decoder);
+    let debug_decode = std::env::var("EZDWG_DEBUG_ATTRIB")
+        .ok()
+        .is_some_and(|value| value != "0");
     let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
     let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut result = Vec::new();
@@ -172,15 +175,66 @@ where
         let mut reader = record.bit_reader();
         if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
             if best_effort {
+                if debug_decode {
+                    eprintln!(
+                        "[attrib-decode] type={} handle={} stage=prefix err={:?}",
+                        type_name,
+                        obj.handle.0,
+                        err
+                    );
+                }
                 continue;
             }
             return Err(to_py_err(err));
         }
         let entity = match decode_entity(&mut reader, decoder.version(), &header, obj.handle.0) {
             Ok(entity) => entity,
-            Err(err) if best_effort => continue,
+            Err(err) if best_effort => {
+                if debug_decode {
+                    eprintln!(
+                        "[attrib-decode] type={} handle={} offset={} size={} err={:?}",
+                        type_name,
+                        obj.handle.0,
+                        obj.offset,
+                        header.data_size,
+                        err
+                    );
+                }
+                continue;
+            }
             Err(err) => return Err(to_py_err(err)),
         };
+        if best_effort && !is_plausible_attrib_entity(&entity) {
+            if debug_decode {
+                eprintln!(
+                    "[attrib-decode] type={} handle={} rejected=implausible-values text={:?} tag={:?} prompt={:?} ins=({:.6e},{:.6e},{:.6e}) align={:?} ext=({:.6e},{:.6e},{:.6e}) h={:.6e} rot={:.6e} width={:.6e} gen={} halign={} valign={} flags={} lock={} layer={} style={:?} owner={:?}",
+                    type_name,
+                    obj.handle.0,
+                    entity.text,
+                    entity.tag,
+                    entity.prompt,
+                    entity.insertion.0,
+                    entity.insertion.1,
+                    entity.insertion.2,
+                    entity.alignment,
+                    entity.extrusion.0,
+                    entity.extrusion.1,
+                    entity.extrusion.2,
+                    entity.height,
+                    entity.rotation,
+                    entity.width_factor,
+                    entity.generation,
+                    entity.horizontal_alignment,
+                    entity.vertical_alignment,
+                    entity.flags,
+                    entity.lock_position,
+                    entity.layer_handle,
+                    entity.style_handle,
+                    entity.owner_handle,
+                );
+            }
+            continue;
+        }
         result.push((
             entity.handle,
             entity.text,
@@ -212,6 +266,10 @@ where
         }
     }
     Ok(result)
+}
+
+fn is_plausible_attrib_entity(entity: &entities::AttribEntity) -> bool {
+    crate::entities::attrib::is_plausible_attrib_entity(entity)
 }
 
 fn decode_dim_entities_by_type<F>(
@@ -315,7 +373,9 @@ where
     }
 
     if let Some(entity) = best_candidate {
-        return Ok(entity);
+        if !allow_minimal_fallback || !is_implausible_dimension_candidate(&entity) {
+            return Ok(entity);
+        }
     }
 
     if allow_minimal_fallback {
@@ -647,6 +707,17 @@ fn load_dynamic_types(
     }
 }
 
+fn load_dynamic_type_classes(
+    decoder: &decoder::Decoder<'_>,
+    best_effort: bool,
+) -> PyResult<HashMap<u16, objects::ObjectClass>> {
+    match decoder.dynamic_type_class_map() {
+        Ok(map) => Ok(map),
+        Err(_) if best_effort => Ok(HashMap::new()),
+        Err(err) => Err(to_py_err(err)),
+    }
+}
+
 fn collect_object_type_codes(
     decoder: &decoder::Decoder<'_>,
     index: &objects::ObjectIndex,
@@ -679,6 +750,54 @@ fn resolve_r2010_string_stream_ranges(
         return Vec::new();
     }
 
+    let mut ranges = Vec::new();
+    if let Some(range) = resolve_r2010_string_stream_range_spec(base_reader, end_bit) {
+        ranges.push(range);
+    }
+    if ranges.is_empty() {
+        ranges.extend(resolve_r2010_string_stream_ranges_legacy_compat(
+            base_reader, end_bit,
+        ));
+    }
+    ranges.sort_unstable();
+    ranges.dedup();
+    ranges
+}
+
+fn resolve_r2010_string_stream_range_spec(
+    base_reader: &BitReader<'_>,
+    end_bit: u32,
+) -> Option<(u32, u32)> {
+    const STRING_STREAM_METADATA_BITS: u32 = 16 * 8;
+
+    let mut size_field_start = end_bit.checked_sub(STRING_STREAM_METADATA_BITS)?;
+    let mut size_reader = base_reader.clone();
+    size_reader.set_bit_pos(size_field_start);
+    let low_size = u32::from(size_reader.read_rs(Endian::Little).ok()?);
+
+    let mut stream_size_bits = low_size;
+    if (stream_size_bits & 0x8000) != 0 {
+        size_field_start = size_field_start.checked_sub(STRING_STREAM_METADATA_BITS)?;
+        let mut hi_reader = base_reader.clone();
+        hi_reader.set_bit_pos(size_field_start);
+        let high_size = u32::from(hi_reader.read_rs(Endian::Little).ok()?);
+        stream_size_bits = (stream_size_bits & 0x7FFF) | (high_size << 15);
+    }
+
+    let stream_start_bit = size_field_start.checked_sub(stream_size_bits)?;
+    if stream_start_bit >= size_field_start {
+        return None;
+    }
+    if u64::from(size_field_start) > base_reader.total_bits() {
+        return None;
+    }
+    Some((stream_start_bit, size_field_start))
+}
+
+fn resolve_r2010_string_stream_ranges_legacy_compat(
+    base_reader: &BitReader<'_>,
+    end_bit: u32,
+) -> Vec<(u32, u32)> {
     let mut size_field_start = end_bit.saturating_sub(1);
     if size_field_start < 16 {
         return Vec::new();
@@ -718,8 +837,6 @@ fn resolve_r2010_string_stream_ranges(
         }
         ranges.push((start_bit, size_field_start));
     }
-    ranges.sort_unstable();
-    ranges.dedup();
     ranges
 }
 
@@ -744,9 +861,24 @@ fn recover_r2010_mtext_text(
     }
 
     let current_score = score_mtext_text_quality(inline_text);
+    let inline_text_is_fragment = looks_like_mtext_formatting_fragment(inline_text);
     let canonical_end_bit = resolve_r2010_object_data_end_bit(header).ok();
     let mut best: Option<(u64, String)> = None;
     for end_bit in end_bit_candidates {
+        if let Some(target_end_bit) = end_bit.checked_sub(9) {
+            if let Some((mut score, text)) =
+                scan_mtext_text_ending_at(reader_after_prefix, start_bit, target_end_bit)
+            {
+                if let Some(canonical) = canonical_end_bit {
+                    score = score.saturating_add(canonical.abs_diff(end_bit) as u64);
+                }
+                score = score.saturating_sub(16);
+                match &best {
+                    Some((best_score, _)) if score >= *best_score => {}
+                    _ => best = Some((score, text)),
+                }
+            }
+        }
         for (stream_start_bit, stream_end_bit) in
             resolve_r2010_string_stream_ranges(reader_after_prefix, end_bit)
         {
@@ -765,11 +897,33 @@ fn recover_r2010_mtext_text(
             }
         }
     }
+    if inline_text.is_empty() || inline_text_is_fragment {
+        if let Some((mut score, text)) =
+            scan_mtext_text_in_full_body(reader_after_prefix, start_bit, total_bits)
+        {
+            if !inline_text.is_empty() {
+                // Full-body search is broader than string-stream recovery; keep a small bias
+                // against it unless the inline text is clearly just a formatting fragment.
+                score = score.saturating_add(24);
+            }
+            match &best {
+                Some((best_score, _)) if score >= *best_score => {}
+                _ => best = Some((score, text)),
+            }
+        }
+    }
     let Some((best_score, best_text)) = best else {
+        if inline_text.is_empty() {
+            return scan_mtext_text_in_full_body(reader_after_prefix, start_bit, total_bits)
+                .map(|(_score, text)| text);
+        }
         return None;
     };
     if best_score.saturating_add(32) < current_score {
         Some(best_text)
+    } else if inline_text.is_empty() {
+        scan_mtext_text_in_full_body(reader_after_prefix, start_bit, total_bits)
+            .map(|(_score, text)| text)
     } else {
         None
     }
@@ -799,6 +953,7 @@ fn scan_mtext_text_in_string_stream(
             tried = tried.saturating_add(1);
             continue;
         };
+        let candidate = normalize_recovered_mtext_text(candidate);
         if candidate_reader.tell_bits() > end_bit as u64 || !is_plausible_mtext_text(&candidate) {
             bit = bit.saturating_add(8);
             tried = tried.saturating_add(1);
@@ -812,6 +967,89 @@ fn scan_mtext_text_in_string_stream(
             _ => best = Some((score, candidate)),
         }
         bit = bit.saturating_add(8);
+        tried = tried.saturating_add(1);
+    }
+    best
+}
+
+fn scan_mtext_text_ending_at(
+    base_reader: &BitReader<'_>,
+    start_bit: u32,
+    target_end_bit: u32,
+) -> Option<(u64, String)> {
+    if target_end_bit <= start_bit.saturating_add(16) {
+        return None;
+    }
+
+    let mut best: Option<(u64, String)> = None;
+    let mut bit = start_bit;
+    let max_tries = target_end_bit
+        .saturating_sub(start_bit)
+        .saturating_add(1)
+        .min(65_536);
+    let mut tried = 0u32;
+    while bit + 16 <= target_end_bit && tried < max_tries {
+        let mut candidate_reader = base_reader.clone();
+        candidate_reader.set_bit_pos(bit);
+        let Ok(candidate) = read_tu(&mut candidate_reader) else {
+            bit = bit.saturating_add(1);
+            tried = tried.saturating_add(1);
+            continue;
+        };
+        let candidate = normalize_recovered_mtext_text(candidate);
+        if candidate_reader.tell_bits() != u64::from(target_end_bit)
+            || !is_plausible_mtext_text(&candidate)
+        {
+            bit = bit.saturating_add(1);
+            tried = tried.saturating_add(1);
+            continue;
+        }
+
+        let score = score_mtext_text_quality(&candidate);
+        match &best {
+            Some((best_score, _)) if score >= *best_score => {}
+            _ => best = Some((score, candidate)),
+        }
+        bit = bit.saturating_add(1);
+        tried = tried.saturating_add(1);
+    }
+    best
+}
+
+fn scan_mtext_text_in_full_body(
+    base_reader: &BitReader<'_>,
+    start_bit: u32,
+    end_bit: u32,
+) -> Option<(u64, String)> {
+    if start_bit >= end_bit {
+        return None;
+    }
+
+    let mut best: Option<(u64, String)> = None;
+    let mut bit = start_bit;
+    let max_tries = end_bit.saturating_sub(start_bit).min(262_144);
+    let mut tried = 0u32;
+    while bit + 16 <= end_bit && tried < max_tries {
+        let mut candidate_reader = base_reader.clone();
+        candidate_reader.set_bit_pos(bit);
+        let Ok(candidate) = read_tu(&mut candidate_reader) else {
+            bit = bit.saturating_add(1);
+            tried = tried.saturating_add(1);
+            continue;
+        };
+        let candidate = normalize_recovered_mtext_text(candidate);
+        if candidate_reader.tell_bits() > end_bit as u64 || !is_plausible_mtext_text(&candidate) {
+            bit = bit.saturating_add(1);
+            tried = tried.saturating_add(1);
+            continue;
+        }
+
+        let score = score_mtext_text_quality(&candidate);
+        match &best {
+            Some((best_score, _)) if score >= *best_score => {}
+            _ => best = Some((score, candidate)),
+        }
+        bit = bit.saturating_add(1);
         tried = tried.saturating_add(1);
     }
     best
@@ -872,7 +1110,51 @@ fn score_mtext_text_quality(text: &str) -> u64 {
     if meaningful == 0 {
         score = score.saturating_add(25_000);
     }
+    if looks_like_mtext_formatting_fragment(text) {
+        score = score.saturating_add(20_000);
+    }
     score
+}
+
+fn looks_like_mtext_formatting_fragment(text: &str) -> bool {
+    if !text.starts_with('\\') || text.contains("\\P") {
+        return false;
+    }
+    let Some((_prefix, tail)) = text.split_once(';') else {
+        return false;
+    };
+    if tail.is_empty() {
+        return true;
+    }
+    !tail.chars().any(|ch| matches!(ch, '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{9FFF}'))
+        && tail
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch.is_ascii_whitespace() || matches!(ch, '.' | '-' | '+' | '/' | ':' | 'x' | 'X'))
+}
+
+fn normalize_recovered_mtext_text(text: String) -> String {
+    if !text.contains('\n') && !text.contains('\r') {
+        return text;
+    }
+    let mut normalized = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' => {
+                if matches!(chars.peek(), Some('\n')) {
+                    let _ = chars.next();
+                }
+                normalized.push('\\');
+                normalized.push('P');
+            }
+            '\n' => {
+                normalized.push('\\');
+                normalized.push('P');
+            }
+            _ => normalized.push(ch),
+        }
+    }
+    normalized
 }
 
 #[derive(Clone, Copy)]
@@ -946,10 +1228,20 @@ fn resolved_type_name(type_code: u16, dynamic_types: &HashMap<u16, String>) -> S
         .unwrap_or_else(|| objects::object_type_name(type_code))
 }
 
-fn resolved_type_class(type_code: u16, resolved_name: &str) -> String {
+fn resolved_type_class(
+    type_code: u16,
+    resolved_name: &str,
+    dynamic_type_classes: &HashMap<u16, objects::ObjectClass>,
+) -> String {
     let class = objects::object_type_class(type_code).as_str();
     if !class.is_empty() {
         return class.to_string();
+    }
+    if let Some(class) = dynamic_type_classes.get(&type_code) {
+        let class = class.as_str();
+        if !class.is_empty() {
+            return class.to_string();
+        }
     }
     if is_known_entity_type_name(resolved_name) {
         return "E".to_string();
@@ -1006,4 +1298,96 @@ fn builtin_code_from_name(name: &str) -> Option<u16> {
 
 fn is_known_entity_type_name(name: &str) -> bool {
     builtin_code_from_name(name).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_plausible_attrib_entity, resolve_r2010_string_stream_ranges};
+    use crate::bit::BitReader;
+    use crate::entities::AttribEntity;
+
+    fn set_le_u16(bits: &mut [u8], bit_pos: u32, value: u16) {
+        assert_eq!(bit_pos % 8, 0, "test helper only supports byte alignment");
+        let byte_pos = (bit_pos / 8) as usize;
+        bits[byte_pos] = (value & 0x00FF) as u8;
+        bits[byte_pos + 1] = (value >> 8) as u8;
+    }
+
+    fn set_bit(bits: &mut [u8], bit_pos: u32) {
+        let byte_pos = (bit_pos / 8) as usize;
+        let bit_in_byte = (bit_pos % 8) as u8;
+        bits[byte_pos] |= 0x80 >> bit_in_byte;
+    }
+
+    #[test]
+    fn resolve_r2010_string_stream_ranges_prefers_spec_layout() {
+        let end_bit = 320u32;
+        let mut bytes = vec![0u8; end_bit.div_ceil(8) as usize];
+        set_le_u16(&mut bytes, end_bit - (16 * 8), 64);
+        set_bit(&mut bytes, end_bit - 1);
+
+        let ranges = resolve_r2010_string_stream_ranges(&BitReader::new(&bytes), end_bit);
+        assert_eq!(ranges, vec![(128, 192)]);
+    }
+
+    #[test]
+    fn resolve_r2010_string_stream_ranges_supports_hi_size_extension() {
+        let end_bit = 512u32;
+        let mut bytes = vec![0u8; end_bit.div_ceil(8) as usize];
+        set_le_u16(&mut bytes, end_bit - (16 * 8), 0x8008);
+        set_le_u16(&mut bytes, end_bit - (32 * 8), 0x0000);
+        set_bit(&mut bytes, end_bit - 1);
+
+        let ranges = resolve_r2010_string_stream_ranges(&BitReader::new(&bytes), end_bit);
+        assert_eq!(ranges, vec![(248, 256)]);
+    }
+
+    #[test]
+    fn resolve_r2010_string_stream_ranges_falls_back_to_legacy_layout() {
+        let end_bit = 65u32;
+        let mut bytes = vec![0u8; end_bit.div_ceil(8) as usize];
+        set_le_u16(&mut bytes, end_bit - 17, 8);
+        set_bit(&mut bytes, end_bit - 1);
+
+        let ranges = resolve_r2010_string_stream_ranges(&BitReader::new(&bytes), end_bit);
+        assert_eq!(ranges, vec![(40, 48)]);
+    }
+
+    fn attrib_entity_with_size(height: f64, width_factor: f64) -> AttribEntity {
+        AttribEntity {
+            handle: 0x123,
+            owner_handle: Some(0x456),
+            color_index: None,
+            true_color: None,
+            layer_handle: 0x35,
+            text: "TITLE".to_string(),
+            insertion: (15000.0, 1000.0, 0.0),
+            alignment: Some((15000.0, 1000.0, 0.0)),
+            extrusion: (0.0, 0.0, 1.0),
+            thickness: 0.0,
+            oblique_angle: 0.0,
+            height,
+            rotation: 0.0,
+            width_factor,
+            generation: 0,
+            horizontal_alignment: 0,
+            vertical_alignment: 0,
+            style_handle: Some(0x53),
+            tag: Some("TAG".to_string()),
+            flags: 0,
+            lock_position: false,
+            prompt: None,
+        }
+    }
+
+    #[test]
+    fn is_plausible_attrib_entity_rejects_denormal_text_size() {
+        assert!(!is_plausible_attrib_entity(&attrib_entity_with_size(1.0e-12, 1.0)));
+        assert!(!is_plausible_attrib_entity(&attrib_entity_with_size(2.5, 1.0e-12)));
+    }
+
+    #[test]
+    fn is_plausible_attrib_entity_accepts_normal_text_size() {
+        assert!(is_plausible_attrib_entity(&attrib_entity_with_size(2.5, 1.0)));
+    }
 }

@@ -6,7 +6,7 @@ use crate::core::config::ParseConfig;
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
 use crate::io::ByteReader;
-use crate::objects::{Handle, ObjectIndex, ObjectRecord, ObjectRef};
+use crate::objects::{Handle, ObjectClass, ObjectIndex, ObjectRecord, ObjectRef};
 
 const STREAM_BASE_OFFSET: u64 = 0x480;
 const SECOND_HEADER_OFFSET: usize = 0x80;
@@ -30,6 +30,8 @@ const SENTINEL_CLASSES_AFTER: [u8; 16] = [
 
 #[derive(Debug, Clone)]
 struct ClassEntry {
+    class_number: u16,
+    item_class_id: u16,
     dxf_name: String,
 }
 
@@ -203,9 +205,27 @@ pub fn parse_object_record<'a>(
 pub fn load_dynamic_type_map(bytes: &[u8], config: &ParseConfig) -> Result<HashMap<u16, String>> {
     let data = load_named_section_data(bytes, config, "AcDb:Classes")?;
     let classes = parse_classes_section(&data)?;
+    Ok(dynamic_type_map_from_classes(&classes))
+}
+
+pub fn load_dynamic_type_class_map(
+    bytes: &[u8],
+    config: &ParseConfig,
+) -> Result<HashMap<u16, ObjectClass>> {
+    let data = load_named_section_data(bytes, config, "AcDb:Classes")?;
+    let classes = parse_classes_section(&data)?;
+    Ok(dynamic_type_class_map_from_classes(&classes))
+}
+
+fn dynamic_type_map_from_classes(classes: &[ClassEntry]) -> HashMap<u16, String> {
     let mut map = HashMap::with_capacity(classes.len());
+    let has_explicit_codes = classes.iter().any(|entry| entry.class_number >= 500);
     for (idx, class) in classes.iter().enumerate() {
-        let code = 500usize + idx;
+        let code = if has_explicit_codes {
+            class.class_number as usize
+        } else {
+            500usize + idx
+        };
         if code > u16::MAX as usize {
             break;
         }
@@ -213,7 +233,29 @@ pub fn load_dynamic_type_map(bytes: &[u8], config: &ParseConfig) -> Result<HashM
             map.insert(code as u16, class.dxf_name.to_ascii_uppercase());
         }
     }
-    Ok(map)
+    map
+}
+
+fn dynamic_type_class_map_from_classes(classes: &[ClassEntry]) -> HashMap<u16, ObjectClass> {
+    let mut map = HashMap::with_capacity(classes.len());
+    let has_explicit_codes = classes.iter().any(|entry| entry.class_number >= 500);
+    for (idx, class) in classes.iter().enumerate() {
+        let code = if has_explicit_codes {
+            class.class_number as usize
+        } else {
+            500usize + idx
+        };
+        if code > u16::MAX as usize {
+            break;
+        }
+        let class_kind = match class.item_class_id {
+            0x1F2 => ObjectClass::Entity,
+            0x1F3 => ObjectClass::Object,
+            _ => continue,
+        };
+        map.insert(code as u16, class_kind);
+    }
+    map
 }
 
 fn parse_container_metadata(bytes: &[u8]) -> Result<ContainerMetadata> {
@@ -378,14 +420,18 @@ fn parse_classes_section(data: &[u8]) -> Result<Vec<ClassEntry>> {
         let _proxy_flags = reader.read_bs()?;
         let dxf_name = String::new();
         let _was_a_zombie = reader.read_b()?;
-        let _item_class_id = reader.read_bs()?;
+        let item_class_id = reader.read_bs()?;
         let _number_of_objects = reader.read_bl()?;
         let _dwg_version = reader.read_bl()?;
         let _maintenance_version = reader.read_bl()?;
         let _unknown0 = reader.read_bl()?;
         let _unknown1 = reader.read_bl()?;
 
-        classes.push(ClassEntry { dxf_name });
+        classes.push(ClassEntry {
+            class_number,
+            item_class_id,
+            dxf_name,
+        });
 
         if class_number == max_class_number {
             break;
@@ -427,6 +473,8 @@ fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<Object
     let mut reader = ByteReader::new(bytes);
     let mut objects = Vec::new();
 
+    let mut last_handle: i64 = 0;
+    let mut last_offset: i64 = 0;
     loop {
         if reader.remaining() < 2 {
             break;
@@ -451,8 +499,10 @@ fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<Object
         }
 
         let start = reader.tell();
-        let mut last_handle: i64 = 0;
-        let mut last_offset: i64 = 0;
+        if !config.strict {
+            last_handle = 0;
+            last_offset = 0;
+        }
 
         while (reader.tell() - start) < (section_size as u64 - 2) {
             let prev_handle = last_handle;
@@ -1588,4 +1638,29 @@ mod tests {
             .to_string()
             .contains("AcDb:Handles contains negative handle or offset"));
     }
+
+    #[test]
+    fn parse_object_map_handles_keeps_running_deltas_across_blocks() {
+        let bytes = vec![
+            0x00, 0x06, // block 1: 2-byte header + 4-byte payload
+            0x01, 0x0A, // +1, +10
+            0x02, 0x04, // +2, +4
+            0x00, 0x00, // crc
+            0x00, 0x06, // block 2: continue from previous handle/offset
+            0x07, 0x08, // +7, +8
+            0x02, 0x03, // +2, +3
+            0x00, 0x00, // crc
+            0x00, 0x02, // terminator section
+        ];
+        let mut config = ParseConfig::default();
+        config.strict = true;
+        let index = parse_object_map_handles(&bytes, &config).expect("index");
+        let refs: Vec<(u64, u32)> = index
+            .objects
+            .iter()
+            .map(|obj| (obj.handle.0, obj.offset))
+            .collect();
+        assert_eq!(refs, vec![(1, 10), (3, 14), (10, 22), (12, 25)]);
+    }
+
 }

@@ -11,6 +11,7 @@ pub struct ObjectRecord<'a> {
     pub body_bit_pos: u8,
     pub body: Cow<'a, [u8]>,
     pub raw: Cow<'a, [u8]>,
+    codepage: Option<u16>,
 }
 
 impl<'a> ObjectRecord<'a> {
@@ -27,9 +28,14 @@ impl<'a> ObjectRecord<'a> {
     }
 
     pub fn bit_reader(&self) -> BitReader<'_> {
-        let mut reader = BitReader::new(self.body.as_ref());
+        let mut reader = BitReader::new_with_codepage(self.body.as_ref(), self.codepage);
         reader.set_pos(0, self.body_bit_pos);
         reader
+    }
+
+    pub fn with_codepage(mut self, codepage: Option<u16>) -> Self {
+        self.codepage = codepage;
+        self
     }
 }
 
@@ -76,6 +82,7 @@ pub fn parse_object_record<'a>(bytes: &'a [u8], offset: u32) -> Result<ObjectRec
         body_bit_pos,
         body: Cow::Borrowed(body),
         raw: Cow::Borrowed(raw),
+        codepage: None,
     })
 }
 
@@ -88,5 +95,6 @@ pub fn parse_object_record_owned(bytes: &[u8], offset: u32) -> Result<ObjectReco
         body_bit_pos: record.body_bit_pos,
         body: Cow::Owned(record.body.as_ref().to_vec()),
         raw: Cow::Owned(record.raw.as_ref().to_vec()),
+        codepage: record.codepage,
     })
 }

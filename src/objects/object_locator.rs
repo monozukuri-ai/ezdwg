@@ -30,7 +30,19 @@ impl ObjectIndex {
     pub fn from_objects(objects: Vec<ObjectRef>) -> Self {
         let mut by_handle = HashMap::with_capacity(objects.len());
         for (idx, obj) in objects.iter().enumerate() {
-            by_handle.insert(obj.handle, idx);
+            let should_replace = match by_handle.get(&obj.handle).copied() {
+                Some(prev_idx) => {
+                    let prev_offset = objects
+                        .get(prev_idx)
+                        .map(|prev: &ObjectRef| prev.offset)
+                        .unwrap_or(0);
+                    obj.offset > prev_offset
+                }
+                None => true,
+            };
+            if should_replace {
+                by_handle.insert(obj.handle, idx);
+            }
         }
         Self { objects, by_handle }
     }
@@ -68,6 +80,8 @@ fn parse_object_map(bytes: &[u8], _config: &ParseConfig) -> Result<ObjectIndex> 
     let mut reader = ByteReader::new(bytes);
     let mut objects = Vec::new();
 
+    let mut last_handle: i64 = 0;
+    let mut last_offset: i64 = 0;
     loop {
         if reader.remaining() < 2 {
             break;
@@ -91,8 +105,10 @@ fn parse_object_map(bytes: &[u8], _config: &ParseConfig) -> Result<ObjectIndex> 
         }
 
         let start = reader.tell();
-        let mut last_handle: i64 = 0;
-        let mut last_offset: i64 = 0;
+        if !_config.strict {
+            last_handle = 0;
+            last_offset = 0;
+        }
 
         while (reader.tell() - start) < (section_size as u64 - 2) {
             let delta_handle = read_modular_char(&mut reader)?;
@@ -163,4 +179,56 @@ fn read_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
         shift += 7;
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_object_map, ObjectIndex};
+    use crate::core::config::ParseConfig;
+    use crate::objects::{Handle, ObjectRef};
+
+    #[test]
+    fn object_index_prefers_highest_offset_for_duplicate_handles() {
+        let index = ObjectIndex::from_objects(vec![
+            ObjectRef {
+                handle: Handle(237),
+                offset: 527_255,
+            },
+            ObjectRef {
+                handle: Handle(237),
+                offset: 12_157,
+            },
+            ObjectRef {
+                handle: Handle(237),
+                offset: 204_892,
+            },
+        ]);
+
+        let resolved = index.get(Handle(237)).expect("duplicate-handle entry");
+        assert_eq!(resolved.offset, 527_255);
+    }
+
+    #[test]
+    fn parse_multiblock_object_map_keeps_running_deltas() {
+        let bytes = vec![
+            0x00, 0x06, // block 1: 2-byte header + 4-byte payload
+            0x01, 0x0A, // +1, +10
+            0x02, 0x04, // +2, +4
+            0x00, 0x00, // crc
+            0x00, 0x06, // block 2: continue from previous handle/offset
+            0x07, 0x08, // +7, +8
+            0x02, 0x03, // +2, +3
+            0x00, 0x00, // crc
+            0x00, 0x02, // terminator block
+        ];
+        let mut config = ParseConfig::default();
+        config.strict = true;
+        let index = parse_object_map(&bytes, &config).expect("index");
+        let refs: Vec<(u64, u32)> = index
+            .objects
+            .iter()
+            .map(|obj| (obj.handle.0, obj.offset))
+            .collect();
+        assert_eq!(refs, vec![(1, 10), (3, 14), (10, 22), (12, 25)]);
+    }
 }

@@ -6,14 +6,17 @@ use crate::dwg::r2000;
 use crate::dwg::r2004;
 use crate::dwg::r2007;
 use crate::dwg::version::{detect_version, DwgVersion};
-use crate::objects::{ObjectIndex, ObjectRecord};
+use crate::objects::{ObjectClass, ObjectIndex, ObjectRecord};
 use std::collections::HashMap;
 use std::sync::OnceLock;
+
+const FILE_HEADER_CODEPAGE_OFFSET: usize = 0x13;
 
 #[derive(Debug)]
 pub struct Decoder<'a> {
     bytes: &'a [u8],
     version: DwgVersion,
+    codepage: Option<u16>,
     config: ParseConfig,
     objects_section_cache: OnceLock<Vec<u8>>,
 }
@@ -24,6 +27,7 @@ impl<'a> Decoder<'a> {
         Ok(Self {
             bytes,
             version,
+            codepage: detect_codepage(bytes),
             config,
             objects_section_cache: OnceLock::new(),
         })
@@ -31,6 +35,10 @@ impl<'a> Decoder<'a> {
 
     pub fn version(&self) -> &DwgVersion {
         &self.version
+    }
+
+    pub fn codepage(&self) -> Option<u16> {
+        self.codepage
     }
 
     pub fn ensure_supported(&self) -> Result<()> {
@@ -105,14 +113,17 @@ impl<'a> Decoder<'a> {
 
     pub fn parse_object_record(&self, offset: u32) -> Result<ObjectRecord<'a>> {
         match self.version {
-            DwgVersion::R14 | DwgVersion::R2000 => r2000::parse_object_record(self.bytes, offset),
+            DwgVersion::R14 | DwgVersion::R2000 => r2000::parse_object_record(self.bytes, offset)
+                .map(|record| record.with_codepage(self.codepage)),
             DwgVersion::R2004 | DwgVersion::R2010 | DwgVersion::R2013 | DwgVersion::R2018 => {
                 let data = self.load_objects_section_data()?;
                 r2004::parse_object_record_from_section_data(data, offset)
+                    .map(|record| record.with_codepage(self.codepage))
             }
             DwgVersion::R2007 => {
                 let data = self.load_objects_section_data()?;
                 r2007::parse_object_record_from_section_data(data, offset)
+                    .map(|record| record.with_codepage(self.codepage))
             }
             DwgVersion::Unknown(_) => Err(DwgError::new(
                 ErrorKind::Unsupported,
@@ -130,9 +141,32 @@ impl<'a> Decoder<'a> {
                 }
             }
             DwgVersion::R2004 => r2004::load_dynamic_type_map(self.bytes, &self.config),
-            DwgVersion::R2010 => Ok(HashMap::new()),
+            DwgVersion::R2010 => r2004::load_dynamic_type_map_r21(self.bytes, &self.config),
             DwgVersion::R2007 => r2007::load_dynamic_type_map(self.bytes, &self.config),
-            DwgVersion::R2013 | DwgVersion::R2018 => Ok(HashMap::new()),
+            DwgVersion::R2013 | DwgVersion::R2018 => {
+                r2004::load_dynamic_type_map_r21(self.bytes, &self.config)
+            }
+            DwgVersion::Unknown(_) => Err(DwgError::new(
+                ErrorKind::Unsupported,
+                format!("unsupported DWG version: {}", self.version.as_str()),
+            )),
+        }
+    }
+
+    pub fn dynamic_type_class_map(&self) -> Result<HashMap<u16, ObjectClass>> {
+        match self.version {
+            DwgVersion::R14 | DwgVersion::R2000 => {
+                match r2000::load_dynamic_type_class_map(self.bytes, &self.config) {
+                    Ok(map) => Ok(map),
+                    Err(_err) => Ok(HashMap::new()),
+                }
+            }
+            DwgVersion::R2004 => r2004::load_dynamic_type_class_map(self.bytes, &self.config),
+            DwgVersion::R2010 => r2004::load_dynamic_type_class_map_r21(self.bytes, &self.config),
+            DwgVersion::R2007 => r2007::load_dynamic_type_class_map(self.bytes, &self.config),
+            DwgVersion::R2013 | DwgVersion::R2018 => {
+                r2004::load_dynamic_type_class_map_r21(self.bytes, &self.config)
+            }
             DwgVersion::Unknown(_) => Err(DwgError::new(
                 ErrorKind::Unsupported,
                 format!("unsupported DWG version: {}", self.version.as_str()),
@@ -166,4 +200,9 @@ impl<'a> Decoder<'a> {
         })?;
         Ok(data.as_slice())
     }
+}
+
+fn detect_codepage(bytes: &[u8]) -> Option<u16> {
+    let slice = bytes.get(FILE_HEADER_CODEPAGE_OFFSET..FILE_HEADER_CODEPAGE_OFFSET + 2)?;
+    Some(u16::from_le_bytes([slice[0], slice[1]]))
 }

@@ -6,7 +6,7 @@ use crate::core::config::ParseConfig;
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
 use crate::objects;
-use crate::objects::{ObjectIndex, ObjectRecord};
+use crate::objects::{ObjectClass, ObjectIndex, ObjectRecord};
 use crate::{container::SectionDirectory, container::SectionSlice};
 use std::collections::HashMap;
 
@@ -83,9 +83,45 @@ pub fn load_dynamic_type_map(bytes: &[u8], config: &ParseConfig) -> Result<HashM
     Ok(map)
 }
 
+pub fn load_dynamic_type_class_map(
+    bytes: &[u8],
+    config: &ParseConfig,
+) -> Result<HashMap<u16, ObjectClass>> {
+    let directory = parse_section_directory(bytes, config)?;
+    let classes_index = directory
+        .records
+        .iter()
+        .position(|record| record.kind() == SectionKind::Classes)
+        .ok_or_else(|| DwgError::new(ErrorKind::Format, "section not found: AcDb:Classes"))?;
+    let section = load_section_by_index(bytes, &directory, classes_index, config)?;
+    let classes = parse_classes_section_r13_r15(&section.data)?;
+
+    let mut map = HashMap::with_capacity(classes.len());
+    let has_explicit_codes = classes.iter().any(|entry| entry.class_number >= 500);
+    for (idx, class) in classes.iter().enumerate() {
+        let code = if has_explicit_codes {
+            class.class_number as usize
+        } else {
+            500usize + idx
+        };
+        if code > u16::MAX as usize {
+            continue;
+        }
+        let class_kind = match class.item_class_id {
+            0x1F2 => ObjectClass::Entity,
+            0x1F3 => ObjectClass::Object,
+            _ => continue,
+        };
+        map.insert(code as u16, class_kind);
+    }
+
+    Ok(map)
+}
+
 #[derive(Debug, Clone)]
 struct ClassEntry {
     class_number: u16,
+    item_class_id: u16,
     dxf_name: String,
 }
 
@@ -113,9 +149,10 @@ fn parse_classes_section_r13_r15(data: &[u8]) -> Result<Vec<ClassEntry>> {
             let _cpp_name = reader.read_tv()?;
             let dxf_name = reader.read_tv()?;
             let _was_a_zombie = reader.read_b()?;
-            let _item_class_id = reader.read_bs()?;
+            let item_class_id = reader.read_bs()?;
             Ok(ClassEntry {
                 class_number,
+                item_class_id,
                 dxf_name,
             })
         })();

@@ -150,6 +150,20 @@ def test_read_object_records_by_handle_roundtrip() -> None:
     assert all(len(bytes(row[4])) > 0 for row in rows)
 
 
+def test_read_object_records_by_offset_roundtrip() -> None:
+    path = ROOT / "test_dwg/acadsharp/sample_AC1032.dwg"
+    assert path.exists(), f"missing sample: {path}"
+
+    headers = ezdwg.raw.list_object_headers_with_type(str(path), limit=5)
+    offsets = [int(row[1]) for row in headers[:3]]
+    rows = ezdwg.raw.read_object_records_by_offset(str(path), offsets)
+
+    assert [int(row[1]) for row in rows] == offsets
+    assert all(int(row[2]) > 0 for row in rows)
+    assert all(int(row[3]) > 0 for row in rows)
+    assert all(len(bytes(row[4])) > 0 for row in rows)
+
+
 def test_decode_object_handle_stream_refs_smoke() -> None:
     path = ROOT / "test_dwg/acadsharp/sample_AC1032.dwg"
     assert path.exists(), f"missing sample: {path}"

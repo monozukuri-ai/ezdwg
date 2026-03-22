@@ -409,6 +409,16 @@ pub fn object_type_info(code: u16) -> ObjectTypeInfo {
             name: "LAYOUT",
             class: ObjectClass::Object,
         },
+        0x1F2 => ObjectTypeInfo {
+            code,
+            name: "ACAD_PROXY_ENTITY",
+            class: ObjectClass::Entity,
+        },
+        0x1F3 => ObjectTypeInfo {
+            code,
+            name: "ACAD_PROXY_OBJECT",
+            class: ObjectClass::Object,
+        },
         _ => ObjectTypeInfo {
             code,
             name: "UNKNOWN",

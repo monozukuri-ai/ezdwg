@@ -1202,6 +1202,7 @@ class Layout:
             return
 
         if dxftype == "TEXT":
+            seen_text_rows: set[tuple[str, int, int, int]] = set()
             for (
                 handle,
                 text,
@@ -1211,9 +1212,18 @@ class Layout:
                 metrics,
                 align_flags,
                 style_handle,
+                owner_handle,
             ) in raw.decode_text_entities(decode_path):
                 thickness, oblique_angle, height, rotation, width_factor = metrics
                 generation, horizontal_alignment, vertical_alignment = align_flags
+                seen_text_rows.add(
+                    (
+                        str(text),
+                        int(round(insertion[0] * 1000.0)),
+                        int(round(insertion[1] * 1000.0)),
+                        int(round(height * 1000.0)),
+                    )
+                )
                 yield Entity(
                     dxftype="TEXT",
                     handle=handle,
@@ -1233,6 +1243,116 @@ class Layout:
                             "halign": horizontal_alignment,
                             "valign": vertical_alignment,
                             "style_handle": style_handle,
+                            "owner_handle": owner_handle,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="TEXT",
+                    ),
+                )
+            proxy_text_rows = getattr(raw, "decode_proxy_graphic_text_entities", None)
+            if callable(proxy_text_rows):
+                try:
+                    for (
+                        source_handle,
+                        _source_type_code,
+                        chunk_index,
+                        text,
+                        insertion,
+                        text_direction,
+                        height,
+                        width_factor,
+                        oblique_angle,
+                    ) in proxy_text_rows(decode_path):
+                        key = (
+                            str(text),
+                            int(round(insertion[0] * 1000.0)),
+                            int(round(insertion[1] * 1000.0)),
+                            int(round(height * 1000.0)),
+                        )
+                        if key in seen_text_rows:
+                            continue
+                        seen_text_rows.add(key)
+                        yield Entity(
+                            dxftype="TEXT",
+                            handle=_synthetic_embedded_text_handle(
+                                int(source_handle), int(chunk_index), 0x51
+                            ),
+                            dxf=_attach_entity_color(
+                                int(source_handle),
+                                {
+                                    "text": text,
+                                    "insert": insertion,
+                                    "align_point": None,
+                                    "extrusion": (0.0, 0.0, 1.0),
+                                    "thickness": 0.0,
+                                    "oblique": math.degrees(float(oblique_angle)),
+                                    "height": float(height),
+                                    "rotation": math.degrees(
+                                        math.atan2(float(text_direction[1]), float(text_direction[0]))
+                                    ),
+                                    "width": float(width_factor),
+                                    "text_generation_flag": 0,
+                                    "halign": 0,
+                                    "valign": 0,
+                                    "style_handle": None,
+                                    "owner_handle": None,
+                                },
+                                entity_style_map,
+                                layer_color_map,
+                                layer_color_overrides,
+                                dxftype="TEXT",
+                            ),
+                        )
+                except Exception:
+                    pass
+            for row in _unknown_shifted_text_entities(decode_path):
+                handle, text, insertion, height, rotation = row[:5]
+                owner_handle = row[5] if len(row) >= 6 else None
+                source_layer_handle = row[6] if len(row) >= 7 else None
+                inferred_layer_handle = None
+                if source_layer_handle is not None and _is_plausible_nearby_layer_handle(
+                    decode_path,
+                    source_layer_handle,
+                    insertion,
+                ):
+                    inferred_layer_handle = source_layer_handle
+                if inferred_layer_handle is None:
+                    inferred_layer_handle = _infer_nearby_layer_handle(
+                        decode_path,
+                        insertion,
+                    )
+                key = (
+                    str(text),
+                    int(round(insertion[0] * 1000.0)),
+                    int(round(insertion[1] * 1000.0)),
+                    int(round(height * 1000.0)),
+                )
+                if key in seen_text_rows:
+                    continue
+                seen_text_rows.add(key)
+                yield Entity(
+                    dxftype="TEXT",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "text": text,
+                            "insert": insertion,
+                            "align_point": None,
+                            "extrusion": (0.0, 0.0, 1.0),
+                            "thickness": 0.0,
+                            "oblique": 0.0,
+                            "height": height,
+                            "rotation": rotation,
+                            "width": 1.0,
+                            "text_generation_flag": 0,
+                            "halign": 0,
+                            "valign": 0,
+                            "style_handle": None,
+                            "owner_handle": owner_handle,
+                            "layer_handle": inferred_layer_handle,
                         },
                         entity_style_map,
                         layer_color_map,
@@ -1382,6 +1502,7 @@ class Layout:
                 attachment,
                 drawing_dir,
                 background_data,
+                owner_handle,
             ) in raw.decode_mtext_entities(decode_path):
                 (
                     background_flags,
@@ -1413,6 +1534,7 @@ class Layout:
                             "background_color_index": background_color_index,
                             "background_true_color": background_true_color,
                             "background_transparency": background_transparency,
+                            "owner_handle": owner_handle,
                         },
                         entity_style_map,
                         layer_color_map,
@@ -2249,6 +2371,64 @@ def _extract_ascii_preview(raw_bytes: bytes) -> str | None:
     if len(best) > 96:
         return f"{best[:93]}..."
     return best
+
+
+def _synthetic_embedded_text_handle(source_handle: int, index: int, salt: int) -> int:
+    return ((int(source_handle) + 1) << 32) | ((int(salt) & 0xFF) << 24) | (int(index) & 0xFFFFFF)
+
+
+@lru_cache(maxsize=16)
+def _modelspace_block_handles(path: str) -> tuple[int, ...]:
+    block_name_map, _ = _block_and_endblk_name_maps(path)
+    return tuple(
+        sorted(
+            int(handle)
+            for handle, name in block_name_map.items()
+            if isinstance(name, str) and name.strip().upper() in {"*MODEL_SPACE", "*MODEL SPACE", "MODELSPACE"}
+        )
+    )
+
+
+@lru_cache(maxsize=16)
+def _unknown_shifted_text_entities(
+    path: str,
+) -> tuple[
+    tuple[int, str, tuple[float, float, float], float, float, int | None, int | None],
+    ...,
+]:
+    modelspace_owner_handle = next(iter(_modelspace_block_handles(path)), None)
+    try:
+        rows = raw.decode_unknown_embedded_text_entities(
+            path,
+            modelspace_owner_handle=modelspace_owner_handle,
+        )
+    except Exception:
+        return ()
+    layer_handle_by_source: dict[int, int] = {}
+    try:
+        handles = [int(row[0]) for row in rows if isinstance(row, tuple) and len(row) >= 1]
+        for source_handle, layer_handle in raw.decode_object_entity_layer_handles(path, handles):
+            layer_handle_by_source[int(source_handle)] = int(layer_handle)
+    except Exception:
+        layer_handle_by_source = {}
+
+    out = []
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) < 6:
+            continue
+        source_handle = int(row[0])
+        out.append(
+            (
+                source_handle,
+                row[1],
+                row[2],
+                row[3],
+                row[4],
+                row[5],
+                layer_handle_by_source.get(source_handle),
+            )
+        )
+    return tuple(out)
 
 
 def _extract_likely_handle_refs(
@@ -3177,25 +3357,25 @@ def _attach_entity_color(
     layer_color_overrides: dict[int, tuple[int, int | None]] | None = None,
     dxftype: str | None = None,
 ) -> dict:
-    index = None
-    true_color = None
-    layer_handle = None
-    resolved_index = None
-    resolved_true_color = None
+    index = dxf.get("color_index")
+    true_color = dxf.get("true_color")
+    layer_handle = dxf.get("layer_handle")
+    resolved_index = dxf.get("resolved_color_index")
+    resolved_true_color = dxf.get("resolved_true_color")
 
     style = entity_style_map.get(handle)
     if style is not None:
         index, true_color, layer_handle = style
         resolved_index = index
         resolved_true_color = true_color
-        if index in (None, 0, 256, 257) and true_color is None:
-            layer_style = None
-            if layer_color_overrides is not None:
-                layer_style = layer_color_overrides.get(layer_handle)
-            if layer_style is None:
-                layer_style = layer_color_map.get(layer_handle)
-            if layer_style is not None:
-                resolved_index, resolved_true_color = layer_style
+    if index in (None, 0, 256, 257) and true_color is None and layer_handle is not None:
+        layer_style = None
+        if layer_color_overrides is not None:
+            layer_style = layer_color_overrides.get(layer_handle)
+        if layer_style is None:
+            layer_style = layer_color_map.get(layer_handle)
+        if layer_style is not None:
+            resolved_index, resolved_true_color = layer_style
 
     if (
         layer_color_overrides is not None
@@ -3221,6 +3401,142 @@ def _attach_entity_color(
     dxf["resolved_color_index"] = resolved_index
     dxf["resolved_true_color"] = resolved_true_color
     return dxf
+
+
+@lru_cache(maxsize=16)
+def _geometry_layer_hint_rows(
+    path: str,
+) -> tuple[tuple[int, float, float, float, float, int], ...]:
+    entity_style_map = _entity_style_map(path)
+    out: list[tuple[int, float, float, float, float, int]] = []
+
+    def _push(handle: int, min_x: float, max_x: float, min_y: float, max_y: float, weight: int) -> None:
+        style = entity_style_map.get(int(handle))
+        if style is None or style[2] is None:
+            return
+        layer_handle = int(style[2])
+        if not all(math.isfinite(value) for value in (min_x, max_x, min_y, max_y)):
+            return
+        if not _is_reasonable_geometry_hint_extent(min_x, max_x, min_y, max_y):
+            return
+        out.append((layer_handle, min_x, max_x, min_y, max_y, weight))
+
+    line_rows, arc_rows, circle_rows = _line_arc_circle_rows(path)
+    for handle, sx, sy, _sz, ex, ey, _ez in line_rows:
+        _push(int(handle), min(float(sx), float(ex)), max(float(sx), float(ex)), min(float(sy), float(ey)), max(float(sy), float(ey)), 4)
+    for handle, cx, cy, _cz, radius, _start, _end in arc_rows:
+        r = abs(float(radius))
+        _push(int(handle), float(cx) - r, float(cx) + r, float(cy) - r, float(cy) + r, 2)
+    for handle, cx, cy, _cz, radius in circle_rows:
+        r = abs(float(radius))
+        _push(int(handle), float(cx) - r, float(cx) + r, float(cy) - r, float(cy) + r, 2)
+    try:
+        for handle, _flags, points, _bulges, _widths, _const_width in raw.decode_lwpolyline_entities(path):
+            xy = [(float(x), float(y)) for x, y in points]
+            if not xy:
+                continue
+            xs = [point[0] for point in xy]
+            ys = [point[1] for point in xy]
+            _push(int(handle), min(xs), max(xs), min(ys), max(ys), 3)
+    except Exception:
+        pass
+    return tuple(out)
+
+
+def _is_reasonable_geometry_hint_extent(min_x: float, max_x: float, min_y: float, max_y: float) -> bool:
+    values = (float(min_x), float(max_x), float(min_y), float(max_y))
+    max_abs = max(abs(value) for value in values)
+    if max_abs > 1.0e9:
+        return False
+    span_x = abs(float(max_x) - float(min_x))
+    span_y = abs(float(max_y) - float(min_y))
+    return span_x <= 1.0e8 and span_y <= 1.0e8
+
+
+def _infer_nearby_layer_handle(
+    path: str,
+    insertion: tuple[float, float, float] | tuple[float, float],
+) -> int | None:
+    try:
+        x = float(insertion[0])
+        y = float(insertion[1])
+    except Exception:
+        return None
+
+    scores: dict[int, int] = {}
+    for layer_handle, min_x, max_x, min_y, max_y, weight in _geometry_layer_hint_rows(path):
+        dx = 0.0
+        if x < min_x:
+            dx = min_x - x
+        elif x > max_x:
+            dx = x - max_x
+        dy = 0.0
+        if y < min_y:
+            dy = min_y - y
+        elif y > max_y:
+            dy = y - max_y
+        if dx > 1600.0 or dy > 900.0:
+            continue
+        score = int(weight)
+        if dx <= 100.0:
+            score += 6
+        elif dx <= 400.0:
+            score += 3
+        elif dx <= 900.0:
+            score += 1
+        if dy <= 80.0:
+            score += 6
+        elif dy <= 250.0:
+            score += 3
+        elif dy <= 600.0:
+            score += 1
+        scores[layer_handle] = scores.get(layer_handle, 0) + score
+    if not scores:
+        return None
+    return max(scores.items(), key=lambda item: (item[1], -item[0]))[0]
+
+
+def _is_plausible_nearby_layer_handle(
+    path: str,
+    layer_handle: int | None,
+    insertion: tuple[float, float, float] | tuple[float, float],
+) -> bool:
+    if layer_handle is None:
+        return False
+    try:
+        wanted_layer_handle = int(layer_handle)
+        x = float(insertion[0])
+        y = float(insertion[1])
+    except Exception:
+        return False
+
+    best_score = 0
+    for row_layer_handle, min_x, max_x, min_y, max_y, weight in _geometry_layer_hint_rows(path):
+        if row_layer_handle != wanted_layer_handle:
+            continue
+        dx = 0.0
+        if x < min_x:
+            dx = min_x - x
+        elif x > max_x:
+            dx = x - max_x
+        dy = 0.0
+        if y < min_y:
+            dy = min_y - y
+        elif y > max_y:
+            dy = y - max_y
+        if dx > 900.0 or dy > 450.0:
+            continue
+        score = int(weight)
+        if dx <= 120.0:
+            score += 8
+        elif dx <= 360.0:
+            score += 4
+        if dy <= 80.0:
+            score += 8
+        elif dy <= 220.0:
+            score += 4
+        best_score = max(best_score, score)
+    return best_score >= 12
 
 
 def _line_supplementary_handles(
