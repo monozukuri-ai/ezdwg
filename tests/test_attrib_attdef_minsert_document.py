@@ -10,6 +10,7 @@ def _patch_empty_color_maps(monkeypatch) -> None:
     monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
     document_module._entity_style_map.cache_clear()
     document_module._layer_color_map.cache_clear()
+    document_module._insert_owner_handle_map.cache_clear()
 
 
 def test_query_attrib_maps_text_and_attribute_fields(monkeypatch) -> None:
@@ -143,6 +144,11 @@ def test_query_insert_maps_transform_parameters(monkeypatch) -> None:
             )
         ],
     )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_insert_owner_handles",
+        lambda _path: [(0x404, 0x20)],
+    )
 
     doc = document_module.Document(path="dummy_insert.dwg", version="AC1018")
     entities = list(doc.modelspace().query("INSERT"))
@@ -156,6 +162,7 @@ def test_query_insert_maps_transform_parameters(monkeypatch) -> None:
     assert dxf["zscale"] == 1.0
     assert abs(dxf["rotation"] - 30.0) < 1.0e-9
     assert dxf["name"] == "BLOCK_A"
+    assert dxf["owner_handle"] == 0x20
 
 
 def test_query_insert_and_minsert_uses_combined_decoder(monkeypatch) -> None:

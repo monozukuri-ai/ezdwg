@@ -5,7 +5,7 @@ import math
 import re
 from functools import lru_cache
 from dataclasses import dataclass
-from typing import Iterable, Iterator
+from typing import Any, Iterable, Iterator
 
 from . import raw
 from .entity import Entity
@@ -246,18 +246,20 @@ class Layout:
                 line_rows = bulk_rows[0]
             else:
                 line_rows = list(raw.decode_line_entities(decode_path))
+            line_owner_handles = _line_owner_handle_map(decode_path)
             line_supplementary_handles = _line_supplementary_handles(
                 line_rows, entity_style_map, layer_color_overrides
             )
             for handle, sx, sy, sz, ex, ey, ez in line_rows:
                 dxf = _attach_entity_color(
                     handle,
-                    {
-                        "start": (sx, sy, sz),
-                        "end": (ex, ey, ez),
-                    },
-                    entity_style_map,
-                    layer_color_map,
+                        {
+                            "start": (sx, sy, sz),
+                            "end": (ex, ey, ez),
+                            "owner_handle": line_owner_handles.get(int(handle)),
+                        },
+                        entity_style_map,
+                        layer_color_map,
                     layer_color_overrides,
                     dxftype="LINE",
                 )
@@ -272,6 +274,7 @@ class Layout:
             return
 
         if dxftype == "ARC":
+            arc_owner_handles = _arc_owner_handle_map(decode_path)
             arc_rows = bulk_rows[1] if bulk_rows is not None else raw.decode_arc_entities(decode_path)
             for handle, cx, cy, cz, radius, start_angle, end_angle in arc_rows:
                 start_deg = math.degrees(start_angle)
@@ -286,6 +289,7 @@ class Layout:
                             "radius": radius,
                             "start_angle": start_deg,
                             "end_angle": end_deg,
+                            "owner_handle": arc_owner_handles.get(int(handle)),
                         },
                         entity_style_map,
                         layer_color_map,
@@ -296,6 +300,7 @@ class Layout:
             return
 
         if dxftype == "LWPOLYLINE":
+            lwpolyline_owner_handles = _lwpolyline_owner_handle_map(decode_path)
             for (
                 handle,
                 flags,
@@ -330,6 +335,7 @@ class Layout:
                             "bulges": bulges_list,
                             "widths": widths_list,
                             "const_width": const_width,
+                            "owner_handle": lwpolyline_owner_handles.get(int(handle)),
                         },
                         entity_style_map,
                         layer_color_map,
@@ -1079,6 +1085,7 @@ class Layout:
             return
 
         if dxftype == "POINT":
+            point_owner_handles = _point_owner_handle_map(decode_path)
             for handle, x, y, z, angle in raw.decode_point_entities(decode_path):
                 yield Entity(
                     dxftype="POINT",
@@ -1088,6 +1095,7 @@ class Layout:
                         {
                             "location": (x, y, z),
                             "x_axis_angle": angle,
+                            "owner_handle": point_owner_handles.get(int(handle)),
                         },
                         entity_style_map,
                         layer_color_map,
@@ -1098,6 +1106,7 @@ class Layout:
             return
 
         if dxftype == "CIRCLE":
+            circle_owner_handles = _circle_owner_handle_map(decode_path)
             if bulk_rows is not None:
                 circle_rows = bulk_rows[2]
             else:
@@ -1111,6 +1120,7 @@ class Layout:
                     {
                         "center": (cx, cy, cz),
                         "radius": radius,
+                        "owner_handle": circle_owner_handles.get(int(handle)),
                     },
                     entity_style_map,
                     layer_color_map,
@@ -1311,6 +1321,10 @@ class Layout:
                 handle, text, insertion, height, rotation = row[:5]
                 owner_handle = row[5] if len(row) >= 6 else None
                 source_layer_handle = row[6] if len(row) >= 7 else None
+                dxftype_hint = row[7] if len(row) >= 8 else None
+                recovery_mode = row[8] if len(row) >= 9 else None
+                if dxftype_hint == "MTEXT":
+                    continue
                 inferred_layer_handle = None
                 if source_layer_handle is not None and _is_plausible_nearby_layer_handle(
                     decode_path,
@@ -1318,6 +1332,12 @@ class Layout:
                     insertion,
                 ):
                     inferred_layer_handle = source_layer_handle
+                if inferred_layer_handle is None:
+                    inferred_layer_handle = _infer_adjacent_recovered_text_layer_handle(
+                        decode_path,
+                        source_layer_handle,
+                        recovery_mode,
+                    )
                 if inferred_layer_handle is None:
                     inferred_layer_handle = _infer_nearby_layer_handle(
                         decode_path,
@@ -1491,6 +1511,7 @@ class Layout:
             return
 
         if dxftype == "MTEXT":
+            seen_mtext_rows: set[tuple[str, int, int, int]] = set()
             for (
                 handle,
                 text,
@@ -1513,6 +1534,14 @@ class Layout:
                 ) = background_data
                 rotation = math.degrees(math.atan2(x_axis_dir[1], x_axis_dir[0]))
                 plain_text = _decode_mtext_plain_text(text)
+                seen_mtext_rows.add(
+                    (
+                        str(plain_text),
+                        int(round(insertion[0] * 1000.0)),
+                        int(round(insertion[1] * 1000.0)),
+                        int(round(text_height * 1000.0)),
+                    )
+                )
                 yield Entity(
                     dxftype="MTEXT",
                     handle=handle,
@@ -1535,6 +1564,66 @@ class Layout:
                             "background_true_color": background_true_color,
                             "background_transparency": background_transparency,
                             "owner_handle": owner_handle,
+                        },
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype="MTEXT",
+                    ),
+                )
+            for row in _unknown_shifted_text_entities(decode_path):
+                handle, text, insertion, height, rotation = row[:5]
+                owner_handle = row[5] if len(row) >= 6 else None
+                source_layer_handle = row[6] if len(row) >= 7 else None
+                dxftype_hint = row[7] if len(row) >= 8 else None
+                recovery_mode = row[8] if len(row) >= 9 else None
+                if dxftype_hint != "MTEXT":
+                    continue
+                inferred_layer_handle = None
+                if source_layer_handle is not None and _is_plausible_nearby_layer_handle(
+                    decode_path,
+                    source_layer_handle,
+                    insertion,
+                ):
+                    inferred_layer_handle = source_layer_handle
+                if inferred_layer_handle is None:
+                    inferred_layer_handle = _infer_nearby_layer_handle(
+                        decode_path,
+                        insertion,
+                    )
+                key = (
+                    str(text),
+                    int(round(insertion[0] * 1000.0)),
+                    int(round(insertion[1] * 1000.0)),
+                    int(round(height * 1000.0)),
+                )
+                if key in seen_mtext_rows:
+                    continue
+                seen_mtext_rows.add(key)
+                angle = math.radians(rotation)
+                yield Entity(
+                    dxftype="MTEXT",
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        {
+                            "text": text,
+                            "raw_text": text,
+                            "insert": insertion,
+                            "extrusion": (0.0, 0.0, 1.0),
+                            "text_direction": (math.cos(angle), math.sin(angle), 0.0),
+                            "rotation": rotation,
+                            "rect_width": 0.0,
+                            "char_height": height,
+                            "attachment_point": 1,
+                            "drawing_direction": 1,
+                            "background_flags": 0,
+                            "background_scale_factor": 0.0,
+                            "background_color_index": None,
+                            "background_true_color": None,
+                            "background_transparency": None,
+                            "owner_handle": owner_handle,
+                            "layer_handle": inferred_layer_handle,
                         },
                         entity_style_map,
                         layer_color_map,
@@ -1813,6 +1902,7 @@ class Layout:
             return
 
         if dxftype == "INSERT":
+            owner_handle_map = _insert_owner_handle_map(decode_path)
             rows = (
                 insert_minsert_rows[0]
                 if insert_minsert_rows is not None
@@ -1822,8 +1912,16 @@ class Layout:
                 if len(row) == 8:
                     handle, px, py, pz, sx, sy, sz, rotation = row
                     name = None
+                    owner_handle = owner_handle_map.get(int(handle))
                 else:
-                    handle, px, py, pz, sx, sy, sz, rotation, name = row
+                    handle, px, py, pz, sx, sy, sz, rotation, name, *rest = row
+                    owner_handle = owner_handle_map.get(int(handle))
+                    if rest:
+                        raw_owner_handle = rest[0]
+                        try:
+                            owner_handle = int(raw_owner_handle) if raw_owner_handle is not None else None
+                        except Exception:
+                            owner_handle = owner_handle_map.get(int(handle))
                 dxf = {
                     "insert": (px, py, pz),
                     "xscale": sx,
@@ -1833,6 +1931,8 @@ class Layout:
                 }
                 if isinstance(name, str) and name:
                     dxf["name"] = name
+                if owner_handle is not None:
+                    dxf["owner_handle"] = owner_handle
                 yield Entity(
                     dxftype="INSERT",
                     handle=handle,
@@ -2378,6 +2478,71 @@ def _synthetic_embedded_text_handle(source_handle: int, index: int, salt: int) -
 
 
 @lru_cache(maxsize=16)
+def _layer_names_by_handle(path: str) -> dict[int, str]:
+    try:
+        return {
+            int(handle): str(name)
+            for handle, name in raw.decode_layer_names(path)
+            if isinstance(handle, int) and isinstance(name, str)
+        }
+    except Exception:
+        return {}
+
+
+def _is_plausible_layer_name_for_recovered_text(name: str | None) -> bool:
+    if not isinstance(name, str):
+        return False
+    value = name.strip()
+    if not value:
+        return False
+    invalid = set('<>/\\":;?*|=')
+    return not any(ch in invalid or ord(ch) < 32 for ch in value)
+
+
+def _infer_adjacent_recovered_text_layer_handle(
+    path: str,
+    source_layer_handle: int | None,
+    recovery_mode: str | None,
+) -> int | None:
+    if source_layer_handle is None or recovery_mode not in {
+        "marker",
+        "direct_attdef",
+        "direct_custom_text",
+        "short_direct_custom_text",
+    }:
+        return None
+    layer_names = _layer_names_by_handle(path)
+    source_name = layer_names.get(int(source_layer_handle))
+    if _is_plausible_layer_name_for_recovered_text(source_name):
+        return None
+
+    prefer_text = recovery_mode == "marker"
+    by_name = {name: handle for handle, name in layer_names.items()}
+    best: tuple[int, int, int] | None = None
+    for text_handle, text_name in layer_names.items():
+        normalized = text_name.strip()
+        if not _is_plausible_layer_name_for_recovered_text(normalized):
+            continue
+        if not normalized.upper().endswith("_TEXT"):
+            continue
+        base_name = normalized[:-5]
+        base_handle = by_name.get(base_name)
+        if base_handle is None:
+            continue
+        if not _is_plausible_layer_name_for_recovered_text(layer_names.get(base_handle)):
+            continue
+        if max(abs(text_handle - int(source_layer_handle)), abs(base_handle - int(source_layer_handle))) > 8:
+            continue
+        score = abs(base_handle - int(source_layer_handle)) + abs(text_handle - int(source_layer_handle))
+        candidate = (score, min(base_handle, text_handle), text_handle if prefer_text else base_handle)
+        if best is None or candidate < best:
+            best = candidate
+    if best is None:
+        return None
+    return best[2]
+
+
+@lru_cache(maxsize=16)
 def _modelspace_block_handles(path: str) -> tuple[int, ...]:
     block_name_map, _ = _block_and_endblk_name_maps(path)
     return tuple(
@@ -2393,7 +2558,7 @@ def _modelspace_block_handles(path: str) -> tuple[int, ...]:
 def _unknown_shifted_text_entities(
     path: str,
 ) -> tuple[
-    tuple[int, str, tuple[float, float, float], float, float, int | None, int | None],
+    tuple[int, str, tuple[float, float, float], float, float, int | None, int | None, str | None, str | None],
     ...,
 ]:
     modelspace_owner_handle = next(iter(_modelspace_block_handles(path)), None)
@@ -2426,6 +2591,8 @@ def _unknown_shifted_text_entities(
                 row[4],
                 row[5],
                 layer_handle_by_source.get(source_handle),
+                row[6] if len(row) >= 7 else None,
+                row[7] if len(row) >= 8 else None,
             )
         )
     return tuple(out)
@@ -3275,6 +3442,66 @@ def _insert_minsert_rows(
         except Exception:
             pass
     return list(raw.decode_insert_entities(path)), list(raw.decode_minsert_entities(path))
+
+
+@lru_cache(maxsize=16)
+def _insert_owner_handle_map(path: str) -> dict[int, int | None]:
+    decode_owner_handles = getattr(raw, "decode_insert_owner_handles", None)
+    return _decode_owner_handle_map(path, decode_owner_handles)
+
+
+def _decode_owner_handle_map(
+    path: str,
+    decode_owner_handles: Any,
+) -> dict[int, int | None]:
+    if not callable(decode_owner_handles):
+        return {}
+    try:
+        rows = decode_owner_handles(path)
+    except Exception:
+        return {}
+    result: dict[int, int | None] = {}
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) < 2:
+            continue
+        raw_handle, raw_owner_handle = row[0], row[1]
+        try:
+            handle = int(raw_handle)
+        except Exception:
+            continue
+        owner_handle = None
+        if raw_owner_handle is not None:
+            try:
+                owner_handle = int(raw_owner_handle)
+            except Exception:
+                owner_handle = None
+        result[handle] = owner_handle
+    return result
+
+
+@lru_cache(maxsize=16)
+def _line_owner_handle_map(path: str) -> dict[int, int | None]:
+    return _decode_owner_handle_map(path, getattr(raw, "decode_line_owner_handles", None))
+
+
+@lru_cache(maxsize=16)
+def _arc_owner_handle_map(path: str) -> dict[int, int | None]:
+    return _decode_owner_handle_map(path, getattr(raw, "decode_arc_owner_handles", None))
+
+
+@lru_cache(maxsize=16)
+def _circle_owner_handle_map(path: str) -> dict[int, int | None]:
+    return _decode_owner_handle_map(path, getattr(raw, "decode_circle_owner_handles", None))
+
+
+@lru_cache(maxsize=16)
+def _point_owner_handle_map(path: str) -> dict[int, int | None]:
+    return _decode_owner_handle_map(path, getattr(raw, "decode_point_owner_handles", None))
+
+
+@lru_cache(maxsize=16)
+def _lwpolyline_owner_handle_map(path: str) -> dict[int, int | None]:
+    return _decode_owner_handle_map(path, getattr(raw, "decode_lwpolyline_owner_handles", None))
 
 
 @lru_cache(maxsize=16)

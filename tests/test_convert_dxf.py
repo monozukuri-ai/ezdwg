@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 import math
 from typing import Any
@@ -2448,6 +2449,109 @@ def test_maybe_prefer_modelspace_filtered_entities_for_open30_layout(monkeypatch
     assert resolved is filtered
 
 
+def test_maybe_prefer_modelspace_filtered_entities_restores_open30_markers(
+    monkeypatch,
+) -> None:
+    layout = type(
+        "_Layout",
+        (),
+        {
+            "doc": type("_Doc", (), {"decode_path": "dummy.dwg"})(),
+        },
+    )()
+    entities = [
+        Entity(
+            dxftype="INSERT",
+            handle=1,
+            dxf={
+                "name": "*Model_Space",
+                "insert": (33000.0, 11127.0, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+                "rotation": 90.0,
+            },
+        ),
+        Entity(
+            dxftype="INSERT",
+            handle=2,
+            dxf={
+                "name": "_Open30",
+                "insert": (5872.0, 11427.0, 0.0),
+                "xscale": -60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+                "rotation": 69.6,
+            },
+        ),
+        Entity(
+            dxftype="INSERT",
+            handle=3,
+            dxf={
+                "name": "_Open30",
+                "insert": (13369.0, 11527.0, 0.0),
+                "xscale": -60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+                "rotation": 69.6,
+            },
+        ),
+        Entity(
+            dxftype="INSERT",
+            handle=4,
+            dxf={
+                "name": "_Open30",
+                "insert": (20526.0, 11427.0, 0.0),
+                "xscale": -60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+                "rotation": 69.6,
+            },
+        ),
+    ]
+    entities.extend(
+        Entity(
+            dxftype="LINE",
+            handle=1000 + i,
+            dxf={"start": (float(i), 0.0, 0.0), "end": (float(i), 1.0, 0.0)},
+        )
+        for i in range(100)
+    )
+    entities.extend(
+        Entity(dxftype="POINT", handle=2000 + i, dxf={"location": (float(i), 0.0, 0.0)})
+        for i in range(80)
+    )
+    entities.extend(
+        Entity(dxftype="MTEXT", handle=3000 + i, dxf={"insert": (float(i), 0.0, 0.0), "text": "T"})
+        for i in range(40)
+    )
+
+    filtered = [
+        entities[0],
+    ]
+    filtered.extend(entities[4:84])
+    filtered.append(Entity(dxftype="POINT", handle=9001, dxf={"location": (0.0, 0.0, 0.0)}))
+    filtered.append(
+        Entity(dxftype="MTEXT", handle=9002, dxf={"insert": (0.0, 0.0, 0.0), "text": "T"})
+    )
+
+    monkeypatch.setattr(
+        convert_module,
+        "_filter_modelspace_entities",
+        lambda *_args, **_kwargs: filtered,
+    )
+
+    resolved = convert_module._maybe_prefer_modelspace_filtered_entities(layout, entities)
+
+    insert_names = [
+        convert_module._normalize_block_name(entity.dxf.get("name"))
+        for entity in resolved
+        if entity.dxftype == "INSERT"
+    ]
+    assert insert_names.count("_Open30") == 3
+    assert insert_names.count("*Model_Space") == 1
+
+
 def test_maybe_prefer_modelspace_filtered_entities_keeps_full_set_when_lines_drop_too_much(
     monkeypatch,
 ) -> None:
@@ -2511,6 +2615,164 @@ def test_maybe_prefer_modelspace_filtered_entities_keeps_full_set_when_lines_dro
     )
 
     resolved = convert_module._maybe_prefer_modelspace_filtered_entities(layout, entities)
+    assert resolved is entities
+
+
+def test_maybe_prefer_modelspace_filtered_entities_keeps_full_set_when_core_retention_is_too_low(
+    monkeypatch,
+) -> None:
+    layout = type(
+        "_Layout",
+        (),
+        {
+            "doc": type("_Doc", (), {"decode_path": "dummy.dwg"})(),
+        },
+    )()
+    entities = [
+        Entity(
+            dxftype="INSERT",
+            handle=100 + i,
+            dxf={
+                "name": "BLK",
+                "insert": (float(i), 0.0, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+            },
+        )
+        for i in range(600)
+    ]
+    entities.extend(
+        Entity(
+            dxftype="LINE",
+            handle=1000 + i,
+            dxf={"start": (float(i), 0.0, 0.0), "end": (float(i), 1.0, 0.0)},
+        )
+        for i in range(200)
+    )
+    entities.extend(
+        Entity(dxftype="POINT", handle=3000 + i, dxf={"location": (float(i), 0.0, 0.0)})
+        for i in range(200)
+    )
+    entities.extend(
+        Entity(dxftype="MTEXT", handle=4000 + i, dxf={"insert": (float(i), 0.0, 0.0), "text": "T"})
+        for i in range(200)
+    )
+    filtered = [
+        Entity(
+            dxftype="INSERT",
+            handle=100 + i,
+            dxf={
+                "name": "BLK",
+                "insert": (float(i), 0.0, 0.0),
+                "xscale": 60.0,
+                "yscale": 60.0,
+                "zscale": 60.0,
+            },
+        )
+        for i in range(20)
+    ]
+    filtered.extend(
+        Entity(
+            dxftype="LINE",
+            handle=9000 + i,
+            dxf={"start": (float(i), 0.0, 0.0), "end": (float(i), 1.0, 0.0)},
+        )
+        for i in range(10)
+    )
+    filtered.append(Entity(dxftype="POINT", handle=9500, dxf={"location": (0.0, 0.0, 0.0)}))
+    filtered.append(
+        Entity(dxftype="MTEXT", handle=9501, dxf={"insert": (0.0, 0.0, 0.0), "text": "T"})
+    )
+
+    monkeypatch.setattr(
+        convert_module,
+        "_filter_modelspace_entities",
+        lambda *_args, **_kwargs: filtered,
+    )
+
+    resolved = convert_module._maybe_prefer_modelspace_filtered_entities(layout, entities)
+    assert resolved is entities
+
+
+def test_drop_small_local_non_modelspace_geometry_drops_dense_local_cluster(
+    monkeypatch,
+) -> None:
+    entities = [
+        Entity(
+            dxftype="LINE",
+            handle=10,
+            dxf={"start": (0.0, 0.0, 0.0), "end": (5.0, 0.0, 0.0)},
+        ),
+        Entity(
+            dxftype="LINE",
+            handle=9000,
+            dxf={"start": (5000.0, 0.0, 0.0), "end": (5010.0, 0.0, 0.0)},
+        ),
+    ]
+    for index in range(40):
+        entities.append(
+            Entity(
+                dxftype="ARC",
+                handle=1000 + index,
+                dxf={"center": (float(index) * 5.0, 10.0, 0.0), "radius": 2.0},
+            )
+        )
+    for index in range(8):
+        entities.append(
+            Entity(
+                dxftype="LWPOLYLINE",
+                handle=2000 + index,
+                dxf={"points": [(float(index), 0.0, 0.0), (float(index), 4.0, 0.0)]},
+            )
+        )
+
+    monkeypatch.setattr(
+        convert_module,
+        "_resolve_modelspace_entity_handles",
+        lambda *_args, **_kwargs: ({10}, {32}),
+    )
+
+    resolved = convert_module._drop_small_local_non_modelspace_geometry(
+        "dummy.dwg",
+        entities,
+    )
+    handles = {int(entity.handle) for entity in resolved}
+    assert 10 in handles
+    assert 9000 in handles
+    assert 1000 not in handles
+    assert 2000 not in handles
+
+
+def test_drop_small_local_non_modelspace_geometry_keeps_sparse_local_entities(
+    monkeypatch,
+) -> None:
+    entities = [
+        Entity(
+            dxftype="LINE",
+            handle=10,
+            dxf={"start": (0.0, 0.0, 0.0), "end": (5.0, 0.0, 0.0)},
+        )
+    ]
+    for index in range(12):
+        entities.append(
+            Entity(
+                dxftype="ARC",
+                handle=1000 + index,
+                dxf={"center": (float(index) * 5.0, 10.0, 0.0), "radius": 2.0},
+            )
+        )
+
+    monkeypatch.setattr(
+        convert_module,
+        "_resolve_modelspace_entity_handles",
+        lambda *_args, **_kwargs: ({10}, {32}),
+    )
+
+    resolved = convert_module._drop_small_local_non_modelspace_geometry(
+        "dummy.dwg",
+        entities,
+    )
     assert resolved is entities
 
 
@@ -3118,6 +3380,250 @@ def test_filter_modelspace_entities_keeps_entities_owned_by_modelspace_block(
     assert [int(entity.handle) for entity in filtered] == [21, 30]
 
 
+def test_filter_modelspace_entities_skips_nested_blocks_inside_modelspace(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        convert_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [
+            (20, 200, 0, 0x04, "BLOCK", "Entity"),
+            (21, 210, 0, 0x13, "LINE", "Entity"),
+            (30, 300, 0, 0x04, "BLOCK", "Entity"),
+            (31, 310, 0, 0x13, "LINE", "Entity"),
+            (32, 320, 0, 0x05, "ENDBLK", "Entity"),
+            (22, 330, 0, 0x13, "LINE", "Entity"),
+            (23, 340, 0, 0x05, "ENDBLK", "Entity"),
+        ],
+    )
+    monkeypatch.setattr(
+        convert_module.raw,
+        "decode_block_header_names",
+        lambda _path, _limit=None: [
+            (20, "*Model_Space"),
+            (30, "NESTED"),
+        ],
+    )
+
+    selected = [
+        Entity(dxftype="LINE", handle=21, dxf={}),
+        Entity(dxftype="LINE", handle=31, dxf={}),
+        Entity(dxftype="LINE", handle=22, dxf={}),
+    ]
+
+    filtered = convert_module._filter_modelspace_entities("dummy_modelspace_filter.dwg", selected)
+
+    assert [int(entity.handle) for entity in filtered] == [21, 22]
+
+
+def test_filter_modelspace_entities_prefers_explicit_owner_over_handle_range(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        convert_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [
+            (20, 200, 0, 0x04, "BLOCK", "Entity"),
+            (21, 210, 0, 0x13, "LINE", "Entity"),
+            (22, 220, 0, 0x05, "ENDBLK", "Entity"),
+        ],
+    )
+    monkeypatch.setattr(
+        convert_module.raw,
+        "decode_block_header_names",
+        lambda _path, _limit=None: [
+            (20, "*Model_Space"),
+        ],
+    )
+
+    selected = [
+        Entity(dxftype="LINE", handle=30, dxf={"owner_handle": 20}),
+        Entity(dxftype="LINE", handle=21, dxf={"owner_handle": 999}),
+    ]
+
+    filtered = convert_module._filter_modelspace_entities("dummy_modelspace_filter.dwg", selected)
+
+    assert [int(entity.handle) for entity in filtered] == [30]
+
+
+def test_maybe_filter_modelspace_block_references_keeps_non_block_geometry(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        convert_module,
+        "_resolve_modelspace_entity_handles",
+        lambda _path, decode_cache=None: ({21}, {20}),
+    )
+
+    entities = [Entity(dxftype="LINE", handle=100, dxf={})]
+    entities.extend(
+        Entity(dxftype="INSERT", handle=200 + index, dxf={"name": "BLK", "owner_handle": 20})
+        for index in range(8)
+    )
+    entities.extend(
+        Entity(dxftype="INSERT", handle=300 + index, dxf={"name": "BLK", "owner_handle": 10})
+        for index in range(32)
+    )
+
+    filtered = convert_module._maybe_filter_modelspace_block_references(
+        "dummy_modelspace_filter.dwg",
+        entities,
+    )
+
+    assert [entity.dxftype for entity in filtered].count("LINE") == 1
+    assert [entity.dxftype for entity in filtered].count("INSERT") == 8
+    assert all(int(entity.handle) < 300 for entity in filtered if entity.dxftype == "INSERT")
+
+
+def test_drop_pathological_modelspace_block_references_removes_heavy_repeated_blocks() -> None:
+    pytest.importorskip("ezdxf")
+
+    ezdxf = convert_module._require_ezdxf()
+    doc = ezdxf.new(dxfversion="R2010")
+    msp = doc.modelspace()
+
+    keep = doc.blocks.new(name="KEEP")
+    keep.add_line((0.0, 0.0), (1.0, 0.0))
+
+    dim_block = doc.blocks.new(name="*D900")
+    dim_block.add_line((0.0, 0.0), (1.0, 0.0))
+
+    heavy = doc.blocks.new(name="HEAVY_REPEAT")
+    for index in range(2100):
+        x = 5000.0 + float(index)
+        heavy.add_line((x, 0.0), (x, 10.0))
+    for index in range(40):
+        heavy.add_blockref("*D900", (0.0, 0.0, 0.0))
+
+    for index in range(140):
+        ref = msp.add_blockref("HEAVY_REPEAT", (float(index) * 100.0, 0.0, 0.0))
+        ref.dxf.xscale = 60.0
+        ref.dxf.yscale = 60.0
+        ref.dxf.zscale = 60.0
+
+    msp.add_blockref("KEEP", (0.0, 0.0, 0.0))
+
+    convert_module._drop_pathological_modelspace_block_references(msp)
+
+    insert_names = [entity.dxf.name for entity in msp.query("INSERT")]
+    assert insert_names == ["KEEP"]
+    assert "HEAVY_REPEAT" not in doc.blocks
+    assert "*D900" not in doc.blocks
+    assert "KEEP" in doc.blocks
+
+
+def test_drop_unresolved_block_references_removes_missing_nested_inserts() -> None:
+    pytest.importorskip("ezdxf")
+
+    ezdxf = convert_module._require_ezdxf()
+    doc = ezdxf.new(dxfversion="R2010")
+    msp = doc.modelspace()
+
+    host = doc.blocks.new(name="HOST")
+    host.add_blockref("MISSING_CHILD", (0.0, 0.0, 0.0))
+    host.add_line((0.0, 0.0), (1.0, 0.0))
+
+    msp.add_blockref("HOST", (0.0, 0.0, 0.0))
+
+    convert_module._drop_unresolved_block_references(doc)
+
+    host_entities = list(doc.blocks.get("HOST"))
+    assert len([entity for entity in host_entities if entity.dxftype() == "INSERT"]) == 0
+    assert len([entity for entity in host_entities if entity.dxftype() == "LINE"]) == 1
+
+
+def test_prune_implausible_entities_from_repeated_large_blocks() -> None:
+    pytest.importorskip("ezdxf")
+
+    ezdxf = convert_module._require_ezdxf()
+    doc = ezdxf.new(dxfversion="R2010")
+    msp = doc.modelspace()
+
+    heavy = doc.blocks.new(name="HEAVY_REPEAT")
+    for index in range(2100):
+        x = 5000.0 + float(index)
+        heavy.add_line((x, 0.0), (x, 10.0))
+    heavy.add_lwpolyline([(0.0, 0.0), (50000.0, 20000.0)])
+    heavy.add_arc((1.0, 0.0), 1.0e-9, 0.0, 0.0)
+    heavy.add_ray((1.0, 1.0), (1.0, 0.0))
+    heavy.add_3dface(
+        [
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+        ]
+    )
+
+    for index in range(20):
+        ref = msp.add_blockref("HEAVY_REPEAT", (float(index) * 100.0, 0.0, 0.0))
+        ref.dxf.xscale = 60.0
+        ref.dxf.yscale = 60.0
+        ref.dxf.zscale = 60.0
+
+    convert_module._prune_implausible_entities_from_repeated_large_blocks(msp)
+
+    block = doc.blocks.get("HEAVY_REPEAT")
+    type_counts = Counter(entity.dxftype() for entity in block)
+    assert type_counts.get("LINE", 0) == 2100
+    assert type_counts.get("LWPOLYLINE", 0) == 0
+    assert type_counts.get("ARC", 0) == 0
+    assert type_counts.get("RAY", 0) == 0
+    assert type_counts.get("3DFACE", 0) == 0
+
+
+def test_drop_implausible_modelspace_primitives_removes_tiny_origin_geometry() -> None:
+    pytest.importorskip("ezdxf")
+
+    ezdxf = convert_module._require_ezdxf()
+    doc = ezdxf.new(dxfversion="R2010")
+    msp = doc.modelspace()
+    msp.add_line((100.0, 0.0), (110.0, 0.0))
+    msp.add_lwpolyline([(0.0, 0.0), (50000.0, 20000.0)])
+    msp.add_lwpolyline([(0.0, 0.0), (0.0, 100.0), (100.0, 100.0), (100.0, 0.0)])
+    msp.add_arc((1.0, 0.0), 1.0e-9, 0.0, 0.0)
+    msp.add_ray((1.0, 1.0), (1.0, 0.0))
+    msp.add_3dface(
+        [
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+        ]
+    )
+
+    convert_module._drop_implausible_modelspace_primitives(msp)
+
+    type_counts = Counter(entity.dxftype() for entity in msp)
+    assert type_counts.get("LINE", 0) == 1
+    assert type_counts.get("LWPOLYLINE", 0) == 1
+    assert type_counts.get("ARC", 0) == 0
+    assert type_counts.get("RAY", 0) == 0
+    assert type_counts.get("3DFACE", 0) == 0
+
+
+def test_drop_small_local_origin_geometry_cluster_removes_dense_origin_cluster() -> None:
+    pytest.importorskip("ezdxf")
+
+    ezdxf = convert_module._require_ezdxf()
+    doc = ezdxf.new(dxfversion="R2010")
+    msp = doc.modelspace()
+    msp.add_line((20000.0, 0.0), (20010.0, 0.0))
+
+    for index in range(40):
+        center_x = float(index) * 5.0
+        msp.add_arc((center_x, 10.0), 2.0, 0.0, 90.0)
+    for index in range(8):
+        msp.add_lwpolyline([(float(index), 0.0), (float(index), 4.0)])
+
+    convert_module._drop_small_local_origin_geometry_cluster(msp)
+
+    type_counts = Counter(entity.dxftype() for entity in msp)
+    assert type_counts.get("LINE", 0) == 1
+    assert type_counts.get("ARC", 0) == 0
+    assert type_counts.get("LWPOLYLINE", 0) == 0
+
+
 def test_resolve_block_name_by_handle_prefers_exact_mapping(monkeypatch) -> None:
     header_rows = [
         (100, 10, 0, 0x04, "BLOCK", "Entity"),
@@ -3140,6 +3646,36 @@ def test_resolve_block_name_by_handle_prefers_exact_mapping(monkeypatch) -> None
     resolved = convert_module._resolve_block_name_by_handle("dummy.dwg", header_rows)
     assert resolved[100] == "BLK_A"
     assert resolved[200] == "BLK_B"
+
+
+def test_resolve_block_name_by_handle_preserves_layout_pseudo_header_names(
+    monkeypatch,
+) -> None:
+    header_rows = [
+        (28, 10, 0, 0x04, "BLOCK", "Entity"),
+        (32, 11, 0, 0x04, "BLOCK", "Entity"),
+        (100, 12, 0, 0x04, "BLOCK", "Entity"),
+    ]
+
+    monkeypatch.setattr(
+        convert_module,
+        "_resolve_block_name_by_handle_exact",
+        lambda _path: {28: "*D2052", 32: "*D2135", 100: "BLK_A"},
+    )
+    monkeypatch.setattr(
+        convert_module.raw,
+        "decode_block_header_names",
+        lambda _path, _limit=None: [
+            (28, "*Paper_Space"),
+            (32, "*Model_Space"),
+            (100, "BLK_A"),
+        ],
+    )
+
+    resolved = convert_module._resolve_block_name_by_handle("dummy.dwg", header_rows)
+    assert resolved[28] == "*Paper_Space"
+    assert resolved[32] == "*Model_Space"
+    assert resolved[100] == "BLK_A"
 
 
 def test_resolve_block_name_by_handle_does_not_use_positional_fallback(monkeypatch) -> None:

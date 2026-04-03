@@ -20,10 +20,14 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_layer_colors, module)?)?;
     module.add_function(wrap_pyfunction!(decode_layer_names, module)?)?;
     module.add_function(wrap_pyfunction!(decode_line_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_line_owner_handles, module)?)?;
     module.add_function(wrap_pyfunction!(decode_point_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_point_owner_handles, module)?)?;
     module.add_function(wrap_pyfunction!(decode_3dface_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_arc_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_arc_owner_handles, module)?)?;
     module.add_function(wrap_pyfunction!(decode_circle_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_circle_owner_handles, module)?)?;
     module.add_function(wrap_pyfunction!(decode_line_arc_circle_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_ellipse_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_spline_entities, module)?)?;
@@ -44,6 +48,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_dim_diameter_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_dim_radius_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_insert_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_insert_owner_handles, module)?)?;
     module.add_function(wrap_pyfunction!(decode_minsert_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_insert_minsert_entities, module)?)?;
     module.add_function(wrap_pyfunction!(
@@ -59,6 +64,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(decode_lwpolyline_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_lwpolyline_owner_handles, module)?)?;
     module.add_function(wrap_pyfunction!(decode_polyline_3d_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_polyline_3d_with_vertices, module)?)?;
     module.add_function(wrap_pyfunction!(decode_polyline_mesh_entities, module)?)?;

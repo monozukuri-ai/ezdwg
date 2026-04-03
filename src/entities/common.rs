@@ -707,6 +707,23 @@ pub fn parse_common_entity_layer_handle(
     read_handle_reference(reader, header.handle)
 }
 
+pub fn parse_common_entity_owner_and_layer_handle(
+    reader: &mut BitReader<'_>,
+    header: &CommonEntityHeader,
+    allow_layer_only_fallback: bool,
+) -> Result<(Option<u64>, u64)> {
+    reader.set_bit_pos(header.obj_size);
+    match parse_common_entity_handles(reader, header) {
+        Ok(common_handles) => Ok((common_handles.owner_ref, common_handles.layer)),
+        Err(err) if allow_layer_only_fallback => {
+            reader.set_bit_pos(header.obj_size);
+            let layer_handle = parse_common_entity_layer_handle(reader, header)?;
+            Ok((None, layer_handle))
+        }
+        Err(err) => Err(err),
+    }
+}
+
 pub fn read_handle_reference(reader: &mut BitReader<'_>, base_handle: u64) -> Result<u64> {
     let HandleRef { code, value, .. } = reader.read_h()?;
     let absolute = match code {

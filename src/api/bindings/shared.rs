@@ -130,6 +130,7 @@ type DimLinearDecodeFn = for<'a> fn(
     u64,
 ) -> crate::core::result::Result<entities::DimLinearEntity>;
 type InsertEntityRow = (u64, f64, f64, f64, f64, f64, f64, f64, Option<String>);
+type InsertOwnerRow = (u64, Option<u64>);
 type MInsertEntityRow = (u64, f64, f64, f64, f64, f64, f64, f64, MInsertArrayRow);
 type InsertMInsertRows = (Vec<InsertEntityRow>, Vec<MInsertEntityRow>);
 type InsertMInsertDimensionRows = (

@@ -2468,6 +2468,63 @@ pub fn decode_line_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<Li
 }
 
 #[pyfunction(signature = (path, limit=None))]
+pub fn decode_line_owner_handles(path: &str, limit: Option<usize>) -> PyResult<Vec<InsertOwnerRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x13, "LINE", &dynamic_types) {
+            continue;
+        }
+        let mut entity: Option<entities::LineEntity> = None;
+        let mut last_err = None;
+        for with_prefix in [true, false] {
+            let mut reader = record.bit_reader();
+            if with_prefix {
+                if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+                    last_err = Some(err);
+                    continue;
+                }
+            }
+            match decode_line_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
+                Ok(decoded) => {
+                    if !is_plausible_line_entity_candidate(&decoded) {
+                        continue;
+                    }
+                    entity = Some(decoded);
+                    break;
+                }
+                Err(err) => last_err = Some(err),
+            }
+        }
+        let entity = match entity {
+            Some(entity) => entity,
+            None if best_effort => continue,
+            None => {
+                if let Some(err) = last_err {
+                    return Err(to_py_err(err));
+                }
+                continue;
+            }
+        };
+        result.push((entity.handle, entity.owner_handle));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
 pub fn decode_point_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<PointEntityRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
@@ -2514,6 +2571,48 @@ pub fn decode_point_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<P
             entity.location.2,
             entity.x_axis_angle,
         ));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_point_owner_handles(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<InsertOwnerRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x1B, "POINT", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity =
+            match decode_point_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+        result.push((entity.handle, entity.owner_handle));
         if let Some(limit) = limit {
             if result.len() >= limit {
                 break;
@@ -2621,6 +2720,45 @@ pub fn decode_arc_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<Arc
 }
 
 #[pyfunction(signature = (path, limit=None))]
+pub fn decode_arc_owner_handles(path: &str, limit: Option<usize>) -> PyResult<Vec<InsertOwnerRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x11, "ARC", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity =
+            match decode_arc_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
+                Ok(entity) => entity,
+                Err(err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+        result.push((entity.handle, entity.owner_handle));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
 pub fn decode_circle_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<CircleEntityRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
@@ -2660,6 +2798,52 @@ pub fn decode_circle_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
             entity.center.2,
             entity.radius,
         ));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_circle_owner_handles(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<InsertOwnerRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x12, "CIRCLE", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity = match decode_circle_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(entity) => entity,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        result.push((entity.handle, entity.owner_handle));
         if let Some(limit) = limit {
             if result.len() >= limit {
                 break;

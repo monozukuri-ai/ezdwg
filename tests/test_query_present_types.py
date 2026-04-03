@@ -128,6 +128,7 @@ def test_query_uses_bulk_line_arc_circle_decoder(monkeypatch) -> None:
 def test_query_single_type_does_not_force_bulk_line_arc_circle_decoder(monkeypatch) -> None:
     document_module._present_supported_types.cache_clear()
     document_module._line_arc_circle_rows.cache_clear()
+    document_module._line_owner_handle_map.cache_clear()
 
     monkeypatch.setattr(
         document_module.raw,
@@ -150,6 +151,35 @@ def test_query_single_type_does_not_force_bulk_line_arc_circle_decoder(monkeypat
     doc = document_module.Document(path="dummy.dwg", version="AC1018")
     entities = list(doc.modelspace().query("LINE"))
     assert [entity.dxftype for entity in entities] == ["LINE"]
+
+
+def test_query_line_includes_owner_handle_from_raw_map(monkeypatch) -> None:
+    document_module._present_supported_types.cache_clear()
+    document_module._line_arc_circle_rows.cache_clear()
+    document_module._line_owner_handle_map.cache_clear()
+
+    monkeypatch.setattr(
+        document_module.raw,
+        "list_object_headers_with_type",
+        lambda _path: [(1, 0, 0, 0x13, "LINE", "Entity")],
+    )
+    monkeypatch.setattr(document_module, "_entity_style_map", lambda _path: {})
+    monkeypatch.setattr(document_module, "_layer_color_map", lambda _path: {})
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_line_entities",
+        lambda _path: [(1, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0)],
+    )
+    monkeypatch.setattr(
+        document_module.raw,
+        "decode_line_owner_handles",
+        lambda _path: [(1, 0x20)],
+    )
+
+    doc = document_module.Document(path="dummy-owner-line.dwg", version="AC1018")
+    entity = next(doc.modelspace().query("LINE"))
+
+    assert entity.dxf["owner_handle"] == 0x20
 
 
 def test_normalize_types_excludes_explicit_only_entities_by_default(monkeypatch) -> None:

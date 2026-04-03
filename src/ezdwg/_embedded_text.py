@@ -114,6 +114,19 @@ def extract_plausible_embedded_text_fragment(text: str) -> str | None:
     return best
 
 
+def normalize_direct_custom_text_fragment(text: str) -> str | None:
+    normalized = normalize_embedded_text_fragment(text)
+    if not normalized:
+        return None
+    trimmed = normalized.rstrip(" :*;,-")
+    trimmed = trimmed.rstrip("：＊；，")
+    if trimmed and score_embedded_text_fragment(trimmed) >= score_embedded_text_fragment(normalized):
+        normalized = trimmed
+    if not normalized:
+        return None
+    return normalized
+
+
 def iter_visible_embedded_text_fragments(
     data: bytes,
     *,
@@ -145,6 +158,33 @@ def iter_shifted_visible_embedded_text_fragments(
     return out
 
 
+def iter_shifted_short_direct_custom_text_fragments(
+    data: bytes,
+    *,
+    shifts: range | tuple[int, ...] = (4,),
+    min_score: int = 8,
+) -> list[tuple[int, int, str, int]]:
+    out: list[tuple[int, int, str, int]] = []
+    for shift in shifts:
+        shifted = shift_bits_bytes(data, shift) if shift else data
+        for offset, run in iter_utf16_runs_any_alignment(shifted, min_chars=1):
+            fragment = extract_plausible_embedded_text_fragment(run)
+            if not fragment:
+                continue
+            normalized = normalize_direct_custom_text_fragment(fragment)
+            if not normalized:
+                continue
+            if len(normalized) > 8:
+                continue
+            if normalized == fragment and "\u3000" not in normalized and not any(ch in fragment for ch in ":*"):
+                continue
+            score = score_embedded_text_fragment(normalized)
+            if score < min_score:
+                continue
+            out.append((shift, offset, normalized, score))
+    return out
+
+
 def read_f64_le(data: bytes, offset: int) -> float | None:
     if offset < 0 or offset + 8 > len(data):
         return None
@@ -155,6 +195,104 @@ def read_f64_le(data: bytes, offset: int) -> float | None:
     if not math.isfinite(value):
         return None
     return float(value)
+
+
+def is_plausible_direct_custom_text_position(x: float | None, y: float | None) -> bool:
+    if x is None or y is None:
+        return False
+    if abs(x) <= 1e-9 or abs(x) > 100_000.0:
+        return False
+    if abs(x) < 1_000.0:
+        return False
+    if y < 0.0 or y > 10_000.0:
+        return False
+    return True
+
+
+def is_plausible_direct_custom_text_height(value: float | None) -> bool:
+    if value is None:
+        return False
+    return 5.0 <= value <= 500.0
+
+
+def extract_direct_custom_text_entity_layout(
+    shifted_buffers: dict[int, bytes],
+    fragment_shift: int,
+    fragment_offset: int,
+) -> tuple[float, float, float] | None:
+    if fragment_shift == 4:
+        x = read_f64_le(shifted_buffers.get(6, b""), fragment_offset - 41)
+        y = read_f64_le(shifted_buffers.get(6, b""), fragment_offset - 33)
+        height = read_f64_le(shifted_buffers.get(0, b""), fragment_offset - 17)
+    elif fragment_shift == 3:
+        x = read_f64_le(shifted_buffers.get(2, b""), fragment_offset - 37)
+        y = read_f64_le(shifted_buffers.get(0, b""), fragment_offset - 29)
+        height = read_f64_le(shifted_buffers.get(4, b""), fragment_offset - 18)
+        if not is_plausible_direct_custom_text_height(height):
+            height = read_f64_le(shifted_buffers.get(6, b""), fragment_offset - 7)
+    elif fragment_shift == 2:
+        x = read_f64_le(shifted_buffers.get(6, b""), fragment_offset - 46)
+        y = read_f64_le(shifted_buffers.get(6, b""), fragment_offset - 38)
+        height = read_f64_le(shifted_buffers.get(0, b""), fragment_offset - 14)
+    else:
+        return None
+
+    if not is_plausible_direct_custom_text_position(x, y):
+        return None
+    if not is_plausible_direct_custom_text_height(height):
+        return None
+    return (float(x), float(y), float(height))
+
+
+def select_direct_custom_text_height_hint(heights: list[float]) -> float | None:
+    if not heights:
+        return None
+    counts: dict[int, tuple[int, float]] = {}
+    for value in heights:
+        rounded = int(round(float(value) * 1000.0))
+        count, _ = counts.get(rounded, (0, float(value)))
+        counts[rounded] = (count + 1, float(value))
+    _key, (_, best_value) = max(counts.items(), key=lambda item: (item[1][0], -abs(item[0])))
+    return best_value
+
+
+def extract_short_direct_custom_text_entity_layout(
+    shifted_buffers: dict[int, bytes],
+    fragment_shift: int,
+    fragment_offset: int,
+    *,
+    height_hint: float | None = None,
+) -> tuple[float, float, float] | None:
+    layout = extract_direct_custom_text_entity_layout(
+        shifted_buffers,
+        fragment_shift,
+        fragment_offset,
+    )
+    if layout is not None:
+        return layout
+    if fragment_shift != 2:
+        return None
+
+    candidates = [
+        (
+            read_f64_le(shifted_buffers.get(6, b""), fragment_offset - 42),
+            read_f64_le(shifted_buffers.get(6, b""), fragment_offset - 34),
+            read_f64_le(shifted_buffers.get(6, b""), fragment_offset - 16),
+        ),
+        (
+            read_f64_le(shifted_buffers.get(4, b""), fragment_offset - 41),
+            read_f64_le(shifted_buffers.get(4, b""), fragment_offset - 33),
+            read_f64_le(shifted_buffers.get(6, b""), fragment_offset - 16),
+        ),
+    ]
+    for x, y, height in candidates:
+        if not is_plausible_direct_custom_text_position(x, y):
+            continue
+        chosen_height = height if is_plausible_direct_custom_text_height(height) else height_hint
+        if not is_plausible_direct_custom_text_height(chosen_height):
+            continue
+        return (float(x), float(y), float(chosen_height))
+    return None
 
 
 def extract_shifted_embedded_text_height(shifted_six: bytes, marker_offset: int) -> float | None:
@@ -339,7 +477,10 @@ def collect_unknown_embedded_text_entities(
     *,
     modelspace_owner_handle: int | None = None,
     limit: int | None = None,
-) -> tuple[tuple[int, str, tuple[float, float, float], float, float, int | None], ...]:
+) -> tuple[
+    tuple[int, str, tuple[float, float, float], float, float, int | None, str | None, str | None],
+    ...,
+]:
     try:
         header_rows = list_headers_with_type(path)
     except Exception:
@@ -368,7 +509,9 @@ def collect_unknown_embedded_text_entities(
         if previous is None or offset > previous[0]:
             candidate_rows[handle] = (offset, type_code)
 
-    out: list[tuple[int, str, tuple[float, float, float], float, float, int | None]] = []
+    out: list[
+        tuple[int, str, tuple[float, float, float], float, float, int | None, str | None, str | None]
+    ] = []
     seen: set[tuple[str, int, int, int]] = set()
 
     for source_handle, (_offset, expected_type_code) in sorted(candidate_rows.items()):
@@ -386,10 +529,37 @@ def collect_unknown_embedded_text_entities(
         if not record_bytes:
             continue
         visible_fragments = iter_visible_embedded_text_fragments(record_bytes)
-        if not visible_fragments and actual_type_code != 3:
+        direct_fragments = (
+            iter_shifted_visible_embedded_text_fragments(
+                record_bytes,
+                shifts=(2, 3, 4),
+                min_score=14,
+            )
+            if actual_type_code != 3
+            else []
+        )
+        short_direct_fragment_shifts = (2, 3, 4) if len(record_bytes) <= 16384 else (4,)
+        short_direct_fragments = (
+            iter_shifted_short_direct_custom_text_fragments(
+                record_bytes,
+                shifts=short_direct_fragment_shifts,
+                min_score=8,
+            )
+            if actual_type_code != 3
+            else []
+        )
+        if not visible_fragments and not direct_fragments and not short_direct_fragments and actual_type_code != 3:
             continue
-        shifted_four = shift_bits_bytes(record_bytes, 4)
-        shifted_six = shift_bits_bytes(record_bytes, 6)
+        shifted_buffers = {
+            0: record_bytes,
+            2: shift_bits_bytes(record_bytes, 2),
+            3: shift_bits_bytes(record_bytes, 3),
+            4: shift_bits_bytes(record_bytes, 4),
+            6: shift_bits_bytes(record_bytes, 6),
+        }
+        shifted_four = shifted_buffers[4]
+        shifted_six = shifted_buffers[6]
+        direct_text_heights: list[float] = []
         emitted_direct_attdef = False
         if actual_type_code == 3:
             direct_text = select_attdef_embedded_text_fragment(visible_fragments)
@@ -415,6 +585,8 @@ def collect_unknown_embedded_text_entities(
                             direct_height,
                             0.0,
                             modelspace_owner_handle,
+                            "TEXT",
+                            "direct_attdef",
                         )
                     )
                     emitted_direct_attdef = True
@@ -463,11 +635,86 @@ def collect_unknown_embedded_text_entities(
                     height,
                     0.0,
                     modelspace_owner_handle,
+                    "TEXT",
+                    "marker",
                 )
             )
             if limit is not None and len(out) >= limit:
                 break
             marker_offset += 2
+        if limit is not None and len(out) >= limit:
+            break
+        if actual_type_code != 3:
+            for fragment_shift, fragment_offset, text, score in direct_fragments:
+                if fragment_shift == 2 and score < 18:
+                    continue
+                layout = extract_direct_custom_text_entity_layout(
+                    shifted_buffers,
+                    fragment_shift,
+                    fragment_offset,
+                )
+                if layout is None:
+                    continue
+                x, y, height = layout
+                key = (
+                    text,
+                    int(round(x * 1000.0)),
+                    int(round(y * 1000.0)),
+                    int(round(height * 1000.0)),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                direct_text_heights.append(height)
+                out.append(
+                    (
+                        int(source_handle),
+                        text,
+                        (x, y, 0.0),
+                        height,
+                        0.0,
+                        modelspace_owner_handle,
+                        "MTEXT" if fragment_shift == 3 else "TEXT",
+                        "direct_custom_mtext" if fragment_shift == 3 else "direct_custom_text",
+                    )
+                )
+                if limit is not None and len(out) >= limit:
+                    break
+            if limit is None or len(out) < limit:
+                height_hint = select_direct_custom_text_height_hint(direct_text_heights)
+                for fragment_shift, fragment_offset, text, score in short_direct_fragments:
+                    layout = extract_short_direct_custom_text_entity_layout(
+                        shifted_buffers,
+                        fragment_shift,
+                        fragment_offset,
+                        height_hint=height_hint,
+                    )
+                    if layout is None:
+                        continue
+                    x, y, height = layout
+                    key = (
+                        text,
+                        int(round(x * 1000.0)),
+                        int(round(y * 1000.0)),
+                        int(round(height * 1000.0)),
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(
+                        (
+                            int(source_handle),
+                            text,
+                            (x, y, 0.0),
+                            height,
+                            0.0,
+                            modelspace_owner_handle,
+                            "TEXT",
+                            "short_direct_custom_text",
+                        )
+                    )
+                    if limit is not None and len(out) >= limit:
+                        break
         if limit is not None and len(out) >= limit:
             break
 

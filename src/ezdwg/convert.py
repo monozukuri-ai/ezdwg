@@ -90,6 +90,7 @@ _DWG_WRITABLE_ENTITY_TYPES = {
 }
 _MAX_COORD_ABS = 1.0e12
 _BLOCK_INSERT_SAFETY_CACHE: weakref.WeakKeyDictionary[Any, dict[str, tuple[bool, bool, float | None]]] = weakref.WeakKeyDictionary()
+_BLOCK_LAYOUT_METRICS_CACHE: weakref.WeakKeyDictionary[Any, dict[str, tuple[int, int, float | None]]] = weakref.WeakKeyDictionary()
 _LAYOUT_PSEUDO_ALIAS_CACHE: weakref.WeakKeyDictionary[Any, dict[str, str]] = weakref.WeakKeyDictionary()
 _BLOCK_LOCAL_Y_SPAN_CACHE: weakref.WeakKeyDictionary[Any, dict[str, float | None]] = weakref.WeakKeyDictionary()
 _DIM_BLOCK_POLICIES = {"smart", "legacy"}
@@ -525,6 +526,16 @@ def to_dxf(
             source_entities,
             decode_cache=decode_cache,
         )
+        source_entities = _maybe_filter_modelspace_block_references(
+            layout.doc.decode_path,
+            source_entities,
+            decode_cache=decode_cache,
+        )
+        source_entities = _drop_small_local_non_modelspace_geometry(
+            layout.doc.decode_path,
+            source_entities,
+            decode_cache=decode_cache,
+        )
     if _has_problematic_i_inserts(source_entities):
         available_block_names = _available_block_names(
             layout.doc.decode_path or layout.doc.path,
@@ -625,6 +636,11 @@ def to_dxf(
     )
     _rebalance_sparse_open30_right_sheet_geometry(modelspace)
     _rebalance_sparse_open30_right_sheet_text(modelspace)
+    _drop_small_local_origin_geometry_cluster(modelspace)
+    _drop_implausible_modelspace_primitives(modelspace)
+    _prune_implausible_entities_from_repeated_large_blocks(modelspace)
+    _drop_pathological_modelspace_block_references(modelspace)
+    _drop_unresolved_block_references(getattr(modelspace, "doc", None))
 
     if flatten_inserts:
         _flatten_modelspace_inserts(modelspace)
@@ -2604,22 +2620,201 @@ def _filter_modelspace_entities(
     modelspace_handles, modelspace_owner_handles = modelspace_info
     filtered: list[Entity] = []
     for entity in entities:
-        try:
-            if int(entity.handle) in modelspace_handles:
-                filtered.append(entity)
-                continue
-        except Exception:
-            pass
-        owner_handle = entity.dxf.get("owner_handle")
-        try:
-            if owner_handle is not None and int(owner_handle) in modelspace_owner_handles:
-                filtered.append(entity)
-        except Exception:
-            continue
+        if _entity_is_modelspace_owned(
+            entity,
+            modelspace_handles=modelspace_handles,
+            modelspace_owner_handles=modelspace_owner_handles,
+        ):
+            filtered.append(entity)
     if not filtered and entities:
         # Some drawings store modelspace ownership in ways this heuristic
         # cannot recover reliably yet. Keep behavior non-destructive.
         return entities
+    return filtered
+
+
+def _entity_is_modelspace_owned(
+    entity: Entity,
+    *,
+    modelspace_handles: set[int],
+    modelspace_owner_handles: set[int],
+) -> bool:
+    owner_handle = entity.dxf.get("owner_handle")
+    if owner_handle is not None:
+        try:
+            return int(owner_handle) in modelspace_owner_handles
+        except Exception:
+            return False
+    try:
+        return int(entity.handle) in modelspace_handles
+    except Exception:
+        return False
+
+
+def _maybe_filter_modelspace_block_references(
+    decode_path: str | None,
+    entities: list[Entity],
+    *,
+    decode_cache: _ConvertDecodeCache | None = None,
+) -> list[Entity]:
+    if not decode_path or not entities:
+        return entities
+    modelspace_info = _resolve_modelspace_entity_handles(
+        decode_path,
+        decode_cache=decode_cache,
+    )
+    if modelspace_info is None:
+        return entities
+    modelspace_handles, modelspace_owner_handles = modelspace_info
+    original_refs = [
+        entity for entity in entities if entity.dxftype in {"INSERT", "MINSERT"}
+    ]
+    if len(original_refs) < 32:
+        return entities
+    kept_ref_handles = {
+        int(entity.handle)
+        for entity in original_refs
+        if _entity_is_modelspace_owned(
+            entity,
+            modelspace_handles=modelspace_handles,
+            modelspace_owner_handles=modelspace_owner_handles,
+        )
+    }
+    if not kept_ref_handles or len(kept_ref_handles) >= len(original_refs):
+        return entities
+    reduction_ratio = (len(original_refs) - len(kept_ref_handles)) / float(len(original_refs))
+    if reduction_ratio < 0.50:
+        return entities
+
+    filtered: list[Entity] = []
+    for entity in entities:
+        if entity.dxftype not in {"INSERT", "MINSERT"}:
+            filtered.append(entity)
+            continue
+        try:
+            if int(entity.handle) in kept_ref_handles:
+                filtered.append(entity)
+        except Exception:
+            continue
+    return filtered
+
+
+def _entity_planar_bounds(entity: Entity) -> tuple[float, float, float, float] | None:
+    dxf = entity.dxf
+    dxftype = str(entity.dxftype).strip().upper()
+    points: list[tuple[float, float]] = []
+    try:
+        if dxftype == "LINE":
+            start = dxf.get("start")
+            end = dxf.get("end")
+            if start is None or end is None:
+                return None
+            points.extend(
+                (
+                    (float(start[0]), float(start[1])),
+                    (float(end[0]), float(end[1])),
+                )
+            )
+        elif dxftype in {"ARC", "CIRCLE"}:
+            center = dxf.get("center")
+            radius = float(dxf.get("radius"))
+            if center is None or not math.isfinite(radius):
+                return None
+            center_x = float(center[0])
+            center_y = float(center[1])
+            points.extend(
+                (
+                    (center_x - radius, center_y - radius),
+                    (center_x + radius, center_y + radius),
+                )
+            )
+        elif dxftype == "LWPOLYLINE":
+            raw_points = dxf.get("points")
+            if not isinstance(raw_points, list):
+                return None
+            for point in raw_points:
+                if not isinstance(point, tuple) or len(point) < 2:
+                    continue
+                points.append((float(point[0]), float(point[1])))
+        else:
+            return None
+    except Exception:
+        return None
+    if not points:
+        return None
+    xs = [point[0] for point in points if math.isfinite(point[0])]
+    ys = [point[1] for point in points if math.isfinite(point[1])]
+    if not xs or not ys:
+        return None
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _drop_small_local_non_modelspace_geometry(
+    decode_path: str | None,
+    entities: list[Entity],
+    *,
+    decode_cache: _ConvertDecodeCache | None = None,
+) -> list[Entity]:
+    if not decode_path or not entities:
+        return entities
+    modelspace_info = _resolve_modelspace_entity_handles(
+        decode_path,
+        decode_cache=decode_cache,
+    )
+    if modelspace_info is None:
+        return entities
+    modelspace_handles, modelspace_owner_handles = modelspace_info
+
+    candidate_handles: set[int] = set()
+    cluster_min_x = math.inf
+    cluster_min_y = math.inf
+    cluster_max_x = -math.inf
+    cluster_max_y = -math.inf
+
+    for entity in entities:
+        if entity.dxftype not in {"LINE", "ARC", "CIRCLE", "LWPOLYLINE"}:
+            continue
+        if _entity_is_modelspace_owned(
+            entity,
+            modelspace_handles=modelspace_handles,
+            modelspace_owner_handles=modelspace_owner_handles,
+        ):
+            continue
+        bounds = _entity_planar_bounds(entity)
+        if bounds is None:
+            continue
+        min_x, min_y, max_x, max_y = bounds
+        if max(abs(min_x), abs(min_y), abs(max_x), abs(max_y)) > 1000.0:
+            continue
+        try:
+            candidate_handles.add(int(entity.handle))
+        except Exception:
+            continue
+        cluster_min_x = min(cluster_min_x, min_x)
+        cluster_min_y = min(cluster_min_y, min_y)
+        cluster_max_x = max(cluster_max_x, max_x)
+        cluster_max_y = max(cluster_max_y, max_y)
+
+    if len(candidate_handles) < 32:
+        return entities
+    if not (
+        math.isfinite(cluster_min_x)
+        and math.isfinite(cluster_min_y)
+        and math.isfinite(cluster_max_x)
+        and math.isfinite(cluster_max_y)
+    ):
+        return entities
+    if (cluster_max_x - cluster_min_x) > 1000.0 or (cluster_max_y - cluster_min_y) > 1000.0:
+        return entities
+
+    filtered: list[Entity] = []
+    for entity in entities:
+        try:
+            if int(entity.handle) in candidate_handles:
+                continue
+        except Exception:
+            pass
+        filtered.append(entity)
     return filtered
 
 
@@ -2656,8 +2851,6 @@ def _maybe_prefer_modelspace_filtered_entities(
 ) -> list[Entity]:
     if not entities:
         return entities
-    if not _has_open30_layout_markers(entities):
-        return entities
     filtered = _filter_modelspace_entities(
         layout.doc.decode_path,
         entities,
@@ -2689,12 +2882,32 @@ def _maybe_prefer_modelspace_filtered_entities(
     text_reduction = _reduction_ratio("TEXT")
     mtext_reduction = _reduction_ratio("MTEXT")
 
-    if core_retention >= 0.80 and (
+    if _has_open30_layout_markers(entities) and core_retention >= 0.80 and (
         point_reduction >= 0.50
         or mtext_reduction >= 0.50
         or text_reduction >= 0.25
     ):
-        return filtered
+        return _restore_open30_layout_marker_inserts(entities, filtered)
+
+    original_insert_count = all_counts.get("INSERT", 0) + all_counts.get("MINSERT", 0)
+    filtered_insert_count = filtered_counts.get("INSERT", 0) + filtered_counts.get("MINSERT", 0)
+    insert_reduction = 0.0
+    if original_insert_count > 0:
+        insert_reduction = (original_insert_count - filtered_insert_count) / float(
+            original_insert_count
+        )
+    if (
+        original_insert_count >= 512
+        and filtered_insert_count >= 16
+        and insert_reduction >= 0.90
+        and (
+            point_reduction >= 0.90
+            or text_reduction >= 0.75
+            or mtext_reduction >= 0.75
+        )
+        and core_retention >= 0.25
+    ):
+        return _restore_open30_layout_marker_inserts(entities, filtered)
     return entities
 
 
@@ -2730,7 +2943,7 @@ def _resolve_modelspace_entity_handles(
         header_rows,
         key=lambda row: int(row[1]) if isinstance(row, tuple) and len(row) > 1 else 0,
     )
-    current_block_handle: int | None = None
+    block_stack: list[int] = []
     handles: set[int] = set()
     for row in sorted_rows:
         if not isinstance(row, tuple) or len(row) < 6:
@@ -2744,12 +2957,13 @@ def _resolve_modelspace_entity_handles(
             continue
         type_name = str(raw_type_name).strip().upper()
         if type_name == "BLOCK":
-            current_block_handle = handle
+            block_stack.append(handle)
             continue
         if type_name == "ENDBLK":
-            current_block_handle = None
+            if block_stack:
+                block_stack.pop()
             continue
-        if current_block_handle in modelspace_block_handles:
+        if block_stack and block_stack[-1] in modelspace_block_handles:
             handles.add(handle)
     return handles, modelspace_block_handles
 
@@ -3609,6 +3823,68 @@ def _deduplicate_layout_pseudo_inserts_by_handle(entities: list[Entity]) -> list
     return result
 
 
+def _is_open30_layout_marker_insert(entity: Entity) -> bool:
+    if entity.dxftype not in {"INSERT", "MINSERT"}:
+        return False
+    name = _normalize_block_name(entity.dxf.get("name"))
+    if name is None:
+        return False
+    if name == "_Open30" and _looks_like_open30_insert(entity.dxf):
+        return True
+    if name == "i" and _looks_like_problematic_i_open30_insert(entity.dxf):
+        return True
+    return _is_layout_pseudo_block_name(name) and _should_preserve_layout_pseudo_insert(
+        name,
+        entity.dxf,
+    )
+
+
+def _restore_open30_layout_marker_inserts(
+    original_entities: list[Entity],
+    filtered_entities: list[Entity],
+) -> list[Entity]:
+    if not original_entities or not filtered_entities:
+        return filtered_entities
+
+    original_markers = [entity for entity in original_entities if _is_open30_layout_marker_insert(entity)]
+    if not original_markers:
+        return filtered_entities
+
+    original_open30_count = 0
+    filtered_open30_count = 0
+    for entity in original_markers:
+        if _normalize_block_name(entity.dxf.get("name")) in {"_Open30", "i"}:
+            original_open30_count += 1
+    for entity in filtered_entities:
+        if not _is_open30_layout_marker_insert(entity):
+            continue
+        if _normalize_block_name(entity.dxf.get("name")) in {"_Open30", "i"}:
+            filtered_open30_count += 1
+
+    if original_open30_count < 3 or filtered_open30_count >= original_open30_count:
+        return filtered_entities
+
+    seen_handles: set[int] = set()
+    result: list[Entity] = []
+    for entity in filtered_entities:
+        result.append(entity)
+        try:
+            seen_handles.add(int(entity.handle))
+        except Exception:
+            continue
+    for entity in original_markers:
+        try:
+            handle = int(entity.handle)
+        except Exception:
+            result.append(entity)
+            continue
+        if handle in seen_handles:
+            continue
+        result.append(entity)
+        seen_handles.add(handle)
+    return result
+
+
 def _has_right_side_open30_i_proxies(entities: list[Entity]) -> bool:
     for entity in entities:
         if entity.dxftype not in {"INSERT", "MINSERT"}:
@@ -3855,6 +4131,16 @@ def _resolve_block_name_by_handle(
         for handle, name in exact_map.items()
         if handle in block_handles_set
     }
+
+    # BLOCK_HEADER names are the more reliable source for reserved layout
+    # pseudo blocks. Some decoder paths misalign early BLOCK entity names and
+    # map *Model_Space/*Paper_Space declarations onto anonymous dimension
+    # blocks instead. Preserve the layout pseudo names from BLOCK_HEADER rows
+    # so modelspace ownership resolution remains stable.
+    for handle, name in header_map.items():
+        if _is_layout_pseudo_block_name(name):
+            block_name_by_handle[handle] = name
+
     if len(block_name_by_handle) >= len(block_handles_in_order):
         if decode_cache is not None:
             decode_cache.block_name_by_handle_cache[cache_key] = block_name_by_handle
@@ -6248,6 +6534,515 @@ def _cached_block_insert_safety_info(
     info = (is_empty, has_nested_dim_insert, local_center_abs)
     by_name[block_name] = info
     return info
+
+
+def _cached_block_layout_metrics(
+    modelspace: Any,
+    block_name: str,
+) -> tuple[int, int, float | None]:
+    doc = getattr(modelspace, "doc", None)
+    if doc is None:
+        return (0, 0, None)
+
+    by_name = _BLOCK_LAYOUT_METRICS_CACHE.get(doc)
+    if by_name is None:
+        by_name = {}
+        _BLOCK_LAYOUT_METRICS_CACHE[doc] = by_name
+    cached = by_name.get(block_name)
+    if cached is not None:
+        return cached
+
+    try:
+        block = doc.blocks.get(block_name)
+    except Exception:
+        metrics = (0, 0, None)
+        by_name[block_name] = metrics
+        return metrics
+    if block is None:
+        metrics = (0, 0, None)
+        by_name[block_name] = metrics
+        return metrics
+
+    entities = list(block)
+    nested_insert_count = 0
+    min_x = math.inf
+    min_y = math.inf
+    max_x = -math.inf
+    max_y = -math.inf
+
+    def _push_xy(x: Any, y: Any) -> None:
+        nonlocal min_x, min_y, max_x, max_y
+        try:
+            x_val = float(x)
+            y_val = float(y)
+        except Exception:
+            return
+        if not (math.isfinite(x_val) and math.isfinite(y_val)):
+            return
+        min_x = min(min_x, x_val)
+        min_y = min(min_y, y_val)
+        max_x = max(max_x, x_val)
+        max_y = max(max_y, y_val)
+
+    for entity in entities:
+        dxftype = _ezdxf_entity_type(entity)
+        dxf = getattr(entity, "dxf", None)
+        if dxftype in {"INSERT", "MINSERT"} and dxf is not None:
+            nested_insert_count += 1
+            _push_xy(getattr(dxf.insert, "x", 0.0), getattr(dxf.insert, "y", 0.0))
+            continue
+        if dxftype == "LINE" and dxf is not None:
+            _push_xy(getattr(dxf.start, "x", 0.0), getattr(dxf.start, "y", 0.0))
+            _push_xy(getattr(dxf.end, "x", 0.0), getattr(dxf.end, "y", 0.0))
+            continue
+        if dxftype == "POINT" and dxf is not None:
+            _push_xy(getattr(dxf.location, "x", 0.0), getattr(dxf.location, "y", 0.0))
+            continue
+        if dxftype in {"ARC", "CIRCLE"} and dxf is not None:
+            _push_xy(getattr(dxf.center, "x", 0.0), getattr(dxf.center, "y", 0.0))
+            continue
+        if dxftype in {"TEXT", "MTEXT"} and dxf is not None:
+            _push_xy(getattr(dxf.insert, "x", 0.0), getattr(dxf.insert, "y", 0.0))
+            continue
+        if dxftype == "LWPOLYLINE":
+            try:
+                for point in entity.get_points("xy"):
+                    if len(point) >= 2:
+                        _push_xy(point[0], point[1])
+            except Exception:
+                continue
+
+    local_center_abs = None
+    if math.isfinite(min_x) and math.isfinite(min_y):
+        center_x = (min_x + max_x) * 0.5
+        center_y = (min_y + max_y) * 0.5
+        local_center_abs = max(abs(center_x), abs(center_y))
+
+    metrics = (len(entities), nested_insert_count, local_center_abs)
+    by_name[block_name] = metrics
+    return metrics
+
+
+def _is_large_uniform_insert_reference(insert: Any) -> bool:
+    dxf = getattr(insert, "dxf", None)
+    if dxf is None:
+        return False
+    xscale = abs(_finite_float(getattr(dxf, "xscale", 1.0), 1.0))
+    yscale = abs(_finite_float(getattr(dxf, "yscale", 1.0), 1.0))
+    zscale = abs(_finite_float(getattr(dxf, "zscale", 1.0), 1.0))
+    scales = (xscale, yscale, zscale)
+    min_scale = min(scales)
+    max_scale = max(scales)
+    if min_scale < 10.0:
+        return False
+    tolerance = max(1.0e-6, max_scale * 1.0e-4)
+    return (max_scale - min_scale) <= tolerance
+
+
+def _collect_reachable_block_names(doc: Any) -> set[str]:
+    reachable: set[str] = set()
+    stack: list[str] = []
+
+    def _push_name(raw_name: Any) -> None:
+        normalized = _normalize_block_name(raw_name)
+        if normalized is not None:
+            stack.append(normalized)
+
+    try:
+        for entity in doc.modelspace():
+            dxftype = _ezdxf_entity_type(entity)
+            dxf = getattr(entity, "dxf", None)
+            if dxftype in {"INSERT", "MINSERT"} and dxf is not None:
+                _push_name(getattr(dxf, "name", None))
+            elif dxftype == "DIMENSION" and dxf is not None:
+                _push_name(getattr(dxf, "geometry", None))
+    except Exception:
+        return reachable
+
+    while stack:
+        name = stack.pop()
+        if name in reachable:
+            continue
+        reachable.add(name)
+        try:
+            block = doc.blocks.get(name)
+        except Exception:
+            continue
+        if block is None:
+            continue
+        for entity in block:
+            dxftype = _ezdxf_entity_type(entity)
+            dxf = getattr(entity, "dxf", None)
+            if dxftype in {"INSERT", "MINSERT"} and dxf is not None:
+                _push_name(getattr(dxf, "name", None))
+            elif dxftype == "DIMENSION" and dxf is not None:
+                _push_name(getattr(dxf, "geometry", None))
+    return reachable
+
+
+def _purge_unreferenced_blocks(doc: Any) -> None:
+    if doc is None:
+        return
+    reachable = _collect_reachable_block_names(doc)
+    try:
+        all_block_names = [block.name for block in doc.blocks]
+    except Exception:
+        return
+    for block_name in all_block_names:
+        upper = block_name.upper()
+        if upper.startswith("*MODEL_SPACE") or upper.startswith("*PAPER_SPACE"):
+            continue
+        if block_name in reachable:
+            continue
+        try:
+            doc.blocks.delete_block(block_name, safe=False)
+        except Exception:
+            continue
+
+
+def _drop_unresolved_block_references(doc: Any) -> None:
+    if doc is None:
+        return
+    removed_any = False
+    while True:
+        try:
+            existing_block_names = {block.name for block in doc.blocks}
+        except Exception:
+            return
+        removed_in_pass = False
+        layouts: list[Any] = [doc.modelspace()]
+        try:
+            layouts.extend(list(doc.blocks))
+        except Exception:
+            pass
+        for layout in layouts:
+            try:
+                inserts = list(layout.query("INSERT MINSERT"))
+            except Exception:
+                continue
+            for insert in inserts:
+                dxf = getattr(insert, "dxf", None)
+                name = _normalize_block_name(getattr(dxf, "name", None) if dxf is not None else None)
+                if name is None or name in existing_block_names:
+                    continue
+                try:
+                    layout.delete_entity(insert)
+                    removed_in_pass = True
+                    removed_any = True
+                except Exception:
+                    continue
+        if not removed_in_pass:
+            break
+    if removed_any:
+        _purge_unreferenced_blocks(doc)
+
+
+def _has_tiny_origin_arc_geometry(entity: Any) -> bool:
+    dxf = getattr(entity, "dxf", None)
+    if dxf is None:
+        return False
+    try:
+        center = getattr(dxf, "center")
+        radius = float(getattr(dxf, "radius"))
+        center_x = float(getattr(center, "x", center[0]))
+        center_y = float(getattr(center, "y", center[1]))
+    except Exception:
+        return False
+    if not (
+        math.isfinite(center_x)
+        and math.isfinite(center_y)
+        and math.isfinite(radius)
+    ):
+        return False
+    if radius <= 1.0e-6:
+        return True
+    return max(abs(center_x), abs(center_y)) <= 10.0 and radius <= 1.0e-3
+
+
+def _has_tiny_origin_3dface_geometry(entity: Any) -> bool:
+    dxf = getattr(entity, "dxf", None)
+    if dxf is None:
+        return False
+    values: list[float] = []
+    for token in ("vtx0", "vtx1", "vtx2", "vtx3"):
+        try:
+            point = getattr(dxf, token)
+            values.extend((float(point[0]), float(point[1]), float(point[2])))
+        except Exception:
+            return False
+    finite_values = [abs(value) for value in values if math.isfinite(value)]
+    if not finite_values:
+        return False
+    return max(finite_values) <= 1.0e-6
+
+
+def _has_tiny_origin_ray_geometry(entity: Any) -> bool:
+    dxf = getattr(entity, "dxf", None)
+    if dxf is None:
+        return False
+    try:
+        start = getattr(dxf, "start")
+        start_x = float(getattr(start, "x", start[0]))
+        start_y = float(getattr(start, "y", start[1]))
+    except Exception:
+        return False
+    if not (math.isfinite(start_x) and math.isfinite(start_y)):
+        return False
+    return max(abs(start_x), abs(start_y)) <= 10.0
+
+
+def _has_origin_anchor_far_lwpolyline_geometry(entity: Any) -> bool:
+    if _ezdxf_entity_type(entity) != "LWPOLYLINE":
+        return False
+    try:
+        points = [(float(point[0]), float(point[1])) for point in entity.get_points("xy")]
+    except Exception:
+        return False
+    if len(points) < 2 or len(points) > 4:
+        return False
+    unique_points = {
+        (round(point[0], 6), round(point[1], 6))
+        for point in points
+        if math.isfinite(point[0]) and math.isfinite(point[1])
+    }
+    if len(unique_points) > 3:
+        return False
+    has_origin_anchor = any(max(abs(x), abs(y)) <= 1.0 for x, y in unique_points)
+    if not has_origin_anchor:
+        return False
+    has_far_point = any(max(abs(x), abs(y)) >= 10000.0 for x, y in unique_points)
+    return has_far_point
+
+
+def _is_implausible_repeated_block_primitive(entity: Any) -> bool:
+    dxftype = _ezdxf_entity_type(entity)
+    if dxftype == "LWPOLYLINE":
+        return _has_origin_anchor_far_lwpolyline_geometry(entity)
+    if dxftype == "RAY":
+        return _has_tiny_origin_ray_geometry(entity)
+    if dxftype == "ARC":
+        return _has_tiny_origin_arc_geometry(entity)
+    if dxftype == "3DFACE":
+        return _has_tiny_origin_3dface_geometry(entity)
+    return False
+
+
+def _ezdxf_entity_planar_bounds(entity: Any) -> tuple[float, float, float, float] | None:
+    dxftype = _ezdxf_entity_type(entity)
+    dxf = getattr(entity, "dxf", None)
+    if dxf is None:
+        return None
+    points: list[tuple[float, float]] = []
+    try:
+        if dxftype == "LINE":
+            points.extend(
+                (
+                    (float(dxf.start.x), float(dxf.start.y)),
+                    (float(dxf.end.x), float(dxf.end.y)),
+                )
+            )
+        elif dxftype in {"ARC", "CIRCLE"}:
+            radius = float(getattr(dxf, "radius"))
+            center_x = float(dxf.center.x)
+            center_y = float(dxf.center.y)
+            points.extend(
+                (
+                    (center_x - radius, center_y - radius),
+                    (center_x + radius, center_y + radius),
+                )
+            )
+        elif dxftype == "LWPOLYLINE":
+            for point in entity.get_points("xy"):
+                if len(point) >= 2:
+                    points.append((float(point[0]), float(point[1])))
+        else:
+            return None
+    except Exception:
+        return None
+    if not points:
+        return None
+    xs = [point[0] for point in points if math.isfinite(point[0])]
+    ys = [point[1] for point in points if math.isfinite(point[1])]
+    if not xs or not ys:
+        return None
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _drop_small_local_origin_geometry_cluster(modelspace: Any) -> None:
+    try:
+        entities = list(modelspace)
+    except Exception:
+        return
+    if len(entities) < 32:
+        return
+
+    overall_min_x = math.inf
+    overall_min_y = math.inf
+    overall_max_x = -math.inf
+    overall_max_y = -math.inf
+    candidate_entities: list[Any] = []
+    candidate_min_x = math.inf
+    candidate_min_y = math.inf
+    candidate_max_x = -math.inf
+    candidate_max_y = -math.inf
+
+    for entity in entities:
+        bounds = _ezdxf_entity_planar_bounds(entity)
+        if bounds is None:
+            continue
+        min_x, min_y, max_x, max_y = bounds
+        overall_min_x = min(overall_min_x, min_x)
+        overall_min_y = min(overall_min_y, min_y)
+        overall_max_x = max(overall_max_x, max_x)
+        overall_max_y = max(overall_max_y, max_y)
+        if max(abs(min_x), abs(min_y), abs(max_x), abs(max_y)) > 1000.0:
+            continue
+        candidate_entities.append(entity)
+        candidate_min_x = min(candidate_min_x, min_x)
+        candidate_min_y = min(candidate_min_y, min_y)
+        candidate_max_x = max(candidate_max_x, max_x)
+        candidate_max_y = max(candidate_max_y, max_y)
+
+    if len(candidate_entities) < 32:
+        return
+    if not (
+        math.isfinite(overall_min_x)
+        and math.isfinite(overall_min_y)
+        and math.isfinite(overall_max_x)
+        and math.isfinite(overall_max_y)
+    ):
+        return
+    overall_span = max(overall_max_x - overall_min_x, overall_max_y - overall_min_y)
+    if overall_span <= 10000.0:
+        return
+    if (candidate_max_x - candidate_min_x) > 1200.0 or (candidate_max_y - candidate_min_y) > 1200.0:
+        return
+
+    for entity in candidate_entities:
+        try:
+            modelspace.delete_entity(entity)
+        except Exception:
+            continue
+
+
+def _drop_implausible_modelspace_primitives(modelspace: Any) -> None:
+    try:
+        entities = list(modelspace)
+    except Exception:
+        return
+    for entity in entities:
+        if not _is_implausible_repeated_block_primitive(entity):
+            continue
+        try:
+            modelspace.delete_entity(entity)
+        except Exception:
+            continue
+
+
+def _prune_implausible_entities_from_repeated_large_blocks(modelspace: Any) -> None:
+    doc = getattr(modelspace, "doc", None)
+    if doc is None:
+        return
+    try:
+        inserts = list(modelspace.query("INSERT"))
+    except Exception:
+        return
+    if len(inserts) < 16:
+        return
+
+    by_name: dict[str, list[Any]] = {}
+    for insert in inserts:
+        dxf = getattr(insert, "dxf", None)
+        if dxf is None:
+            continue
+        block_name = _normalize_block_name(getattr(dxf, "name", None))
+        if block_name is None:
+            continue
+        if _is_layout_pseudo_block_name(block_name) or block_name.upper().startswith("*D"):
+            continue
+        by_name.setdefault(block_name, []).append(insert)
+
+    pruned_any = False
+    for block_name, refs in by_name.items():
+        if len(refs) < 16:
+            continue
+        if not all(_is_large_uniform_insert_reference(ref) for ref in refs):
+            continue
+        entity_count, _nested_insert_count, local_center_abs = _cached_block_layout_metrics(
+            modelspace,
+            block_name,
+        )
+        if entity_count < 2048:
+            continue
+        if local_center_abs is None or local_center_abs <= 1000.0:
+            continue
+        try:
+            block = doc.blocks.get(block_name)
+        except Exception:
+            continue
+        if block is None:
+            continue
+        for entity in list(block):
+            if not _is_implausible_repeated_block_primitive(entity):
+                continue
+            try:
+                block.delete_entity(entity)
+                pruned_any = True
+            except Exception:
+                continue
+
+    if pruned_any:
+        _BLOCK_INSERT_SAFETY_CACHE.pop(doc, None)
+        _BLOCK_LAYOUT_METRICS_CACHE.pop(doc, None)
+        _BLOCK_LOCAL_Y_SPAN_CACHE.pop(doc, None)
+
+
+def _drop_pathological_modelspace_block_references(modelspace: Any) -> None:
+    doc = getattr(modelspace, "doc", None)
+    if doc is None:
+        return
+    try:
+        inserts = list(modelspace.query("INSERT"))
+    except Exception:
+        return
+    if len(inserts) < 16:
+        return
+
+    by_name: dict[str, list[Any]] = {}
+    for insert in inserts:
+        dxf = getattr(insert, "dxf", None)
+        if dxf is None:
+            continue
+        block_name = _normalize_block_name(getattr(dxf, "name", None))
+        if block_name is None:
+            continue
+        if _is_layout_pseudo_block_name(block_name) or block_name.upper().startswith("*D"):
+            continue
+        by_name.setdefault(block_name, []).append(insert)
+
+    removed_any = False
+    for block_name, refs in by_name.items():
+        if len(refs) < 32:
+            continue
+        if not all(_is_large_uniform_insert_reference(ref) for ref in refs):
+            continue
+        entity_count, nested_insert_count, local_center_abs = _cached_block_layout_metrics(
+            modelspace,
+            block_name,
+        )
+        if entity_count < 2048 or nested_insert_count < 32:
+            continue
+        if local_center_abs is None or local_center_abs <= 1000.0:
+            continue
+        for ref in refs:
+            try:
+                modelspace.delete_entity(ref)
+                removed_any = True
+            except Exception:
+                continue
+
+    if removed_any:
+        _purge_unreferenced_blocks(doc)
 
 
 def _is_placeholder_anonymous_dimension_insert(

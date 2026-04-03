@@ -14,6 +14,7 @@ pub struct InsertEntity {
     pub scale: (f64, f64, f64),
     pub rotation: f64,
     pub block_header_handle: Option<u64>,
+    pub owner_handle: Option<u64>,
 }
 
 pub fn decode_insert(reader: &mut BitReader<'_>) -> Result<InsertEntity> {
@@ -87,12 +88,19 @@ fn decode_insert_with_header(
 
     // INSERT keeps block and owned references in the handle stream.
     let mut block_header_handle = None;
+    let mut owner_handle = None;
     reader.set_bit_pos(header.obj_size);
 
     let common_ok = if r2007_layer_only {
         parse_common_entity_layer_handle(reader, &header).map(|_| ())
     } else {
-        parse_common_entity_handles(reader, &header).map(|_| ())
+        match parse_common_entity_handles(reader, &header) {
+            Ok(common_handles) => {
+                owner_handle = common_handles.owner_ref;
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     };
     if let Err(err) = common_ok {
         if !(allow_handle_decode_failure
@@ -123,5 +131,6 @@ fn decode_insert_with_header(
         scale: (x_scale, y_scale, z_scale),
         rotation,
         block_header_handle,
+        owner_handle,
     })
 }

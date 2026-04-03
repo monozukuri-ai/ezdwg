@@ -2,9 +2,9 @@ use crate::bit::BitReader;
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
 use crate::entities::common::{
-    parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r14,
-    parse_common_entity_header_r2007, parse_common_entity_header_r2010,
-    parse_common_entity_header_r2013, parse_common_entity_layer_handle, CommonEntityHeader,
+    parse_common_entity_header, parse_common_entity_header_r14, parse_common_entity_header_r2007,
+    parse_common_entity_header_r2010, parse_common_entity_header_r2013,
+    parse_common_entity_owner_and_layer_handle, CommonEntityHeader,
 };
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -15,6 +15,7 @@ pub struct CircleEntity {
     pub handle: u64,
     pub color_index: Option<u16>,
     pub true_color: Option<u32>,
+    pub owner_handle: Option<u64>,
     pub layer_handle: u64,
     pub center: (f64, f64, f64),
     pub radius: f64,
@@ -92,23 +93,19 @@ fn decode_circle_with_header(
     let radius = reader.read_bd()?;
     let _thickness = reader.read_bt()?;
     let _extrusion = reader.read_be()?;
-    // Handles are stored in the handle stream at obj_size bit offset.
-    reader.set_bit_pos(header.obj_size);
-    let layer_handle = match if r2007_layer_only {
-        parse_common_entity_layer_handle(reader, &header)
-    } else {
-        parse_common_entity_handles(reader, &header).map(|common_handles| common_handles.layer)
-    } {
-        Ok(layer_handle) => layer_handle,
+    let (owner_handle, layer_handle) = match parse_common_entity_owner_and_layer_handle(
+        reader,
+        &header,
+        r2007_layer_only,
+    ) {
+        Ok(owner_layer) => owner_layer,
         Err(err)
             if allow_handle_decode_failure
                 && matches!(
                     err.kind,
                     ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
                 ) =>
-        {
-            0
-        }
+        { (None, 0) }
         Err(err) => return Err(err),
     };
 
@@ -116,6 +113,7 @@ fn decode_circle_with_header(
         handle: header.handle,
         color_index: header.color.index,
         true_color: header.color.true_color,
+        owner_handle,
         layer_handle,
         center,
         radius,
@@ -221,6 +219,7 @@ fn consider_circle_r14_delta(
             handle: object_handle,
             color_index: None,
             true_color: None,
+            owner_handle: None,
             layer_handle: 0,
             center,
             radius,

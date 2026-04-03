@@ -2,10 +2,9 @@ use crate::bit::{BitReader, Endian};
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
 use crate::entities::common::{
-    parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r14,
-    parse_common_entity_header_r2007, parse_common_entity_header_r2010,
-    parse_common_entity_header_r2013, parse_common_entity_layer_handle, CommonEntityColor,
-    CommonEntityHeader,
+    parse_common_entity_header, parse_common_entity_header_r14, parse_common_entity_header_r2007,
+    parse_common_entity_header_r2010, parse_common_entity_header_r2013,
+    parse_common_entity_owner_and_layer_handle, CommonEntityColor, CommonEntityHeader,
 };
 
 #[derive(Debug, Clone)]
@@ -13,6 +12,7 @@ pub struct LwPolylineEntity {
     pub handle: u64,
     pub color_index: Option<u16>,
     pub true_color: Option<u32>,
+    pub owner_handle: Option<u64>,
     pub layer_handle: u64,
     pub flags: u16,
     pub vertices: Vec<(f64, f64)>,
@@ -220,7 +220,7 @@ fn decode_lwpolyline_with_header(
     } else {
         body
     };
-    let layer_handle = decode_lwpolyline_layer_handle(
+    let (owner_handle, layer_handle) = decode_lwpolyline_owner_and_layer_handle(
         reader,
         &header,
         allow_handle_decode_failure,
@@ -231,6 +231,7 @@ fn decode_lwpolyline_with_header(
         handle: header.handle,
         color_index: header.color.index,
         true_color: header.color.true_color,
+        owner_handle,
         layer_handle,
         flags: body.flags,
         vertices: body.vertices,
@@ -501,32 +502,28 @@ fn decode_lwpolyline_body(
     })
 }
 
-fn decode_lwpolyline_layer_handle(
+fn decode_lwpolyline_owner_and_layer_handle(
     reader: &mut BitReader<'_>,
     header: &CommonEntityHeader,
     allow_handle_decode_failure: bool,
     r2007_layer_only: bool,
-) -> Result<u64> {
-    // Handles are stored in the handle stream at obj_size bit offset.
-    reader.set_bit_pos(header.obj_size);
-    let layer_handle = match if r2007_layer_only {
-        parse_common_entity_layer_handle(reader, header)
-    } else {
-        parse_common_entity_handles(reader, header).map(|common_handles| common_handles.layer)
-    } {
-        Ok(layer_handle) => layer_handle,
+) -> Result<(Option<u64>, u64)> {
+    let owner_layer = match parse_common_entity_owner_and_layer_handle(
+        reader,
+        header,
+        r2007_layer_only,
+    ) {
+        Ok(owner_layer) => owner_layer,
         Err(err)
             if allow_handle_decode_failure
                 && matches!(
                     err.kind,
                     ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
                 ) =>
-        {
-            0
-        }
+        { (None, 0) }
         Err(err) => return Err(err),
     };
-    Ok(layer_handle)
+    Ok(owner_layer)
 }
 
 fn parse_r14_lwpolyline_compact_header(
@@ -648,12 +645,14 @@ fn decode_lwpolyline_r14_scan_by_obj_size(
             "failed to locate plausible R14 LWPOLYLINE body",
         )
     })?;
-    let layer_handle = decode_lwpolyline_layer_handle(reader, &header, true, false)?;
+    let (owner_handle, layer_handle) =
+        decode_lwpolyline_owner_and_layer_handle(reader, &header, true, false)?;
 
     Ok(LwPolylineEntity {
         handle: header.handle,
         color_index: header.color.index,
         true_color: header.color.true_color,
+        owner_handle,
         layer_handle,
         flags: body.flags,
         vertices: body.vertices,

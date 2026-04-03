@@ -82,6 +82,58 @@ fn prepare_insert_name_resolution_state(
     })
 }
 
+fn is_layout_pseudo_block_name(name: &str) -> bool {
+    let upper = name.trim().to_ascii_uppercase();
+    upper.starts_with("*MODEL_SPACE") || upper.starts_with("*PAPER_SPACE")
+}
+
+fn recover_insert_owner_handle_r2010_plus(
+    record: &objects::ObjectRecord<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+    parsed_owner_handle: Option<u64>,
+    resolved_block_handle: Option<u64>,
+    state: &InsertNameResolutionState,
+) -> Option<u64> {
+    let parsed_owner_handle = parsed_owner_handle
+        .filter(|handle| *handle != 0)
+        .filter(|handle| Some(*handle) != resolved_block_handle)
+        .filter(|handle| state.known_block_handles.contains(handle));
+    if parsed_owner_handle.is_some() || !is_r2010_plus_version(version) {
+        return parsed_owner_handle;
+    }
+
+    let candidates = collect_insert_block_handle_candidates_r2010_plus(
+        record,
+        version,
+        header,
+        object_handle,
+        resolved_block_handle,
+        Some(&state.known_block_handles),
+        8,
+    );
+    let mut best: Option<(usize, u64)> = None;
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        if candidate == 0 || Some(candidate) == resolved_block_handle {
+            continue;
+        }
+        let mut score = index.saturating_mul(16);
+        if state
+            .block_header_names
+            .get(&candidate)
+            .is_some_and(|name| is_layout_pseudo_block_name(name))
+        {
+            score = score.saturating_sub(64);
+        }
+        match best {
+            Some((best_score, _)) if best_score <= score => {}
+            _ => best = Some((score, candidate)),
+        }
+    }
+    best.map(|(_score, candidate)| candidate)
+}
+
 fn decode_insert_entities_with_state(
     decoder: &decoder::Decoder<'_>,
     dynamic_types: &HashMap<u16, String>,
@@ -548,6 +600,90 @@ pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
         &index,
         best_effort,
         &mut state,
+        limit,
+    )
+}
+
+fn decode_insert_owner_handles_impl(
+    decoder: &decoder::Decoder<'_>,
+    dynamic_types: &HashMap<u16, String>,
+    index: &objects::ObjectIndex,
+    best_effort: bool,
+    state: &InsertNameResolutionState,
+    limit: Option<usize>,
+) -> PyResult<Vec<InsertOwnerRow>> {
+    let mut result: Vec<InsertOwnerRow> = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x07, "INSERT", dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity = match decode_insert_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(entity) => entity,
+            Err(err) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        };
+        let resolved_block_handle = recover_insert_block_header_handle_r2010_plus(
+            &record,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+            entity.block_header_handle,
+            &state.known_block_handles,
+            &state.named_block_handles,
+        );
+        let owner_handle = recover_insert_owner_handle_r2010_plus(
+            &record,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+            entity.owner_handle,
+            resolved_block_handle,
+            state,
+        );
+        result.push((entity.handle, owner_handle));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_insert_owner_handles(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<InsertOwnerRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let state =
+        prepare_insert_name_resolution_state(&decoder, &dynamic_types, &index, best_effort)?;
+    decode_insert_owner_handles_impl(
+        &decoder,
+        &dynamic_types,
+        &index,
+        best_effort,
+        &state,
         limit,
     )
 }
