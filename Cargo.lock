@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "ezdwg"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "encoding_rs",
  "pyo3",
