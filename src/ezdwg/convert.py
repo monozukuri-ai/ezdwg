@@ -19,9 +19,57 @@ from .document import (
     read,
 )
 from .entity import Entity
-
-
-_POLYLINE_2D_SPLINE_CURVE_TYPES = {"QuadraticBSpline", "CubicBSpline", "Bezier"}
+from ._convert_utils import (
+    _MAX_COORD_ABS,
+    _dimension_text,
+    _distinct_xy_count,
+    _finite_float,
+    _float_or_none,
+    _normalize_dim_block_policy,
+    _normalized_angle_degrees,
+    _ordinate_dim_type,
+    _point2,
+    _point2_or_none,
+    _point3,
+    _quantize_dim_block_value,
+    _signed_line_distance_2d,
+    _to_rgb,
+    _to_valid_aci,
+    _to_valid_true_color,
+    _validate_coord,
+)
+from ._convert_row_builders import (
+    _as_arc_row,
+    _as_circle_row,
+    _as_line_row,
+    _as_lwpolyline_row,
+    _as_mtext_row,
+    _as_point_row,
+    _as_ray_row,
+    _as_text_row,
+    _as_xline_row,
+)
+from ._convert_polyline2d_spline import (
+    _open_uniform_knot_vector,
+    _polyline_2d_spline_payload,
+    _polyline_2d_tangent_angle_unit,
+    _should_write_polyline_2d_as_spline,
+)
+from ._convert_layer import (
+    _layer_names_by_handle,
+    _layer_styles_by_handle,
+    _prepare_dxf_layers,
+)
+from ._convert_geometry_filter import (
+    _ezdxf_entity_type,
+    _has_origin_anchor_far_lwpolyline_geometry,
+    _has_tiny_origin_3dface_geometry,
+    _has_tiny_origin_arc_geometry,
+    _has_tiny_origin_ray_geometry,
+    _is_implausible_repeated_block_primitive,
+    _is_plausible_text_content,
+    _is_plausible_text_insert,
+)
 _BLOCK_EXCLUDED_ENTITY_TYPES = {
     "BLOCK",
     "ENDBLK",
@@ -88,12 +136,10 @@ _DWG_WRITABLE_ENTITY_TYPES = {
     "TEXT",
     "MTEXT",
 }
-_MAX_COORD_ABS = 1.0e12
 _BLOCK_INSERT_SAFETY_CACHE: weakref.WeakKeyDictionary[Any, dict[str, tuple[bool, bool, float | None]]] = weakref.WeakKeyDictionary()
 _BLOCK_LAYOUT_METRICS_CACHE: weakref.WeakKeyDictionary[Any, dict[str, tuple[int, int, float | None]]] = weakref.WeakKeyDictionary()
 _LAYOUT_PSEUDO_ALIAS_CACHE: weakref.WeakKeyDictionary[Any, dict[str, str]] = weakref.WeakKeyDictionary()
 _BLOCK_LOCAL_Y_SPAN_CACHE: weakref.WeakKeyDictionary[Any, dict[str, float | None]] = weakref.WeakKeyDictionary()
-_DIM_BLOCK_POLICIES = {"smart", "legacy"}
 _OPEN30_REMAP_SCALE_MIN = 30.0
 _OPEN30_REMAP_SCALE_MAX = 120.0
 _OPEN30_REMAP_ANGLE_EPS = 1.0e-3
@@ -103,7 +149,6 @@ _OPEN30_INNER_WIDTH = 23130.0
 _OPEN30_INNER_HEIGHT = 15720.0
 _OPEN30_SHEET_GAP = 1050.0
 _LAYOUT_PSEUDO_MODELSPACE_ALIAS_PREFIX = "__EZDWG_LAYOUT_ALIAS_MODEL_SPACE"
-_INVALID_DXF_LAYER_NAME_CHARS = frozenset('<>/\\":;?*|=')
 
 
 @dataclass(frozen=True)
@@ -290,201 +335,6 @@ def to_dwg(
         written_entities=written,
         skipped_entities=skipped,
         skipped_by_type=dict(sorted(skipped_by_type.items())),
-    )
-
-
-def _as_line_row(entity: Entity) -> tuple[int, float, float, float, float, float, float] | None:
-    start = entity.dxf.get("start")
-    end = entity.dxf.get("end")
-    if not (
-        isinstance(start, tuple)
-        and len(start) == 3
-        and isinstance(end, tuple)
-        and len(end) == 3
-    ):
-        return None
-    return (
-        int(entity.handle),
-        float(start[0]),
-        float(start[1]),
-        float(start[2]),
-        float(end[0]),
-        float(end[1]),
-        float(end[2]),
-    )
-
-
-def _as_point_row(entity: Entity) -> tuple[int, float, float, float, float] | None:
-    location = entity.dxf.get("location")
-    x_axis_angle = entity.dxf.get("x_axis_angle", 0.0)
-    if not (
-        isinstance(location, tuple)
-        and len(location) == 3
-        and isinstance(x_axis_angle, (int, float))
-    ):
-        return None
-    return (
-        int(entity.handle),
-        float(location[0]),
-        float(location[1]),
-        float(location[2]),
-        float(x_axis_angle),
-    )
-
-
-def _as_ray_row(entity: Entity) -> tuple[int, tuple[float, float, float], tuple[float, float, float]] | None:
-    start = entity.dxf.get("start")
-    unit_vector = entity.dxf.get("unit_vector")
-    if not (
-        isinstance(start, tuple)
-        and len(start) == 3
-        and isinstance(unit_vector, tuple)
-        and len(unit_vector) == 3
-    ):
-        return None
-    return (
-        int(entity.handle),
-        (float(start[0]), float(start[1]), float(start[2])),
-        (float(unit_vector[0]), float(unit_vector[1]), float(unit_vector[2])),
-    )
-
-
-def _as_xline_row(entity: Entity) -> tuple[int, tuple[float, float, float], tuple[float, float, float]] | None:
-    return _as_ray_row(entity)
-
-
-def _as_arc_row(entity: Entity) -> tuple[int, float, float, float, float, float, float] | None:
-    center = entity.dxf.get("center")
-    radius = entity.dxf.get("radius")
-    start_angle = entity.dxf.get("start_angle")
-    end_angle = entity.dxf.get("end_angle")
-    if not (
-        isinstance(center, tuple)
-        and len(center) == 3
-        and isinstance(radius, (int, float))
-        and isinstance(start_angle, (int, float))
-        and isinstance(end_angle, (int, float))
-    ):
-        return None
-    return (
-        int(entity.handle),
-        float(center[0]),
-        float(center[1]),
-        float(center[2]),
-        float(radius),
-        math.radians(float(start_angle)),
-        math.radians(float(end_angle)),
-    )
-
-
-def _as_circle_row(entity: Entity) -> tuple[int, float, float, float, float] | None:
-    center = entity.dxf.get("center")
-    radius = entity.dxf.get("radius")
-    if not (isinstance(center, tuple) and len(center) == 3 and isinstance(radius, (int, float))):
-        return None
-    return (
-        int(entity.handle),
-        float(center[0]),
-        float(center[1]),
-        float(center[2]),
-        float(radius),
-    )
-
-
-def _as_lwpolyline_row(
-    entity: Entity,
-) -> tuple[int, int, list[tuple[float, float]], list[float], list[tuple[float, float]], float | None] | None:
-    points = entity.dxf.get("points")
-    flags = entity.dxf.get("flags", 0)
-    bulges = entity.dxf.get("bulges") or []
-    widths = entity.dxf.get("widths") or []
-    const_width = entity.dxf.get("const_width")
-    if not isinstance(points, list):
-        return None
-    points2d: list[tuple[float, float]] = []
-    for point in points:
-        if not (isinstance(point, tuple) and len(point) >= 2):
-            return None
-        points2d.append((float(point[0]), float(point[1])))
-    out_bulges = [float(value) for value in list(bulges)]
-    out_widths: list[tuple[float, float]] = []
-    for width in list(widths):
-        if not (isinstance(width, tuple) and len(width) == 2):
-            continue
-        out_widths.append((float(width[0]), float(width[1])))
-    out_const_width = float(const_width) if isinstance(const_width, (int, float)) else None
-    return (
-        int(entity.handle),
-        int(flags),
-        points2d,
-        out_bulges,
-        out_widths,
-        out_const_width,
-    )
-
-
-def _as_text_row(entity: Entity) -> tuple[int, str, tuple[float, float, float], float, float] | None:
-    text = entity.dxf.get("text")
-    insert = entity.dxf.get("insert")
-    height = entity.dxf.get("height")
-    rotation = entity.dxf.get("rotation", 0.0)
-    if not (
-        isinstance(text, str)
-        and isinstance(insert, tuple)
-        and len(insert) == 3
-        and isinstance(height, (int, float))
-        and isinstance(rotation, (int, float))
-    ):
-        return None
-    return (
-        int(entity.handle),
-        text,
-        (float(insert[0]), float(insert[1]), float(insert[2])),
-        float(height),
-        math.radians(float(rotation)),
-    )
-
-
-def _as_mtext_row(
-    entity: Entity,
-) -> tuple[int, str, tuple[float, float, float], tuple[float, float, float], float, float, int, int] | None:
-    text = entity.dxf.get("raw_text")
-    if not isinstance(text, str):
-        text = entity.dxf.get("text")
-    insert = entity.dxf.get("insert")
-    text_direction = entity.dxf.get("text_direction")
-    if not (
-        isinstance(insert, tuple)
-        and len(insert) == 3
-        and isinstance(text, str)
-    ):
-        return None
-
-    if isinstance(text_direction, tuple) and len(text_direction) == 3:
-        direction = (
-            float(text_direction[0]),
-            float(text_direction[1]),
-            float(text_direction[2]),
-        )
-    else:
-        rotation = float(entity.dxf.get("rotation", 0.0))
-        angle = math.radians(rotation)
-        direction = (math.cos(angle), math.sin(angle), 0.0)
-
-    rect_width = float(entity.dxf.get("rect_width", 0.0))
-    char_height = float(entity.dxf.get("char_height", entity.dxf.get("height", 1.0)))
-    attachment_point = int(entity.dxf.get("attachment_point", 1))
-    drawing_direction = int(entity.dxf.get("drawing_direction", 1))
-
-    return (
-        int(entity.handle),
-        text,
-        (float(insert[0]), float(insert[1]), float(insert[2])),
-        direction,
-        rect_width,
-        char_height,
-        attachment_point,
-        drawing_direction,
     )
 
 
@@ -1204,22 +1054,6 @@ def _dedupe_large_axis_aligned_lwpolyline_rectangles(modelspace: Any) -> None:
                 continue
             continue
         seen_keys.add(key)
-
-
-def _ezdxf_entity_type(entity: Any) -> str:
-    try:
-        token = entity.dxftype()
-    except Exception:
-        try:
-            token = entity.dxftype
-        except Exception:
-            return ""
-        if callable(token):
-            try:
-                token = token()
-            except Exception:
-                return ""
-    return str(token).strip().upper()
 
 
 def _entity_xy_points(entity: Any) -> list[tuple[float, float]]:
@@ -2266,61 +2100,6 @@ def _entity_overlap_signature(entity: Any) -> tuple[Any, ...] | None:
     except Exception:
         return None
     return None
-
-
-def _score_text_plausibility_char(ch: str) -> int:
-    if ch == "\uFFFD" or ("\uE000" <= ch <= "\uF8FF"):
-        return -6
-    if unicodedata.category(ch).startswith("C") and ch not in {"\n", "\r", "\t"}:
-        return -5
-    if ch.isascii() and ch.isalnum():
-        return 2
-    if ch.isascii() and (ch in r""" !"#$%&'()*+,-./:;<=>?@[\]^_`{|}~""" or ch.isspace()):
-        return 1
-    if (
-        "\u3000" <= ch <= "\u303F"
-        or "\u3040" <= ch <= "\u309F"
-        or "\u30A0" <= ch <= "\u30FF"
-        or "\u3400" <= ch <= "\u4DBF"
-        or "\u4E00" <= ch <= "\u9FFF"
-        or "\uFF01" <= ch <= "\uFF60"
-        or "\uFFE0" <= ch <= "\uFFE6"
-    ):
-        return 2
-    if ch.isalpha() or ch.isnumeric() or ch.isspace():
-        return 1
-    return -2
-
-
-def _is_plausible_text_content(text: str) -> bool:
-    if text == "":
-        return True
-    if len(text) > 512:
-        return False
-    score = 0
-    count = 0
-    control_count = 0
-    for ch in text:
-        count += 1
-        if unicodedata.category(ch).startswith("C") and ch not in {"\n", "\r", "\t"}:
-            control_count += 1
-        score += _score_text_plausibility_char(ch)
-    if control_count >= 4:
-        return False
-    return score >= -(count // 2)
-
-
-def _is_plausible_text_insert(insert: Any) -> bool:
-    if not isinstance(insert, (list, tuple)) or len(insert) < 2:
-        return False
-    try:
-        x = float(insert[0])
-        y = float(insert[1])
-    except Exception:
-        return False
-    if not (math.isfinite(x) and math.isfinite(y)):
-        return False
-    return abs(x) <= _MAX_COORD_ABS and abs(y) <= _MAX_COORD_ABS
 
 
 def _rebalance_sparse_open30_right_sheet_geometry(modelspace: Any) -> None:
@@ -5113,214 +4892,6 @@ def _write_entity_to_modelspace_unsafe(
     return False
 
 
-def _should_write_polyline_2d_as_spline(dxf: dict[str, Any]) -> bool:
-    if bool(dxf.get("interpolation_applied", False)):
-        return len(list(dxf.get("interpolated_points", []) or [])) >= 2
-    if bool(dxf.get("curve_fit", False)) or bool(dxf.get("spline_fit", False)):
-        return len(list(dxf.get("points", []) or [])) >= 2
-    curve_type_label = str(dxf.get("curve_type_label") or "")
-    if curve_type_label in _POLYLINE_2D_SPLINE_CURVE_TYPES:
-        return len(list(dxf.get("points", []) or [])) >= 2
-    return False
-
-
-def _polyline_2d_spline_points(dxf: dict[str, Any]) -> list[tuple[float, float, float]]:
-    points = _polyline_2d_select_curve_points(dxf)
-    if len(points) < 2 and bool(dxf.get("interpolation_applied", False)):
-        points = [_point3(point) for point in list(dxf.get("interpolated_points") or [])]
-    if len(points) < 2:
-        return points
-    closed = bool(dxf.get("closed", False))
-    if closed:
-        if points[0] != points[-1]:
-            points.append(points[0])
-    else:
-        while len(points) > 1 and points[0] == points[-1]:
-            points.pop()
-    return points
-
-
-def _polyline_2d_spline_degree(dxf: dict[str, Any], point_count: int) -> int:
-    label = str(dxf.get("curve_type_label") or "")
-    if label == "QuadraticBSpline":
-        preferred = 2
-    elif label in {"CubicBSpline", "Bezier"}:
-        preferred = 3
-    else:
-        preferred = int(dxf.get("degree", 3))
-    clamped = max(2, min(preferred, max(2, point_count - 1)))
-    return clamped
-
-
-def _polyline_2d_spline_payload(dxf: dict[str, Any]) -> dict[str, Any] | None:
-    spline_points = _polyline_2d_spline_points(dxf)
-    if len(spline_points) < 2:
-        return None
-
-    spline_degree = _polyline_2d_spline_degree(dxf, len(spline_points))
-    curve_type_label = str(dxf.get("curve_type_label") or "")
-    curve_fit = bool(dxf.get("curve_fit", False))
-    spline_fit = bool(dxf.get("spline_fit", False))
-
-    # For pure curve_type-driven splines, preserve control points directly.
-    if (
-        curve_type_label in _POLYLINE_2D_SPLINE_CURVE_TYPES
-        and not curve_fit
-        and not spline_fit
-    ):
-        control_points = list(spline_points)
-        if len(control_points) >= 2:
-            if len(control_points) > 1 and control_points[0] == control_points[-1]:
-                control_points = control_points[:-1]
-            if len(control_points) >= 2:
-                degree = max(2, min(spline_degree, max(2, len(control_points) - 1)))
-                return {
-                    "control_points": control_points,
-                    "degree": degree,
-                    "knots": _open_uniform_knot_vector(len(control_points), degree),
-                    "closed": bool(dxf.get("closed", False)),
-                }
-
-    spline_tangents = _polyline_2d_spline_tangents(dxf)
-    return {
-        "fit_points": spline_points,
-        "degree": spline_degree,
-        "fit_tangents": spline_tangents,
-        "closed": bool(dxf.get("closed", False)),
-    }
-
-
-def _open_uniform_knot_vector(control_point_count: int, degree: int) -> list[float]:
-    n = int(control_point_count)
-    p = int(degree)
-    if n < 2:
-        return []
-    p = max(1, min(p, n - 1))
-    knot_count = n + p + 1
-    if knot_count <= 0:
-        return []
-
-    knots: list[float] = []
-    for i in range(knot_count):
-        if i <= p:
-            knots.append(0.0)
-        elif i >= n:
-            knots.append(1.0)
-        else:
-            knots.append((i - p) / (n - p))
-    return knots
-
-
-def _polyline_2d_select_curve_points(dxf: dict[str, Any]) -> list[tuple[float, float, float]]:
-    points = [_point3(point) for point in list(dxf.get("points") or [])]
-    if len(points) < 2:
-        return points
-    indices = _polyline_2d_select_curve_indices(dxf, len(points))
-    return [points[i] for i in indices]
-
-
-def _polyline_2d_select_curve_indices(dxf: dict[str, Any], point_count: int) -> list[int]:
-    if point_count < 2:
-        return list(range(point_count))
-
-    vertex_flags_raw = list(dxf.get("vertex_flags") or [])
-    if not vertex_flags_raw:
-        return list(range(point_count))
-
-    vertex_flags = [int(flag) for flag in vertex_flags_raw]
-    count = min(point_count, len(vertex_flags))
-    if count < 2:
-        return list(range(point_count))
-
-    paired = [(i, vertex_flags[i]) for i in range(count)]
-    has_spline_frame = any((flag & 0x10) != 0 for _, flag in paired)
-    if has_spline_frame:
-        selected = [idx for idx, flag in paired if (flag & 0x10) != 0]
-        if len(selected) >= 2:
-            return selected
-
-    # Exclude curve/spline generated vertices (DXF vertex flags bit1/bit8).
-    selected = [idx for idx, flag in paired if (flag & 0x09) == 0]
-    if len(selected) >= 2:
-        return selected
-    return list(range(point_count))
-
-
-def _polyline_2d_spline_tangents(dxf: dict[str, Any]) -> list[tuple[float, float, float]] | None:
-    if bool(dxf.get("closed", False)):
-        return None
-
-    points = list(dxf.get("points") or [])
-    if len(points) < 2:
-        return None
-    indices = _polyline_2d_select_curve_indices(dxf, len(points))
-    if len(indices) < 2:
-        return None
-
-    tangent_dirs = list(dxf.get("tangent_dirs") or [])
-    vertex_flags = [int(flag) for flag in list(dxf.get("vertex_flags") or [])]
-    if not tangent_dirs or not vertex_flags:
-        return None
-
-    limit = min(len(points), len(vertex_flags), len(tangent_dirs))
-    if limit < 2:
-        return None
-
-    angle_unit = _polyline_2d_tangent_angle_unit(tangent_dirs)
-
-    def tangent_vector(angle: float) -> tuple[float, float, float]:
-        if angle_unit == "deg":
-            angle = math.radians(angle)
-        return (math.cos(angle), math.sin(angle), 0.0)
-
-    start = None
-    for idx in indices:
-        if idx >= limit:
-            continue
-        if (vertex_flags[idx] & 0x02) == 0:
-            continue
-        angle = float(tangent_dirs[idx])
-        if not math.isfinite(angle):
-            continue
-        start = tangent_vector(angle)
-        break
-
-    end = None
-    for idx in reversed(indices):
-        if idx >= limit:
-            continue
-        if (vertex_flags[idx] & 0x02) == 0:
-            continue
-        angle = float(tangent_dirs[idx])
-        if not math.isfinite(angle):
-            continue
-        end = tangent_vector(angle)
-        break
-
-    if start is None or end is None:
-        return None
-    return [start, end]
-
-
-def _polyline_2d_tangent_angle_unit(raw_angles: list[Any]) -> str:
-    finite: list[float] = []
-    for raw in raw_angles:
-        try:
-            value = float(raw)
-        except Exception:
-            continue
-        if math.isfinite(value):
-            finite.append(value)
-    if not finite:
-        return "rad"
-    max_abs = max(abs(value) for value in finite)
-    # Most DWG data stores radians. Values clearly beyond one full turn
-    # indicate degree-like data from upstream conversion quirks.
-    if max_abs > (2.0 * math.pi + 1.0e-3):
-        return "deg"
-    return "rad"
-
-
 def _write_spline(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str, Any]) -> bool:
     fit_points = [_point3(point) for point in dxf.get("fit_points", [])]
     if len(fit_points) >= 2:
@@ -6044,179 +5615,6 @@ def _entity_dxfattribs(
     return attribs
 
 
-def _layer_styles_by_handle(decode_path: str | None) -> dict[int, tuple[int, int | None]]:
-    if not decode_path:
-        return {}
-    try:
-        rows = raw.decode_layer_colors(decode_path)
-    except Exception:
-        return {}
-    styles: dict[int, tuple[int, int | None]] = {}
-    for row in rows:
-        if not isinstance(row, tuple) or len(row) < 3:
-            continue
-        try:
-            handle = int(row[0])
-            index = int(row[1])
-        except Exception:
-            continue
-        true_color = row[2]
-        try:
-            true_color_int = int(true_color) if true_color is not None else None
-        except Exception:
-            true_color_int = None
-        styles[handle] = (index, true_color_int)
-    return styles
-
-
-def _layer_names_by_handle(decode_path: str | None) -> dict[int, str]:
-    if not decode_path:
-        return {}
-    try:
-        rows = raw.decode_layer_names(decode_path)
-    except Exception:
-        return {}
-    names: dict[int, str] = {}
-    for row in rows:
-        if not isinstance(row, tuple) or len(row) < 2:
-            continue
-        try:
-            handle = int(row[0])
-        except Exception:
-            continue
-        name = str(row[1]).strip()
-        if not name:
-            continue
-        names[handle] = name
-    return names
-
-
-def _is_valid_dxf_layer_name(name: str) -> bool:
-    candidate = str(name).strip()
-    if not candidate:
-        return False
-    return not any(
-        ord(ch) < 32 or ch in _INVALID_DXF_LAYER_NAME_CHARS for ch in candidate
-    )
-
-
-def _prepare_dxf_layers(
-    dxf_doc: Any,
-    layer_styles_by_handle: dict[int, tuple[int, int | None]],
-    layer_names_by_handle: dict[int, str] | None = None,
-) -> dict[int, str]:
-    mapping: dict[int, str] = {0: "0"}
-    for handle in sorted(layer_styles_by_handle):
-        if handle <= 0:
-            continue
-        fallback_name = f"LAYER_{handle:X}"
-        name = fallback_name
-        if isinstance(layer_names_by_handle, dict):
-            candidate = layer_names_by_handle.get(handle)
-            if isinstance(candidate, str) and _is_valid_dxf_layer_name(candidate):
-                name = candidate.strip()
-        dxfattribs: dict[str, Any] = {}
-        style = layer_styles_by_handle.get(handle)
-        if style is not None:
-            index, true_color = style
-            color = _to_valid_aci(index)
-            if color is not None:
-                dxfattribs["color"] = color
-            resolved_true = _to_valid_true_color(true_color)
-            if resolved_true is not None:
-                dxfattribs["true_color"] = resolved_true
-        if name not in dxf_doc.layers:
-            try:
-                dxf_doc.layers.new(name=name, dxfattribs=dxfattribs or None)
-            except Exception:
-                name = fallback_name
-                if name not in dxf_doc.layers:
-                    try:
-                        dxf_doc.layers.new(name=name, dxfattribs=dxfattribs or None)
-                    except Exception:
-                        continue
-        mapping[handle] = name
-    return mapping
-
-
-def _to_valid_aci(value: Any) -> int | None:
-    try:
-        aci = int(value)
-    except Exception:
-        return None
-    if aci in (0, 256, 257):
-        return None
-    if 1 <= aci <= 255:
-        return aci
-    return None
-
-
-def _to_valid_true_color(value: Any) -> int | None:
-    try:
-        color = int(value) & 0xFFFFFF
-    except Exception:
-        return None
-    return color
-
-
-def _to_rgb(true_color: int | None) -> tuple[int, int, int] | None:
-    if true_color is None:
-        return None
-    return (
-        (true_color >> 16) & 0xFF,
-        (true_color >> 8) & 0xFF,
-        true_color & 0xFF,
-    )
-
-
-def _validate_coord(value: Any) -> float:
-    coord = float(value)
-    if not math.isfinite(coord):
-        raise ValueError(f"invalid coordinate value: {value!r}")
-    if abs(coord) > _MAX_COORD_ABS:
-        raise ValueError(f"coordinate out of supported range: {coord!r}")
-    return coord
-
-
-def _finite_float(value: Any, default: float) -> float:
-    try:
-        parsed = float(value)
-    except Exception:
-        return float(default)
-    if not math.isfinite(parsed):
-        return float(default)
-    if abs(parsed) > _MAX_COORD_ABS:
-        return float(default)
-    return parsed
-
-
-def _distinct_xy_count(points: list[tuple[float, float, float]]) -> int:
-    return len({(float(point[0]), float(point[1])) for point in points})
-
-
-def _normalize_dim_block_policy(policy: str) -> str:
-    token = str(policy or "").strip().lower()
-    if token in {"", "smart", "auto", "default"}:
-        return "smart"
-    if token in _DIM_BLOCK_POLICIES:
-        return token
-    allowed = ", ".join(sorted(_DIM_BLOCK_POLICIES))
-    raise ValueError(f"unsupported dim-block policy: {policy!r} (expected one of: {allowed})")
-
-
-def _quantize_dim_block_value(value: float) -> float:
-    return round(float(value), 9)
-
-
-def _normalized_angle_degrees(value: float) -> float:
-    normalized = float(value) % 360.0
-    if abs(normalized) <= 1.0e-9:
-        return 0.0
-    if abs(normalized - 360.0) <= 1.0e-9:
-        return 0.0
-    return normalized
-
-
 def _anonymous_dimension_block_ref_key(
     block_name: str,
     insert: tuple[float, float, float],
@@ -6737,94 +6135,6 @@ def _drop_unresolved_block_references(doc: Any) -> None:
         _purge_unreferenced_blocks(doc)
 
 
-def _has_tiny_origin_arc_geometry(entity: Any) -> bool:
-    dxf = getattr(entity, "dxf", None)
-    if dxf is None:
-        return False
-    try:
-        center = getattr(dxf, "center")
-        radius = float(getattr(dxf, "radius"))
-        center_x = float(getattr(center, "x", center[0]))
-        center_y = float(getattr(center, "y", center[1]))
-    except Exception:
-        return False
-    if not (
-        math.isfinite(center_x)
-        and math.isfinite(center_y)
-        and math.isfinite(radius)
-    ):
-        return False
-    if radius <= 1.0e-6:
-        return True
-    return max(abs(center_x), abs(center_y)) <= 10.0 and radius <= 1.0e-3
-
-
-def _has_tiny_origin_3dface_geometry(entity: Any) -> bool:
-    dxf = getattr(entity, "dxf", None)
-    if dxf is None:
-        return False
-    values: list[float] = []
-    for token in ("vtx0", "vtx1", "vtx2", "vtx3"):
-        try:
-            point = getattr(dxf, token)
-            values.extend((float(point[0]), float(point[1]), float(point[2])))
-        except Exception:
-            return False
-    finite_values = [abs(value) for value in values if math.isfinite(value)]
-    if not finite_values:
-        return False
-    return max(finite_values) <= 1.0e-6
-
-
-def _has_tiny_origin_ray_geometry(entity: Any) -> bool:
-    dxf = getattr(entity, "dxf", None)
-    if dxf is None:
-        return False
-    try:
-        start = getattr(dxf, "start")
-        start_x = float(getattr(start, "x", start[0]))
-        start_y = float(getattr(start, "y", start[1]))
-    except Exception:
-        return False
-    if not (math.isfinite(start_x) and math.isfinite(start_y)):
-        return False
-    return max(abs(start_x), abs(start_y)) <= 10.0
-
-
-def _has_origin_anchor_far_lwpolyline_geometry(entity: Any) -> bool:
-    if _ezdxf_entity_type(entity) != "LWPOLYLINE":
-        return False
-    try:
-        points = [(float(point[0]), float(point[1])) for point in entity.get_points("xy")]
-    except Exception:
-        return False
-    if len(points) < 2 or len(points) > 4:
-        return False
-    unique_points = {
-        (round(point[0], 6), round(point[1], 6))
-        for point in points
-        if math.isfinite(point[0]) and math.isfinite(point[1])
-    }
-    if len(unique_points) > 3:
-        return False
-    has_origin_anchor = any(max(abs(x), abs(y)) <= 1.0 for x, y in unique_points)
-    if not has_origin_anchor:
-        return False
-    has_far_point = any(max(abs(x), abs(y)) >= 10000.0 for x, y in unique_points)
-    return has_far_point
-
-
-def _is_implausible_repeated_block_primitive(entity: Any) -> bool:
-    dxftype = _ezdxf_entity_type(entity)
-    if dxftype == "LWPOLYLINE":
-        return _has_origin_anchor_far_lwpolyline_geometry(entity)
-    if dxftype == "RAY":
-        return _has_tiny_origin_ray_geometry(entity)
-    if dxftype == "ARC":
-        return _has_tiny_origin_arc_geometry(entity)
-    if dxftype == "3DFACE":
-        return _has_tiny_origin_3dface_geometry(entity)
-    return False
 
 
 def _ezdxf_entity_planar_bounds(entity: Any) -> tuple[float, float, float, float] | None:
@@ -7158,77 +6468,3 @@ def _should_skip_layout_proxy_i_insert(
     return True
 
 
-def _point3(value: Any) -> tuple[float, float, float]:
-    if value is None:
-        return (0.0, 0.0, 0.0)
-    if isinstance(value, (list, tuple)):
-        if len(value) >= 3:
-            return (
-                _validate_coord(value[0]),
-                _validate_coord(value[1]),
-                _validate_coord(value[2]),
-            )
-        if len(value) >= 2:
-            return (
-                _validate_coord(value[0]),
-                _validate_coord(value[1]),
-                0.0,
-            )
-    raise ValueError(f"invalid point value: {value!r}")
-
-
-def _point2(value: Any) -> tuple[float, float]:
-    if value is None:
-        raise ValueError("invalid point value: None")
-    if isinstance(value, (list, tuple)):
-        if len(value) >= 2:
-            return (_validate_coord(value[0]), _validate_coord(value[1]))
-    raise ValueError(f"invalid point value: {value!r}")
-
-
-def _point2_or_none(value: Any) -> tuple[float, float] | None:
-    if value is None:
-        return None
-    try:
-        return _point2(value)
-    except Exception:
-        return None
-
-
-def _float_or_none(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except Exception:
-        return None
-
-
-def _dimension_text(value: Any) -> str:
-    text = str(value or "")
-    if text.strip() == "":
-        return "<>"
-    return text
-
-
-def _signed_line_distance_2d(
-    point: tuple[float, float],
-    line_start: tuple[float, float],
-    line_end: tuple[float, float],
-) -> float:
-    dx = line_end[0] - line_start[0]
-    dy = line_end[1] - line_start[1]
-    length = math.hypot(dx, dy)
-    if length <= 1.0e-12:
-        return 0.0
-    cross = dx * (point[1] - line_start[1]) - dy * (point[0] - line_start[0])
-    return cross / length
-
-
-def _ordinate_dim_type(
-    feature: tuple[float, float],
-    offset: tuple[float, float],
-) -> int:
-    dx = abs(offset[0] - feature[0])
-    dy = abs(offset[1] - feature[1])
-    return 0 if dx >= dy else 1
