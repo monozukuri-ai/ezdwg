@@ -516,64 +516,31 @@ fn dim_entity_row_from_linear_like(entity: &entities::DimLinearEntity) -> DimEnt
     )
 }
 
-fn decode_dim_linear_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::DimLinearEntity> {
-    match version {
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_dim_linear_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_dim_linear_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_dim_linear_r2007(reader),
-        _ => entities::decode_dim_linear(reader),
-    }
+impl_version_dispatch! {
+    no_r14;
+    fn decode_dim_linear_for_version -> entities::DimLinearEntity;
+    r2010: entities::decode_dim_linear_r2010;
+    r2013: entities::decode_dim_linear_r2013;
+    r2007: entities::decode_dim_linear_r2007;
+    default: entities::decode_dim_linear;
 }
 
-fn decode_dim_radius_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::DimRadiusEntity> {
-    match version {
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_dim_radius_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_dim_radius_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_dim_radius_r2007(reader),
-        _ => entities::decode_dim_radius(reader),
-    }
+impl_version_dispatch! {
+    no_r14;
+    fn decode_dim_radius_for_version -> entities::DimRadiusEntity;
+    r2010: entities::decode_dim_radius_r2010;
+    r2013: entities::decode_dim_radius_r2013;
+    r2007: entities::decode_dim_radius_r2007;
+    default: entities::decode_dim_radius;
 }
 
-fn decode_dim_diameter_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::DimDiameterEntity> {
-    match version {
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_dim_diameter_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_dim_diameter_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_dim_diameter_r2007(reader),
-        _ => entities::decode_dim_diameter(reader),
-    }
+impl_version_dispatch! {
+    no_r14;
+    fn decode_dim_diameter_for_version -> entities::DimDiameterEntity;
+    r2010: entities::decode_dim_diameter_r2010;
+    r2013: entities::decode_dim_diameter_r2013;
+    r2007: entities::decode_dim_diameter_r2007;
+    default: entities::decode_dim_diameter;
 }
 
 fn recover_dimension_anonymous_block_handle_r2010_plus(

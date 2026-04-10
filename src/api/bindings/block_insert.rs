@@ -1005,24 +1005,13 @@ pub fn decode_block_entity_name_maps(
     Ok((block_rows, endblk_rows))
 }
 
-fn decode_insert_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::InsertEntity> {
-    match version {
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_insert_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_insert_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_insert_r2007(reader),
-        _ => entities::decode_insert(reader),
-    }
+impl_version_dispatch! {
+    no_r14;
+    fn decode_insert_for_version -> entities::InsertEntity;
+    r2010: entities::decode_insert_r2010;
+    r2013: entities::decode_insert_r2013;
+    r2007: entities::decode_insert_r2007;
+    default: entities::decode_insert;
 }
 
 fn decode_minsert_for_version(
