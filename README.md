@@ -1,10 +1,12 @@
 # ezdwg
 [![PyPI version](https://badge.fury.io/py/ezdwg.svg)](https://badge.fury.io/py/ezdwg)
 
-Minimal DWG (R14-R2018 / AC1014-AC1032) reader with a Python API inspired by ezdxf.
-This project is **DWG read-focused** while providing a native **AC1015 writer** for basic entities.
+DWG (R14-R2018 / AC1014-AC1032) reader with a Python API inspired by [ezdxf](https://github.com/mozman/ezdxf).
+This project is a **DWG read-focused parser** with growing high-level entity coverage while providing a native **AC1015 writer** for basic entities.
 
 Documentation: https://monozukuri-ai.github.io/ezdwg/
+
+Roadmap: see [docs/roadmap.md](docs/roadmap.md) for the implementation plan toward a broader, less minimal parser.
 
 ## Status
 - High-level API (`ezdwg.read`): **R14 / AC1014** (experimental), **R2000 / AC1015**, **R2004 / AC1018**, **R2007 / AC1021**, **R2010 / AC1024**, **R2013 / AC1027**, **R2018 / AC1032**

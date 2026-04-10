@@ -63,6 +63,7 @@ nav:
     - Plotting: guide/plotting.md
     - DWG to DXF Conversion: guide/convert.md
     - CLI Reference: guide/cli.md
+    - Roadmap: roadmap.md
   - API Reference:
     - api/index.md
     - Core Functions: api/core.md
