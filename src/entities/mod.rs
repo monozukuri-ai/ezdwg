@@ -3,6 +3,7 @@ pub mod attrib;
 pub mod body;
 pub mod circle;
 pub mod common;
+pub mod dim_common;
 pub mod dim_diameter;
 pub mod dim_linear;
 pub mod dim_radius;

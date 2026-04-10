@@ -6,6 +6,7 @@ use crate::entities::common::{
     parse_common_entity_header_r2013, parse_common_entity_layer_handle, read_handle_reference,
     CommonEntityHeader,
 };
+use crate::entities::dim_common::{plausibility_score, R2010PlusVariant, R2010_PLUS_VARIANTS};
 use crate::entities::dim_linear::{
     decode_dim_linear, decode_dim_linear_r2007, DimLinearEntity, DimensionCommonData,
 };
@@ -42,65 +43,16 @@ pub fn decode_dim_diameter_r2013(
     decode_dim_diameter_r2010_plus_with_header(reader, header, true)
 }
 
-#[derive(Clone, Copy)]
-struct R2010PlusVariant {
-    has_dimension_version: bool,
-    has_user_text: bool,
-    extrusion_is_be: bool,
-}
-
 fn decode_dim_diameter_r2010_plus_with_header(
     reader: &mut BitReader<'_>,
     header: CommonEntityHeader,
     allow_handle_decode_failure: bool,
 ) -> Result<DimDiameterEntity> {
     let data_pos = reader.get_pos();
-    let variants = [
-        R2010PlusVariant {
-            has_dimension_version: true,
-            has_user_text: true,
-            extrusion_is_be: false,
-        },
-        R2010PlusVariant {
-            has_dimension_version: true,
-            has_user_text: false,
-            extrusion_is_be: false,
-        },
-        R2010PlusVariant {
-            has_dimension_version: false,
-            has_user_text: true,
-            extrusion_is_be: false,
-        },
-        R2010PlusVariant {
-            has_dimension_version: false,
-            has_user_text: false,
-            extrusion_is_be: false,
-        },
-        R2010PlusVariant {
-            has_dimension_version: true,
-            has_user_text: true,
-            extrusion_is_be: true,
-        },
-        R2010PlusVariant {
-            has_dimension_version: true,
-            has_user_text: false,
-            extrusion_is_be: true,
-        },
-        R2010PlusVariant {
-            has_dimension_version: false,
-            has_user_text: true,
-            extrusion_is_be: true,
-        },
-        R2010PlusVariant {
-            has_dimension_version: false,
-            has_user_text: false,
-            extrusion_is_be: true,
-        },
-    ];
 
     let mut best: Option<(u64, DimDiameterEntity)> = None;
     let mut last_error: Option<DwgError> = None;
-    for parse_variant in variants {
+    for parse_variant in R2010_PLUS_VARIANTS {
         reader.set_pos(data_pos.0, data_pos.1);
         match decode_r2010_plus_variant(reader, &header, parse_variant, allow_handle_decode_failure)
         {
@@ -227,134 +179,4 @@ fn decode_r2010_plus_variant(
         ext_line_rotation: 0.0,
         dim_rotation: 0.0,
     })
-}
-
-fn plausibility_score(entity: &DimDiameterEntity) -> u64 {
-    let mut score = 0u64;
-    let common = &entity.common;
-
-    for pt in [
-        entity.point10,
-        entity.point13,
-        entity.point14,
-        common.text_midpoint,
-    ] {
-        score = score.saturating_add(point_score(pt));
-    }
-    if let Some(insert_point) = common.insert_point {
-        score = score.saturating_add(point_score(insert_point));
-    }
-    score = score.saturating_add(point_score(common.extrusion));
-    score = score.saturating_add(point_score(common.insert_scale));
-    score = score.saturating_add(extrusion_score(common.extrusion));
-    score = score.saturating_add(scale_score(common.insert_scale));
-
-    for angle in [
-        common.text_rotation,
-        common.horizontal_direction,
-        common.insert_rotation,
-    ] {
-        score = score.saturating_add(angle_score(angle));
-    }
-
-    if let Some(measurement) = common.actual_measurement {
-        score = score.saturating_add(value_score(measurement));
-    }
-    if let Some(line_spacing) = common.line_spacing_factor {
-        score = score.saturating_add(value_score(line_spacing));
-    }
-    if let Some(attachment_point) = common.attachment_point {
-        if attachment_point > 9 {
-            score = score.saturating_add(10_000);
-        }
-    }
-    if let Some(line_spacing_style) = common.line_spacing_style {
-        if line_spacing_style > 2 {
-            score = score.saturating_add(10_000);
-        }
-    }
-    if common.dim_flags > 0x3F {
-        score = score.saturating_add(1_000);
-    }
-
-    score
-}
-
-fn extrusion_score(extrusion: (f64, f64, f64)) -> u64 {
-    if !extrusion.0.is_finite() || !extrusion.1.is_finite() || !extrusion.2.is_finite() {
-        return 1_000_000;
-    }
-    let norm_sq = extrusion.0 * extrusion.0 + extrusion.1 * extrusion.1 + extrusion.2 * extrusion.2;
-    if norm_sq <= 1e-12 {
-        return 50_000;
-    }
-    let norm = norm_sq.sqrt();
-    let mut score = 0u64;
-    let norm_err = (norm - 1.0).abs();
-    if norm_err > 0.25 {
-        score = score.saturating_add(25_000);
-    } else if norm_err > 0.05 {
-        score = score.saturating_add(2_500);
-    }
-    if extrusion.2.abs() < 0.5 {
-        score = score.saturating_add(250);
-    }
-    score
-}
-
-fn scale_score(scale: (f64, f64, f64)) -> u64 {
-    let mut score = 0u64;
-    for value in [scale.0, scale.1, scale.2] {
-        if !value.is_finite() {
-            return 1_000_000;
-        }
-        if value.abs() < 1e-12 {
-            score = score.saturating_add(2_500);
-        } else if value.abs() > 1_000.0 {
-            score = score.saturating_add(250);
-        }
-    }
-    score
-}
-
-fn point_score(point: (f64, f64, f64)) -> u64 {
-    value_score(point.0)
-        .saturating_add(value_score(point.1))
-        .saturating_add(value_score(point.2))
-}
-
-fn angle_score(value: f64) -> u64 {
-    if !value.is_finite() {
-        return 1_000_000;
-    }
-    let abs = value.abs();
-    if abs <= 1_000.0 {
-        0
-    } else if abs <= 1_000_000.0 {
-        25
-    } else if abs <= 1_000_000_000_000.0 {
-        250
-    } else {
-        1_000_000
-    }
-}
-
-fn value_score(value: f64) -> u64 {
-    if !value.is_finite() {
-        return 1_000_000;
-    }
-    let abs = value.abs();
-    if abs <= 1_000_000.0 {
-        0
-    } else if abs <= 1_000_000_000.0 {
-        10
-    } else if abs <= 1_000_000_000_000.0 {
-        100
-    } else if abs <= 1.0e18 {
-        1_000
-    } else if abs <= 1.0e24 {
-        10_000
-    } else {
-        1_000_000
-    }
 }
