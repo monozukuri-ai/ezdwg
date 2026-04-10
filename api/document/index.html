@@ -542,6 +542,8 @@
       
         
       
+        
+      
     
     
     
@@ -712,6 +714,34 @@
     
   
     CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
   
 
     
@@ -972,6 +1002,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#export_dwg" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        export_dwg
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1044,6 +1085,17 @@
     <span class="md-ellipsis">
       
         export_dxf
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#export_dwg_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        export_dwg
       
     </span>
   </a>
@@ -1253,6 +1305,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#export_dwg" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        export_dwg
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -1325,6 +1388,17 @@
     <span class="md-ellipsis">
       
         export_dxf
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#export_dwg_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        export_dwg
       
     </span>
   </a>
@@ -1420,6 +1494,10 @@
 <div class="highlight"><pre><span></span><code><span class="n">Document</span><span class="o">.</span><span class="n">export_dxf</span><span class="p">(</span><span class="n">output_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ConvertResult</span>
 </code></pre></div>
 <p>Export the modelspace to a DXF file. Accepts the same keyword arguments as <a href="../core/#ezdwgto_dxf"><code>ezdwg.to_dxf()</code></a>.</p>
+<h4 id="export_dwg">export_dwg<a class="headerlink" href="#export_dwg" title="Permanent link">¶</a></h4>
+<div class="highlight"><pre><span></span><code><span class="n">Document</span><span class="o">.</span><span class="n">export_dwg</span><span class="p">(</span><span class="n">output_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">WriteResult</span>
+</code></pre></div>
+<p>Export the modelspace to a DWG file using the native writer. Accepts the same keyword arguments as <a href="../core/#ezdwgto_dwg"><code>ezdwg.to_dwg()</code></a>.</p>
 <hr>
 <h2 id="layout">Layout<a class="headerlink" href="#layout" title="Permanent link">¶</a></h2>
 <div class="highlight"><pre><span></span><code><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
@@ -1467,6 +1545,10 @@
 <div class="highlight"><pre><span></span><code><span class="n">Layout</span><span class="o">.</span><span class="n">export_dxf</span><span class="p">(</span><span class="n">output_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ConvertResult</span>
 </code></pre></div>
 <p>Export this layout to a DXF file. Accepts the same keyword arguments as <a href="../core/#ezdwgto_dxf"><code>ezdwg.to_dxf()</code></a>.</p>
+<h4 id="export_dwg_1">export_dwg<a class="headerlink" href="#export_dwg_1" title="Permanent link">¶</a></h4>
+<div class="highlight"><pre><span></span><code><span class="n">Layout</span><span class="o">.</span><span class="n">export_dwg</span><span class="p">(</span><span class="n">output_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">WriteResult</span>
+</code></pre></div>
+<p>Export this layout to a DWG file using the native writer. Accepts the same keyword arguments as <a href="../core/#ezdwgto_dwg"><code>ezdwg.to_dwg()</code></a>.</p>
 
 
 

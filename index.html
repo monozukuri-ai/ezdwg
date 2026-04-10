@@ -620,6 +620,8 @@
       
         
       
+        
+      
     
     
     
@@ -790,6 +792,34 @@
     
   
     CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
   
 
     
@@ -1111,16 +1141,17 @@
 <h1 id="ezdwg">ezdwg<a class="headerlink" href="#ezdwg" title="Permanent link">¶</a></h1>
 <p><a href="https://badge.fury.io/py/ezdwg"><img alt="PyPI version" src="https://badge.fury.io/py/ezdwg.svg"></a>
 <a href="https://github.com/monozukuri-ai/ezdwg"><img alt="GitHub" src="https://img.shields.io/github/license/monozukuri-ai/ezdwg"></a></p>
-<p><strong>Minimal DWG (R14–R2018 / AC1014–AC1032) reader with a Python API inspired by ezdxf.</strong></p>
-<p>ezdwg is a read-only DWG file parser with a Rust core exposed to Python via PyO3. It provides a simple, friendly API for extracting geometry, text, dimensions, and other entities from DWG files.</p>
+<p><strong>DWG (R14–R2018 / AC1014–AC1032) reader with a Python API inspired by ezdxf.</strong></p>
+<p>ezdwg is a read-focused DWG parser with a Rust core exposed to Python via PyO3. It provides a simple, friendly API for extracting geometry, text, dimensions, and other entities from DWG files, and includes a native AC1015 writer for basic entities.</p>
 <h2 id="key-features">Key Features<a class="headerlink" href="#key-features" title="Permanent link">¶</a></h2>
 <ul>
-<li><strong>Read-only DWG parsing</strong> — R14 (AC1014) through R2018 (AC1032)</li>
+<li><strong>DWG parsing</strong> — R14 (AC1014) through R2018 (AC1032)</li>
 <li><strong>High-performance Rust core</strong> — fast binary parsing via PyO3</li>
 <li><strong>ezdxf-inspired API</strong> — familiar <code>Document</code> / <code>Layout</code> / <code>Entity</code> pattern</li>
 <li><strong>Plotting support</strong> — render DWG files with matplotlib</li>
 <li><strong>DXF export</strong> — convert DWG to DXF using ezdxf as backend</li>
-<li><strong>CLI tools</strong> — inspect and convert DWG files from the command line</li>
+<li><strong>Native DWG write (AC1015)</strong> — write <code>LINE/RAY/XLINE/POINT/ARC/CIRCLE/LWPOLYLINE/TEXT/MTEXT</code></li>
+<li><strong>CLI tools</strong> — inspect, convert, and write DWG files from the command line</li>
 </ul>
 <h2 id="quick-example">Quick Example<a class="headerlink" href="#quick-example" title="Permanent link">¶</a></h2>
 <div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">ezdwg</span>
@@ -1137,6 +1168,7 @@
 <li><a href="getting-started/quickstart/">Quick Start</a> — learn the basics in 5 minutes</li>
 <li><a href="guide/reading-files/">User Guide</a> — detailed usage guides</li>
 <li><a href="api/">API Reference</a> — full API documentation</li>
+<li><a href="roadmap/">Roadmap</a> — implementation priorities for expanding parser coverage</li>
 </ul>
 
 

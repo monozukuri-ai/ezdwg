@@ -604,6 +604,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#dwg-to-dwg-native-ac1015-writer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        DWG to DWG (Native AC1015 Writer)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#cli-usage" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -638,6 +649,8 @@
   
     
     
+      
+        
       
         
       
@@ -819,6 +832,34 @@
     
   
     CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
   
 
     
@@ -1129,6 +1170,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#dwg-to-dwg-native-ac1015-writer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        DWG to DWG (Native AC1015 Writer)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#cli-usage" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1206,6 +1258,16 @@
 <div class="highlight"><pre><span></span><code><span class="n">doc</span> <span class="o">=</span> <span class="n">ezdwg</span><span class="o">.</span><span class="n">read</span><span class="p">(</span><span class="s2">"input.dwg"</span><span class="p">)</span>
 <span class="n">doc</span><span class="o">.</span><span class="n">export_dxf</span><span class="p">(</span><span class="s2">"output.dxf"</span><span class="p">)</span>
 </code></pre></div>
+<h2 id="dwg-to-dwg-native-ac1015-writer">DWG to DWG (Native AC1015 Writer)<a class="headerlink" href="#dwg-to-dwg-native-ac1015-writer" title="Permanent link">¶</a></h2>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">ezdwg</span>
+
+<span class="n">result</span> <span class="o">=</span> <span class="n">ezdwg</span><span class="o">.</span><span class="n">to_dwg</span><span class="p">(</span><span class="s2">"input.dwg"</span><span class="p">,</span> <span class="s2">"output.dwg"</span><span class="p">,</span> <span class="n">version</span><span class="o">=</span><span class="s2">"AC1015"</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Written: </span><span class="si">{</span><span class="n">result</span><span class="o">.</span><span class="n">written_entities</span><span class="si">}</span><span class="s2">/</span><span class="si">{</span><span class="n">result</span><span class="o">.</span><span class="n">total_entities</span><span class="si">}</span><span class="s2"> entities"</span><span class="p">)</span>
+</code></pre></div>
+<p>Or from an already opened document:</p>
+<div class="highlight"><pre><span></span><code><span class="n">doc</span> <span class="o">=</span> <span class="n">ezdwg</span><span class="o">.</span><span class="n">read</span><span class="p">(</span><span class="s2">"input.dwg"</span><span class="p">)</span>
+<span class="n">doc</span><span class="o">.</span><span class="n">export_dwg</span><span class="p">(</span><span class="s2">"output.dwg"</span><span class="p">,</span> <span class="n">version</span><span class="o">=</span><span class="s2">"AC1015"</span><span class="p">)</span>
+</code></pre></div>
 <h2 id="cli-usage">CLI Usage<a class="headerlink" href="#cli-usage" title="Permanent link">¶</a></h2>
 <div class="highlight"><pre><span></span><code><span class="c1"># Show version</span>
 ezdwg<span class="w"> </span>--version
@@ -1215,6 +1277,9 @@ ezdwg<span class="w"> </span>inspect<span class="w"> </span>path/to/file.dwg
 
 <span class="c1"># Convert DWG to DXF</span>
 ezdwg<span class="w"> </span>convert<span class="w"> </span>input.dwg<span class="w"> </span>output.dxf
+
+<span class="c1"># Write DWG (native AC1015 writer)</span>
+ezdwg<span class="w"> </span>write<span class="w"> </span>input.dwg<span class="w"> </span>output.dwg<span class="w"> </span>--dwg-version<span class="w"> </span>AC1015
 </code></pre></div>
 
 

@@ -544,6 +544,8 @@
       
         
       
+        
+      
     
     
     
@@ -873,6 +875,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#native-dwg-writer-ac1015" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native DWG Writer (AC1015)
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -897,6 +910,34 @@
     
   
     CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
   
 
     
@@ -1295,6 +1336,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#native-dwg-writer-ac1015" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native DWG Writer (AC1015)
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1415,6 +1467,28 @@ INSERT, MINSERT, DIMENSION</p>
 <li>Block definitions referenced by INSERT entities are reconstructed from the DWG source.</li>
 <li>DIMENSION entities use native ezdxf dimension builders with a text fallback for unsupported subtypes.</li>
 <li>Style, linetype, and layer properties may not be fully preserved.</li>
+</ul>
+<hr>
+<h2 id="native-dwg-writer-ac1015">Native DWG Writer (AC1015)<a class="headerlink" href="#native-dwg-writer-ac1015" title="Permanent link">¶</a></h2>
+<p>ezdwg also provides a native DWG writer for AC1015.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">ezdwg</span>
+
+<span class="n">result</span> <span class="o">=</span> <span class="n">ezdwg</span><span class="o">.</span><span class="n">to_dwg</span><span class="p">(</span>
+    <span class="s2">"input.dwg"</span><span class="p">,</span>
+    <span class="s2">"output.dwg"</span><span class="p">,</span>
+    <span class="n">version</span><span class="o">=</span><span class="s2">"AC1015"</span><span class="p">,</span>
+    <span class="n">types</span><span class="o">=</span><span class="s2">"LINE ARC CIRCLE LWPOLYLINE TEXT MTEXT"</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">written_entities</span><span class="p">,</span> <span class="n">result</span><span class="o">.</span><span class="n">skipped_by_type</span><span class="p">)</span>
+</code></pre></div>
+<p>You can also call:</p>
+<div class="highlight"><pre><span></span><code><span class="n">doc</span> <span class="o">=</span> <span class="n">ezdwg</span><span class="o">.</span><span class="n">read</span><span class="p">(</span><span class="s2">"input.dwg"</span><span class="p">)</span>
+<span class="n">doc</span><span class="o">.</span><span class="n">export_dwg</span><span class="p">(</span><span class="s2">"output.dwg"</span><span class="p">,</span> <span class="n">version</span><span class="o">=</span><span class="s2">"AC1015"</span><span class="p">)</span>
+</code></pre></div>
+<p>Current native writer scope:</p>
+<ul>
+<li>Version: <code>AC1015</code> only</li>
+<li>Entities: <code>LINE</code>, <code>RAY</code>, <code>XLINE</code>, <code>POINT</code>, <code>ARC</code>, <code>CIRCLE</code>, <code>LWPOLYLINE</code>, <code>TEXT</code>, <code>MTEXT</code></li>
 </ul>
 
 

@@ -542,6 +542,8 @@
       
         
       
+        
+      
     
     
     
@@ -712,6 +714,34 @@
     
   
     CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
   
 
     
@@ -910,10 +940,32 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#ezdwgto_dwg" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ezdwg.to_dwg
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#convertresult" class="md-nav__link">
     <span class="md-ellipsis">
       
         ConvertResult
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#writeresult" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        WriteResult
       
     </span>
   </a>
@@ -1107,10 +1159,32 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#ezdwgto_dwg" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ezdwg.to_dwg
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#convertresult" class="md-nav__link">
     <span class="md-ellipsis">
       
         ConvertResult
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#writeresult" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        WriteResult
       
     </span>
   </a>
@@ -1321,6 +1395,75 @@
 <p><strong>Returns:</strong> A <code>ConvertResult</code> object.</p>
 <p><strong>Raises:</strong> <code>ValueError</code> in strict mode if entities are skipped. <code>ImportError</code> if ezdxf is not installed.</p>
 <hr>
+<h2 id="ezdwgto_dwg">ezdwg.to_dwg<a class="headerlink" href="#ezdwgto_dwg" title="Permanent link">¶</a></h2>
+<div class="highlight"><pre><span></span><code><span class="n">ezdwg</span><span class="o">.</span><span class="n">to_dwg</span><span class="p">(</span>
+    <span class="n">source</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">Document</span> <span class="o">|</span> <span class="n">Layout</span><span class="p">,</span>
+    <span class="n">output_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">types</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">Iterable</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">version</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"AC1015"</span><span class="p">,</span>
+    <span class="n">strict</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">WriteResult</span>
+</code></pre></div>
+<p>Write a DWG file using the native writer.</p>
+<p><strong>Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>source</code></td>
+<td><code>str \| Document \| Layout</code></td>
+<td>—</td>
+<td>File path, Document, or Layout</td>
+</tr>
+<tr>
+<td><code>output_path</code></td>
+<td><code>str</code></td>
+<td>—</td>
+<td>Output DWG file path</td>
+</tr>
+<tr>
+<td><code>types</code></td>
+<td><code>str \| Iterable[str] \| None</code></td>
+<td><code>None</code></td>
+<td>Entity type filter</td>
+</tr>
+<tr>
+<td><code>version</code></td>
+<td><code>str</code></td>
+<td><code>"AC1015"</code></td>
+<td>Output DWG version (currently AC1015 only)</td>
+</tr>
+<tr>
+<td><code>strict</code></td>
+<td><code>bool</code></td>
+<td><code>False</code></td>
+<td>Fail on skipped entities</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Returns:</strong> A <code>WriteResult</code> object.</p>
+<p><strong>Raises:</strong> <code>ValueError</code> when an unsupported write version is requested, or in strict mode if entities are skipped.</p>
+<p><strong>Supported native write entities (v1):</strong></p>
+<ul>
+<li><code>LINE</code></li>
+<li><code>RAY</code></li>
+<li><code>XLINE</code></li>
+<li><code>POINT</code></li>
+<li><code>ARC</code></li>
+<li><code>CIRCLE</code></li>
+<li><code>LWPOLYLINE</code></li>
+<li><code>TEXT</code></li>
+<li><code>MTEXT</code></li>
+</ul>
+<hr>
 <h2 id="convertresult">ConvertResult<a class="headerlink" href="#convertresult" title="Permanent link">¶</a></h2>
 <div class="highlight"><pre><span></span><code><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
 <span class="k">class</span><span class="w"> </span><span class="nc">ConvertResult</span><span class="p">:</span>
@@ -1350,6 +1493,65 @@
 <td><code>output_path</code></td>
 <td><code>str</code></td>
 <td>Output DXF path</td>
+</tr>
+<tr>
+<td><code>total_entities</code></td>
+<td><code>int</code></td>
+<td>Total entities processed</td>
+</tr>
+<tr>
+<td><code>written_entities</code></td>
+<td><code>int</code></td>
+<td>Successfully written</td>
+</tr>
+<tr>
+<td><code>skipped_entities</code></td>
+<td><code>int</code></td>
+<td>Skipped count</td>
+</tr>
+<tr>
+<td><code>skipped_by_type</code></td>
+<td><code>dict[str, int]</code></td>
+<td>Skipped by entity type</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="writeresult">WriteResult<a class="headerlink" href="#writeresult" title="Permanent link">¶</a></h2>
+<div class="highlight"><pre><span></span><code><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">WriteResult</span><span class="p">:</span>
+    <span class="n">source_path</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">output_path</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">target_version</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">total_entities</span><span class="p">:</span> <span class="nb">int</span>
+    <span class="n">written_entities</span><span class="p">:</span> <span class="nb">int</span>
+    <span class="n">skipped_entities</span><span class="p">:</span> <span class="nb">int</span>
+    <span class="n">skipped_by_type</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">int</span><span class="p">]</span>
+</code></pre></div>
+<p>Result of a DWG write operation.</p>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>source_path</code></td>
+<td><code>str</code></td>
+<td>Input DWG path</td>
+</tr>
+<tr>
+<td><code>output_path</code></td>
+<td><code>str</code></td>
+<td>Output DWG path</td>
+</tr>
+<tr>
+<td><code>target_version</code></td>
+<td><code>str</code></td>
+<td>Target DWG version</td>
 </tr>
 <tr>
 <td><code>total_entities</code></td>
