@@ -5,7 +5,7 @@ import math
 import re
 from functools import lru_cache
 from dataclasses import dataclass
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 from . import raw
 from .entity import Entity
@@ -88,6 +88,22 @@ _ACIS_ROLE_HINTS = {
     0x224: "acis-payload-chunk",
     0x225: "acis-payload-chunk",
 }
+
+
+@dataclass(frozen=True)
+class _SimpleEntitySpec:
+    """Declarative spec for simple entity iteration in ``Layout._iter_type``.
+
+    - ``rows_fn(decode_path)`` returns an iterable of raw rows.
+    - ``build_dxf(row, ctx)`` returns ``(handle, dxf_dict)`` or ``None`` to skip.
+    - ``setup(decode_path)`` optionally computes a context object (e.g. an owner
+      map) that is passed to ``build_dxf`` for every row. Called once per
+      ``_iter_type`` dispatch.
+    """
+
+    rows_fn: Callable[[str], Iterable[Any]]
+    build_dxf: Callable[[Any, Any], tuple[int, dict] | None]
+    setup: Callable[[str], Any] | None = None
 
 
 def read(path: str) -> "Document":
@@ -270,6 +286,29 @@ class Layout:
                     entity_style_map,
                     layer_color_map,
                 )
+
+        spec = _SIMPLE_ENTITY_REGISTRY.get(dxftype)
+        if spec is not None:
+            ctx = spec.setup(decode_path) if spec.setup is not None else None
+            for row in spec.rows_fn(decode_path):
+                result = spec.build_dxf(row, ctx)
+                if result is None:
+                    continue
+                handle, dxf_data = result
+                yield Entity(
+                    dxftype=dxftype,
+                    handle=handle,
+                    dxf=_attach_entity_color(
+                        handle,
+                        dxf_data,
+                        entity_style_map,
+                        layer_color_map,
+                        layer_color_overrides,
+                        dxftype=dxftype,
+                    ),
+                )
+            return
+
         if dxftype == "LINE":
             if bulk_rows is not None:
                 line_rows = bulk_rows[0]
@@ -721,117 +760,6 @@ class Layout:
                 )
             return
 
-        if dxftype == "SEQEND":
-            _, _, seqend_owner_map = _polyline_sequence_relationships(decode_path)
-            for handle in _entity_handles_by_type_name(decode_path, "SEQEND"):
-                owner_handle, owner_type = seqend_owner_map.get(int(handle), (None, None))
-                yield Entity(
-                    dxftype="SEQEND",
-                    handle=handle,
-                    dxf=_attach_entity_color(
-                        handle,
-                        {
-                            "owner_handle": owner_handle,
-                            "owner_type": owner_type,
-                        },
-                        entity_style_map,
-                        layer_color_map,
-                        layer_color_overrides,
-                        dxftype="SEQEND",
-                    ),
-                )
-            return
-
-        if dxftype == "3DFACE":
-            yield from self._yield_simple_entities(
-                "3DFACE",
-                raw.decode_3dface_entities(decode_path),
-                lambda row: (
-                    row[0],
-                    {
-                        "points": [row[1], row[2], row[3], row[4]],
-                        "invisible_edge_flags": int(row[5]),
-                    },
-                ),
-                entity_style_map,
-                layer_color_map,
-                layer_color_overrides,
-            )
-            return
-
-        if dxftype == "SOLID":
-            yield from self._yield_simple_entities(
-                "SOLID",
-                raw.decode_solid_entities(decode_path),
-                lambda row: (
-                    row[0],
-                    {
-                        "points": [row[1], row[2], row[3], row[4]],
-                        "thickness": row[5],
-                        "extrusion": row[6],
-                    },
-                ),
-                entity_style_map,
-                layer_color_map,
-                layer_color_overrides,
-            )
-            return
-
-        if dxftype == "TRACE":
-            yield from self._yield_simple_entities(
-                "TRACE",
-                raw.decode_trace_entities(decode_path),
-                lambda row: (
-                    row[0],
-                    {
-                        "points": [row[1], row[2], row[3], row[4]],
-                        "thickness": row[5],
-                        "extrusion": row[6],
-                    },
-                ),
-                entity_style_map,
-                layer_color_map,
-                layer_color_overrides,
-            )
-            return
-
-        if dxftype == "SHAPE":
-            for (
-                handle,
-                insertion,
-                scale,
-                rotation,
-                width_factor,
-                oblique,
-                thickness,
-                shape_no,
-                extrusion,
-                shapefile_handle,
-            ) in raw.decode_shape_entities(decode_path):
-                yield Entity(
-                    dxftype="SHAPE",
-                    handle=handle,
-                    dxf=_attach_entity_color(
-                        handle,
-                        {
-                            "insert": insertion,
-                            "scale": scale,
-                            "rotation": math.degrees(rotation),
-                            "width": width_factor,
-                            "oblique": math.degrees(oblique),
-                            "thickness": thickness,
-                            "shape_no": int(shape_no),
-                            "extrusion": extrusion,
-                            "shapefile_handle": shapefile_handle,
-                        },
-                        entity_style_map,
-                        layer_color_map,
-                        layer_color_overrides,
-                        dxftype="SHAPE",
-                    ),
-                )
-            return
-
         if dxftype == "3DSOLID":
             acis_candidate_map = _acis_candidate_handles_map(decode_path)
             acis_record_map = _acis_candidate_record_map(decode_path)
@@ -889,59 +817,6 @@ class Layout:
                     dxftype="BODY",
                     handle=handle,
                     dxf=dxf,
-                )
-            return
-
-        if dxftype == "VIEWPORT":
-            yield from self._yield_simple_entities(
-                "VIEWPORT",
-                (row for row in raw.decode_viewport_entities(decode_path) if row),
-                lambda row: (int(row[0]), {}),
-                entity_style_map,
-                layer_color_map,
-                layer_color_overrides,
-            )
-            return
-
-        if dxftype == "OLEFRAME":
-            ole_record_map = _oleframe_record_map(decode_path)
-            for row in raw.decode_oleframe_entities(decode_path):
-                if not row:
-                    continue
-                handle = int(row[0])
-                dxf_data = dict(ole_record_map.get(handle, {}))
-                yield Entity(
-                    dxftype="OLEFRAME",
-                    handle=handle,
-                    dxf=_attach_entity_color(
-                        handle,
-                        dxf_data,
-                        entity_style_map,
-                        layer_color_map,
-                        layer_color_overrides,
-                        dxftype="OLEFRAME",
-                    ),
-                )
-            return
-
-        if dxftype == "OLE2FRAME":
-            ole_record_map = _ole2frame_record_map(decode_path)
-            for row in raw.decode_ole2frame_entities(decode_path):
-                if not row:
-                    continue
-                handle = int(row[0])
-                dxf_data = dict(ole_record_map.get(handle, {}))
-                yield Entity(
-                    dxftype="OLE2FRAME",
-                    handle=handle,
-                    dxf=_attach_entity_color(
-                        handle,
-                        dxf_data,
-                        entity_style_map,
-                        layer_color_map,
-                        layer_color_overrides,
-                        dxftype="OLE2FRAME",
-                    ),
                 )
             return
 
@@ -1055,49 +930,6 @@ class Layout:
                 )
             return
 
-        if dxftype == "RAY":
-            yield from self._yield_simple_entities(
-                "RAY",
-                raw.decode_ray_entities(decode_path),
-                lambda row: (row[0], {"start": row[1], "unit_vector": row[2]}),
-                entity_style_map,
-                layer_color_map,
-                layer_color_overrides,
-            )
-            return
-
-        if dxftype == "XLINE":
-            yield from self._yield_simple_entities(
-                "XLINE",
-                raw.decode_xline_entities(decode_path),
-                lambda row: (row[0], {"start": row[1], "unit_vector": row[2]}),
-                entity_style_map,
-                layer_color_map,
-                layer_color_overrides,
-            )
-            return
-
-        if dxftype == "POINT":
-            point_owner_handles = _point_owner_handle_map(decode_path)
-            for handle, x, y, z, angle in raw.decode_point_entities(decode_path):
-                yield Entity(
-                    dxftype="POINT",
-                    handle=handle,
-                    dxf=_attach_entity_color(
-                        handle,
-                        {
-                            "location": (x, y, z),
-                            "x_axis_angle": angle,
-                            "owner_handle": point_owner_handles.get(int(handle)),
-                        },
-                        entity_style_map,
-                        layer_color_map,
-                        layer_color_overrides,
-                        dxftype="POINT",
-                    ),
-                )
-            return
-
         if dxftype == "CIRCLE":
             circle_owner_handles = _circle_owner_handle_map(decode_path)
             if bulk_rows is not None:
@@ -1128,27 +960,6 @@ class Layout:
                     handle=handle,
                     dxf=dxf,
                 )
-            return
-
-        if dxftype == "ELLIPSE":
-            yield from self._yield_simple_entities(
-                "ELLIPSE",
-                raw.decode_ellipse_entities(decode_path),
-                lambda row: (
-                    row[0],
-                    {
-                        "center": row[1],
-                        "major_axis": row[2],
-                        "extrusion": row[3],
-                        "axis_ratio": row[4],
-                        "start_angle": row[5],
-                        "end_angle": row[6],
-                    },
-                ),
-                entity_style_map,
-                layer_color_map,
-                layer_color_overrides,
-            )
             return
 
         if dxftype == "SPLINE":
@@ -1616,24 +1427,6 @@ class Layout:
                 )
             return
 
-        if dxftype == "LEADER":
-            yield from self._yield_simple_entities(
-                "LEADER",
-                raw.decode_leader_entities(decode_path),
-                lambda row: (
-                    row[0],
-                    {
-                        "annotation_type": int(row[1]),
-                        "path_type": int(row[2]),
-                        "points": list(row[3]),
-                    },
-                ),
-                entity_style_map,
-                layer_color_map,
-                layer_color_overrides,
-            )
-            return
-
         if dxftype == "HATCH":
             for (
                 handle,
@@ -1672,41 +1465,6 @@ class Layout:
                         layer_color_map,
                         layer_color_overrides,
                         dxftype="HATCH",
-                    ),
-                )
-            return
-
-        if dxftype == "TOLERANCE":
-            for (
-                handle,
-                text,
-                insertion,
-                x_direction,
-                extrusion,
-                height,
-                dimgap,
-                dimstyle_handle,
-            ) in raw.decode_tolerance_entities(decode_path):
-                rotation = math.degrees(math.atan2(x_direction[1], x_direction[0]))
-                yield Entity(
-                    dxftype="TOLERANCE",
-                    handle=handle,
-                    dxf=_attach_entity_color(
-                        handle,
-                        {
-                            "text": text,
-                            "insert": insertion,
-                            "x_direction": x_direction,
-                            "extrusion": extrusion,
-                            "height": height,
-                            "dimgap": dimgap,
-                            "rotation": rotation,
-                            "dimstyle_handle": dimstyle_handle,
-                        },
-                        entity_style_map,
-                        layer_color_map,
-                        layer_color_overrides,
-                        dxftype="TOLERANCE",
                     ),
                 )
             return
@@ -1837,44 +1595,6 @@ class Layout:
                         layer_color_map,
                         layer_color_overrides,
                         dxftype="MINSERT",
-                    ),
-                )
-            return
-
-        if dxftype == "BLOCK":
-            block_name_map, _ = _block_and_endblk_name_maps(decode_path)
-            for handle in _entity_handles_by_type_name(decode_path, "BLOCK"):
-                yield Entity(
-                    dxftype="BLOCK",
-                    handle=handle,
-                    dxf=_attach_entity_color(
-                        handle,
-                        {
-                            "name": block_name_map.get(handle),
-                        },
-                        entity_style_map,
-                        layer_color_map,
-                        layer_color_overrides,
-                        dxftype="BLOCK",
-                    ),
-                )
-            return
-
-        if dxftype == "ENDBLK":
-            _, endblk_name_map = _block_and_endblk_name_maps(decode_path)
-            for handle in _entity_handles_by_type_name(decode_path, "ENDBLK"):
-                yield Entity(
-                    dxftype="ENDBLK",
-                    handle=handle,
-                    dxf=_attach_entity_color(
-                        handle,
-                        {
-                            "name": endblk_name_map.get(handle),
-                        },
-                        entity_style_map,
-                        layer_color_map,
-                        layer_color_overrides,
-                        dxftype="ENDBLK",
                     ),
                 )
             return
@@ -2072,6 +1792,164 @@ class Layout:
             f"unsupported entity type: {dxftype}. "
             "Supported types: LINE, LWPOLYLINE, POLYLINE_2D, VERTEX_2D, POLYLINE_3D, VERTEX_3D, POLYLINE_MESH, VERTEX_MESH, POLYLINE_PFACE, VERTEX_PFACE, VERTEX_PFACE_FACE, SEQEND, 3DFACE, SOLID, TRACE, SHAPE, 3DSOLID, BODY, VIEWPORT, OLEFRAME, OLE2FRAME, LONG_TRANSACTION, REGION, RAY, XLINE, ARC, CIRCLE, ELLIPSE, SPLINE, POINT, TEXT, ATTRIB, ATTDEF, MTEXT, LEADER, HATCH, TOLERANCE, MLINE, BLOCK, ENDBLK, INSERT, MINSERT, DIMENSION"
         )
+
+
+def _seqend_owner_pair(handle: int, seqend_map: dict) -> tuple:
+    pair = seqend_map.get(int(handle)) or (None, None)
+    return pair[0], pair[1]
+
+
+_SIMPLE_ENTITY_REGISTRY: dict[str, _SimpleEntitySpec] = {
+    "3DFACE": _SimpleEntitySpec(
+        rows_fn=lambda p: raw.decode_3dface_entities(p),
+        build_dxf=lambda row, _: (
+            row[0],
+            {
+                "points": [row[1], row[2], row[3], row[4]],
+                "invisible_edge_flags": int(row[5]),
+            },
+        ),
+    ),
+    "SOLID": _SimpleEntitySpec(
+        rows_fn=lambda p: raw.decode_solid_entities(p),
+        build_dxf=lambda row, _: (
+            row[0],
+            {
+                "points": [row[1], row[2], row[3], row[4]],
+                "thickness": row[5],
+                "extrusion": row[6],
+            },
+        ),
+    ),
+    "TRACE": _SimpleEntitySpec(
+        rows_fn=lambda p: raw.decode_trace_entities(p),
+        build_dxf=lambda row, _: (
+            row[0],
+            {
+                "points": [row[1], row[2], row[3], row[4]],
+                "thickness": row[5],
+                "extrusion": row[6],
+            },
+        ),
+    ),
+    "VIEWPORT": _SimpleEntitySpec(
+        rows_fn=lambda p: raw.decode_viewport_entities(p),
+        build_dxf=lambda row, _: (int(row[0]), {}) if row else None,
+    ),
+    "RAY": _SimpleEntitySpec(
+        rows_fn=lambda p: raw.decode_ray_entities(p),
+        build_dxf=lambda row, _: (row[0], {"start": row[1], "unit_vector": row[2]}),
+    ),
+    "XLINE": _SimpleEntitySpec(
+        rows_fn=lambda p: raw.decode_xline_entities(p),
+        build_dxf=lambda row, _: (row[0], {"start": row[1], "unit_vector": row[2]}),
+    ),
+    "ELLIPSE": _SimpleEntitySpec(
+        rows_fn=lambda p: raw.decode_ellipse_entities(p),
+        build_dxf=lambda row, _: (
+            row[0],
+            {
+                "center": row[1],
+                "major_axis": row[2],
+                "extrusion": row[3],
+                "axis_ratio": row[4],
+                "start_angle": row[5],
+                "end_angle": row[6],
+            },
+        ),
+    ),
+    "LEADER": _SimpleEntitySpec(
+        rows_fn=lambda p: raw.decode_leader_entities(p),
+        build_dxf=lambda row, _: (
+            row[0],
+            {
+                "annotation_type": int(row[1]),
+                "path_type": int(row[2]),
+                "points": list(row[3]),
+            },
+        ),
+    ),
+    "SHAPE": _SimpleEntitySpec(
+        rows_fn=lambda p: raw.decode_shape_entities(p),
+        build_dxf=lambda row, _: (
+            row[0],
+            {
+                "insert": row[1],
+                "scale": row[2],
+                "rotation": math.degrees(row[3]),
+                "width": row[4],
+                "oblique": math.degrees(row[5]),
+                "thickness": row[6],
+                "shape_no": int(row[7]),
+                "extrusion": row[8],
+                "shapefile_handle": row[9],
+            },
+        ),
+    ),
+    "TOLERANCE": _SimpleEntitySpec(
+        rows_fn=lambda p: raw.decode_tolerance_entities(p),
+        build_dxf=lambda row, _: (
+            row[0],
+            {
+                "text": row[1],
+                "insert": row[2],
+                "x_direction": row[3],
+                "extrusion": row[4],
+                "height": row[5],
+                "dimgap": row[6],
+                "rotation": math.degrees(math.atan2(row[3][1], row[3][0])),
+                "dimstyle_handle": row[7],
+            },
+        ),
+    ),
+    "POINT": _SimpleEntitySpec(
+        rows_fn=lambda p: raw.decode_point_entities(p),
+        setup=lambda p: _point_owner_handle_map(p),
+        build_dxf=lambda row, owners: (
+            row[0],
+            {
+                "location": (row[1], row[2], row[3]),
+                "x_axis_angle": row[4],
+                "owner_handle": owners.get(int(row[0])),
+            },
+        ),
+    ),
+    "SEQEND": _SimpleEntitySpec(
+        rows_fn=lambda p: _entity_handles_by_type_name(p, "SEQEND"),
+        setup=lambda p: _polyline_sequence_relationships(p)[2],
+        build_dxf=lambda handle, seqend_map: (
+            handle,
+            {
+                "owner_handle": _seqend_owner_pair(handle, seqend_map)[0],
+                "owner_type": _seqend_owner_pair(handle, seqend_map)[1],
+            },
+        ),
+    ),
+    "OLEFRAME": _SimpleEntitySpec(
+        rows_fn=lambda p: raw.decode_oleframe_entities(p),
+        setup=lambda p: _oleframe_record_map(p),
+        build_dxf=lambda row, record_map: (
+            (int(row[0]), dict(record_map.get(int(row[0]), {}))) if row else None
+        ),
+    ),
+    "OLE2FRAME": _SimpleEntitySpec(
+        rows_fn=lambda p: raw.decode_ole2frame_entities(p),
+        setup=lambda p: _ole2frame_record_map(p),
+        build_dxf=lambda row, record_map: (
+            (int(row[0]), dict(record_map.get(int(row[0]), {}))) if row else None
+        ),
+    ),
+    "BLOCK": _SimpleEntitySpec(
+        rows_fn=lambda p: _entity_handles_by_type_name(p, "BLOCK"),
+        setup=lambda p: _block_and_endblk_name_maps(p)[0],
+        build_dxf=lambda handle, name_map: (handle, {"name": name_map.get(handle)}),
+    ),
+    "ENDBLK": _SimpleEntitySpec(
+        rows_fn=lambda p: _entity_handles_by_type_name(p, "ENDBLK"),
+        setup=lambda p: _block_and_endblk_name_maps(p)[1],
+        build_dxf=lambda handle, name_map: (handle, {"name": name_map.get(handle)}),
+    ),
+}
 
 
 def _decode_mtext_plain_text(value: str) -> str:
