@@ -1,3 +1,130 @@
+// Standard version-dispatch helper shared by most entity decoders.
+// - `with_r14`: entity has a dedicated R14 decoder taking `(reader, object_handle)`
+// - `no_r14`: entity skips R14 and falls through to the pre-R2010 default decoder
+//
+// R2010 / R2013 / R2018 resolve the object-data end bit via
+// `resolve_r2010_object_data_end_bit` and pass it to the version-specific decoder.
+// R2007 and the default branch take only the reader (no end-bit / handle params).
+macro_rules! impl_version_dispatch {
+    (
+        with_r14;
+        fn $fn_name:ident -> $entity_ty:ty;
+        r14: $r14_fn:path;
+        r2010: $r2010_fn:path;
+        r2013: $r2013_fn:path;
+        r2007: $r2007_fn:path;
+        default: $default_fn:path $(;)?
+    ) => {
+        fn $fn_name(
+            reader: &mut BitReader<'_>,
+            version: &version::DwgVersion,
+            header: &ApiObjectHeader,
+            object_handle: u64,
+        ) -> crate::core::result::Result<$entity_ty> {
+            match version {
+                version::DwgVersion::R14 => $r14_fn(reader, object_handle),
+                version::DwgVersion::R2010 => {
+                    let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+                    $r2010_fn(reader, object_data_end_bit, object_handle)
+                }
+                version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+                    let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+                    $r2013_fn(reader, object_data_end_bit, object_handle)
+                }
+                version::DwgVersion::R2007 => $r2007_fn(reader),
+                _ => $default_fn(reader),
+            }
+        }
+    };
+    (
+        no_r14;
+        fn $fn_name:ident -> $entity_ty:ty;
+        r2010: $r2010_fn:path;
+        r2013: $r2013_fn:path;
+        r2007: $r2007_fn:path;
+        default: $default_fn:path $(;)?
+    ) => {
+        fn $fn_name(
+            reader: &mut BitReader<'_>,
+            version: &version::DwgVersion,
+            header: &ApiObjectHeader,
+            object_handle: u64,
+        ) -> crate::core::result::Result<$entity_ty> {
+            match version {
+                version::DwgVersion::R2010 => {
+                    let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+                    $r2010_fn(reader, object_data_end_bit, object_handle)
+                }
+                version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+                    let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+                    $r2013_fn(reader, object_data_end_bit, object_handle)
+                }
+                version::DwgVersion::R2007 => $r2007_fn(reader),
+                _ => $default_fn(reader),
+            }
+        }
+    };
+}
+
+// Standard entity collection loop used by most `decode_*_entities` /
+// `decode_*_owner_handles` PyFunction wrappers.
+//
+// Walks the object index, filters by type_code/type_name, skips the
+// object-type prefix, calls the version dispatch fn, and pushes a caller-built
+// row. Best-effort mode swallows per-object errors and continues.
+fn collect_entity_rows<E, R, F>(
+    path: &str,
+    limit: Option<usize>,
+    type_code: u16,
+    type_name: &'static str,
+    decode_for_version: fn(
+        &mut BitReader<'_>,
+        &version::DwgVersion,
+        &ApiObjectHeader,
+        u64,
+    ) -> crate::core::result::Result<E>,
+    mut build_row: F,
+) -> PyResult<Vec<R>>
+where
+    F: FnMut(E) -> R,
+{
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, type_code, type_name, &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity =
+            match decode_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
+                Ok(entity) => entity,
+                Err(_) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+        result.push(build_row(entity));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
 #[pyfunction]
 pub fn detect_version(path: &str) -> PyResult<String> {
     let tag = file_open::read_version_tag(path).map_err(to_py_err)?;
@@ -2585,123 +2712,41 @@ pub fn decode_point_owner_handles(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<InsertOwnerRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x1B, "POINT", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity =
-            match decode_point_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
-                Ok(entity) => entity,
-                Err(err) if best_effort => continue,
-                Err(err) => return Err(to_py_err(err)),
-            };
-        result.push((entity.handle, entity.owner_handle));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(
+        path,
+        limit,
+        0x1B,
+        "POINT",
+        decode_point_for_version,
+        |entity| (entity.handle, entity.owner_handle),
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_3dface_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<Face3dEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x1C, "3DFACE", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity = match decode_3dface_for_version(
-            &mut reader,
-            decoder.version(),
-            &header,
-            obj.handle.0,
-        ) {
-            Ok(entity) => entity,
-            Err(err) if best_effort => continue,
-            Err(err) => return Err(to_py_err(err)),
-        };
-        result.push((
-            entity.handle,
-            entity.p1,
-            entity.p2,
-            entity.p3,
-            entity.p4,
-            entity.invisible_edge_flags,
-        ));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(
+        path,
+        limit,
+        0x1C,
+        "3DFACE",
+        decode_3dface_for_version,
+        |entity| {
+            (
+                entity.handle,
+                entity.p1,
+                entity.p2,
+                entity.p3,
+                entity.p4,
+                entity.invisible_edge_flags,
+            )
+        },
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_arc_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<ArcEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x11, "ARC", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity =
-            match decode_arc_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
-                Ok(entity) => entity,
-                Err(err) if best_effort => continue,
-                Err(err) => return Err(to_py_err(err)),
-            };
-        result.push((
+    collect_entity_rows(path, limit, 0x11, "ARC", decode_arc_for_version, |entity| {
+        (
             entity.handle,
             entity.center.0,
             entity.center.1,
@@ -2709,102 +2754,35 @@ pub fn decode_arc_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<Arc
             entity.radius,
             entity.angle_start,
             entity.angle_end,
-        ));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+        )
+    })
 }
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_arc_owner_handles(path: &str, limit: Option<usize>) -> PyResult<Vec<InsertOwnerRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x11, "ARC", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity =
-            match decode_arc_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
-                Ok(entity) => entity,
-                Err(err) if best_effort => continue,
-                Err(err) => return Err(to_py_err(err)),
-            };
-        result.push((entity.handle, entity.owner_handle));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(path, limit, 0x11, "ARC", decode_arc_for_version, |entity| {
+        (entity.handle, entity.owner_handle)
+    })
 }
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_circle_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<CircleEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x12, "CIRCLE", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity = match decode_circle_for_version(
-            &mut reader,
-            decoder.version(),
-            &header,
-            obj.handle.0,
-        ) {
-            Ok(entity) => entity,
-            Err(err) if best_effort => continue,
-            Err(err) => return Err(to_py_err(err)),
-        };
-        result.push((
-            entity.handle,
-            entity.center.0,
-            entity.center.1,
-            entity.center.2,
-            entity.radius,
-        ));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(
+        path,
+        limit,
+        0x12,
+        "CIRCLE",
+        decode_circle_for_version,
+        |entity| {
+            (
+                entity.handle,
+                entity.center.0,
+                entity.center.1,
+                entity.center.2,
+                entity.radius,
+            )
+        },
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
@@ -2812,45 +2790,14 @@ pub fn decode_circle_owner_handles(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<InsertOwnerRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x12, "CIRCLE", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity = match decode_circle_for_version(
-            &mut reader,
-            decoder.version(),
-            &header,
-            obj.handle.0,
-        ) {
-            Ok(entity) => entity,
-            Err(err) if best_effort => continue,
-            Err(err) => return Err(to_py_err(err)),
-        };
-        result.push((entity.handle, entity.owner_handle));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(
+        path,
+        limit,
+        0x12,
+        "CIRCLE",
+        decode_circle_for_version,
+        |entity| (entity.handle, entity.owner_handle),
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
@@ -2963,111 +2910,56 @@ pub fn decode_ellipse_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<EllipseEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x23, "ELLIPSE", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity =
-            match decode_ellipse_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
-            {
-                Ok(entity) => entity,
-                Err(err) if best_effort => continue,
-                Err(err) => return Err(to_py_err(err)),
-            };
-        result.push((
-            entity.handle,
-            entity.center,
-            entity.major_axis,
-            entity.extrusion,
-            entity.axis_ratio,
-            entity.start_angle,
-            entity.end_angle,
-        ));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(
+        path,
+        limit,
+        0x23,
+        "ELLIPSE",
+        decode_ellipse_for_version,
+        |entity| {
+            (
+                entity.handle,
+                entity.center,
+                entity.major_axis,
+                entity.extrusion,
+                entity.axis_ratio,
+                entity.start_angle,
+                entity.end_angle,
+            )
+        },
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_spline_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<SplineEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x24, "SPLINE", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity = match decode_spline_for_version(
-            &mut reader,
-            decoder.version(),
-            &header,
-            obj.handle.0,
-        ) {
-            Ok(entity) => entity,
-            Err(err) if best_effort => continue,
-            Err(err) => return Err(to_py_err(err)),
-        };
-        result.push((
-            entity.handle,
+    collect_entity_rows(
+        path,
+        limit,
+        0x24,
+        "SPLINE",
+        decode_spline_for_version,
+        |entity| {
             (
-                entity.scenario,
-                entity.degree,
-                entity.rational,
-                entity.closed,
-                entity.periodic,
-            ),
-            (
-                entity.fit_tolerance,
-                entity.knot_tolerance,
-                entity.ctrl_tolerance,
-            ),
-            entity.knots,
-            entity.control_points,
-            entity.weights,
-            entity.fit_points,
-        ));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+                entity.handle,
+                (
+                    entity.scenario,
+                    entity.degree,
+                    entity.rational,
+                    entity.closed,
+                    entity.periodic,
+                ),
+                (
+                    entity.fit_tolerance,
+                    entity.knot_tolerance,
+                    entity.ctrl_tolerance,
+                ),
+                entity.knots,
+                entity.control_points,
+                entity.weights,
+                entity.fit_points,
+            )
+        },
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
@@ -3291,50 +3183,21 @@ pub fn decode_mtext_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<M
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_leader_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<LeaderEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x2D, "LEADER", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity = match decode_leader_for_version(
-            &mut reader,
-            decoder.version(),
-            &header,
-            obj.handle.0,
-        ) {
-            Ok(entity) => entity,
-            Err(err) if best_effort => continue,
-            Err(err) => return Err(to_py_err(err)),
-        };
-        result.push((
-            entity.handle,
-            entity.annotation_type,
-            entity.path_type,
-            entity.points,
-        ));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(
+        path,
+        limit,
+        0x2D,
+        "LEADER",
+        decode_leader_for_version,
+        |entity| {
+            (
+                entity.handle,
+                entity.annotation_type,
+                entity.path_type,
+                entity.points,
+            )
+        },
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
@@ -3415,258 +3278,129 @@ pub fn decode_tolerance_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<ToleranceEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x2E, "TOLERANCE", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity = match decode_tolerance_for_version(
-            &mut reader,
-            decoder.version(),
-            &header,
-            obj.handle.0,
-        ) {
-            Ok(entity) => entity,
-            Err(err) if best_effort => continue,
-            Err(err) => return Err(to_py_err(err)),
-        };
-        result.push((
-            entity.handle,
-            entity.text,
-            entity.insertion,
-            entity.x_direction,
-            entity.extrusion,
-            entity.height,
-            entity.dimgap,
-            entity.dimstyle_handle,
-        ));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(
+        path,
+        limit,
+        0x2E,
+        "TOLERANCE",
+        decode_tolerance_for_version,
+        |entity| {
+            (
+                entity.handle,
+                entity.text,
+                entity.insertion,
+                entity.x_direction,
+                entity.extrusion,
+                entity.height,
+                entity.dimgap,
+                entity.dimstyle_handle,
+            )
+        },
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_mline_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<MLineEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x2F, "MLINE", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity =
-            match decode_mline_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
-                Ok(entity) => entity,
-                Err(err) if best_effort => continue,
-                Err(err) => return Err(to_py_err(err)),
-            };
-        let vertices: Vec<MLineVertexRow> = entity
-            .vertices
-            .iter()
-            .map(|vertex| {
-                (
-                    vertex.position,
-                    vertex.vertex_direction,
-                    vertex.miter_direction,
-                )
-            })
-            .collect();
-        result.push((
-            entity.handle,
-            entity.scale,
-            entity.justification,
-            entity.base_point,
-            entity.extrusion,
-            entity.open_closed,
-            entity.lines_in_style,
-            vertices,
-            entity.mlinestyle_handle,
-        ));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(
+        path,
+        limit,
+        0x2F,
+        "MLINE",
+        decode_mline_for_version,
+        |entity| {
+            let vertices: Vec<MLineVertexRow> = entity
+                .vertices
+                .iter()
+                .map(|vertex| {
+                    (
+                        vertex.position,
+                        vertex.vertex_direction,
+                        vertex.miter_direction,
+                    )
+                })
+                .collect();
+            (
+                entity.handle,
+                entity.scale,
+                entity.justification,
+                entity.base_point,
+                entity.extrusion,
+                entity.open_closed,
+                entity.lines_in_style,
+                vertices,
+                entity.mlinestyle_handle,
+            )
+        },
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_solid_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<SolidEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x1F, "SOLID", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity =
-            match decode_solid_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
-                Ok(entity) => entity,
-                Err(err) if best_effort => continue,
-                Err(err) => return Err(to_py_err(err)),
-            };
-        result.push((
-            entity.handle,
-            entity.p1,
-            entity.p2,
-            entity.p3,
-            entity.p4,
-            entity.thickness,
-            entity.extrusion,
-        ));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(
+        path,
+        limit,
+        0x1F,
+        "SOLID",
+        decode_solid_for_version,
+        |entity| {
+            (
+                entity.handle,
+                entity.p1,
+                entity.p2,
+                entity.p3,
+                entity.p4,
+                entity.thickness,
+                entity.extrusion,
+            )
+        },
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_trace_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<TraceEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x20, "TRACE", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity =
-            match decode_trace_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
-                Ok(entity) => entity,
-                Err(err) if best_effort => continue,
-                Err(err) => return Err(to_py_err(err)),
-            };
-        result.push((
-            entity.handle,
-            entity.p1,
-            entity.p2,
-            entity.p3,
-            entity.p4,
-            entity.thickness,
-            entity.extrusion,
-        ));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(
+        path,
+        limit,
+        0x20,
+        "TRACE",
+        decode_trace_for_version,
+        |entity| {
+            (
+                entity.handle,
+                entity.p1,
+                entity.p2,
+                entity.p3,
+                entity.p4,
+                entity.thickness,
+                entity.extrusion,
+            )
+        },
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_shape_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<ShapeEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x21, "SHAPE", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity =
-            match decode_shape_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
-                Ok(entity) => entity,
-                Err(err) if best_effort => continue,
-                Err(err) => return Err(to_py_err(err)),
-            };
-        result.push((
-            entity.handle,
-            entity.insertion,
-            entity.scale,
-            entity.rotation,
-            entity.width_factor,
-            entity.oblique,
-            entity.thickness,
-            entity.shape_no,
-            entity.extrusion,
-            entity.shapefile_handle,
-        ));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(
+        path,
+        limit,
+        0x21,
+        "SHAPE",
+        decode_shape_for_version,
+        |entity| {
+            (
+                entity.handle,
+                entity.insertion,
+                entity.scale,
+                entity.rotation,
+                entity.width_factor,
+                entity.oblique,
+                entity.thickness,
+                entity.shape_no,
+                entity.extrusion,
+                entity.shapefile_handle,
+            )
+        },
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
@@ -3674,45 +3408,14 @@ pub fn decode_viewport_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<ViewportEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x22, "VIEWPORT", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity = match decode_viewport_for_version(
-            &mut reader,
-            decoder.version(),
-            &header,
-            obj.handle.0,
-        ) {
-            Ok(entity) => entity,
-            Err(err) if best_effort => continue,
-            Err(err) => return Err(to_py_err(err)),
-        };
-        result.push((entity.handle,));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(
+        path,
+        limit,
+        0x22,
+        "VIEWPORT",
+        decode_viewport_for_version,
+        |entity| (entity.handle,),
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
@@ -3720,45 +3423,14 @@ pub fn decode_oleframe_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<OleFrameEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x2B, "OLEFRAME", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity = match decode_oleframe_for_version(
-            &mut reader,
-            decoder.version(),
-            &header,
-            obj.handle.0,
-        ) {
-            Ok(entity) => entity,
-            Err(err) if best_effort => continue,
-            Err(err) => return Err(to_py_err(err)),
-        };
-        result.push((entity.handle,));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(
+        path,
+        limit,
+        0x2B,
+        "OLEFRAME",
+        decode_oleframe_for_version,
+        |entity| (entity.handle,),
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
@@ -3766,45 +3438,14 @@ pub fn decode_ole2frame_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<OleFrameEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x4A, "OLE2FRAME", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity = match decode_ole2frame_for_version(
-            &mut reader,
-            decoder.version(),
-            &header,
-            obj.handle.0,
-        ) {
-            Ok(entity) => entity,
-            Err(err) if best_effort => continue,
-            Err(err) => return Err(to_py_err(err)),
-        };
-        result.push((entity.handle,));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(
+        path,
+        limit,
+        0x4A,
+        "OLE2FRAME",
+        decode_ole2frame_for_version,
+        |entity| (entity.handle,),
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
@@ -3812,54 +3453,25 @@ pub fn decode_long_transaction_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<LongTransactionEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x4C, "LONG_TRANSACTION", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity = match decode_long_transaction_for_version(
-            &mut reader,
-            decoder.version(),
-            &header,
-            obj.handle.0,
-        ) {
-            Ok(entity) => entity,
-            Err(err) if best_effort => continue,
-            Err(err) => return Err(to_py_err(err)),
-        };
-        result.push((
-            entity.handle,
-            entity.owner_handle,
-            entity.reactor_handles,
-            entity.xdic_obj_handle,
-            entity.ltype_handle,
-            entity.plotstyle_handle,
-            entity.material_handle,
-            entity.extra_handles,
-        ));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(
+        path,
+        limit,
+        0x4C,
+        "LONG_TRANSACTION",
+        decode_long_transaction_for_version,
+        |entity| {
+            (
+                entity.handle,
+                entity.owner_handle,
+                entity.reactor_handles,
+                entity.xdic_obj_handle,
+                entity.ltype_handle,
+                entity.plotstyle_handle,
+                entity.material_handle,
+                entity.extra_handles,
+            )
+        },
+    )
 }
 
 #[pyfunction(signature = (path, limit=None))]
@@ -4025,80 +3637,21 @@ pub fn decode_body_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<Bo
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_ray_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<RayEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x28, "RAY", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity =
-            match decode_ray_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
-                Ok(entity) => entity,
-                Err(err) if best_effort => continue,
-                Err(err) => return Err(to_py_err(err)),
-            };
-        result.push((entity.handle, entity.start, entity.unit_vector));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(path, limit, 0x28, "RAY", decode_ray_for_version, |entity| {
+        (entity.handle, entity.start, entity.unit_vector)
+    })
 }
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_xline_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<XLineEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        if !matches_type_name(header.type_code, 0x29, "XLINE", &dynamic_types) {
-            continue;
-        }
-        let mut reader = record.bit_reader();
-        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
-            if best_effort {
-                continue;
-            }
-            return Err(to_py_err(err));
-        }
-        let entity =
-            match decode_xline_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
-                Ok(entity) => entity,
-                Err(err) if best_effort => continue,
-                Err(err) => return Err(to_py_err(err)),
-            };
-        result.push((entity.handle, entity.start, entity.unit_vector));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    collect_entity_rows(
+        path,
+        limit,
+        0x29,
+        "XLINE",
+        decode_xline_for_version,
+        |entity| (entity.handle, entity.start, entity.unit_vector),
+    )
 }
 
 fn decode_line_for_version(
@@ -4139,108 +3692,53 @@ fn decode_line_for_version(
     Err(primary_err)
 }
 
-fn decode_point_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::PointEntity> {
-    match version {
-        version::DwgVersion::R14 => entities::decode_point_r14(reader, object_handle),
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_point_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_point_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_point_r2007(reader),
-        _ => entities::decode_point(reader),
-    }
+impl_version_dispatch! {
+    with_r14;
+    fn decode_point_for_version -> entities::PointEntity;
+    r14: entities::decode_point_r14;
+    r2010: entities::decode_point_r2010;
+    r2013: entities::decode_point_r2013;
+    r2007: entities::decode_point_r2007;
+    default: entities::decode_point;
 }
 
-fn decode_arc_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::ArcEntity> {
-    match version {
-        version::DwgVersion::R14 => entities::decode_arc_r14(reader, object_handle),
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_arc_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_arc_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_arc_r2007(reader),
-        _ => entities::decode_arc(reader),
-    }
+impl_version_dispatch! {
+    with_r14;
+    fn decode_arc_for_version -> entities::ArcEntity;
+    r14: entities::decode_arc_r14;
+    r2010: entities::decode_arc_r2010;
+    r2013: entities::decode_arc_r2013;
+    r2007: entities::decode_arc_r2007;
+    default: entities::decode_arc;
 }
 
-fn decode_circle_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::CircleEntity> {
-    match version {
-        version::DwgVersion::R14 => entities::decode_circle_r14(reader, object_handle),
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_circle_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_circle_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_circle_r2007(reader),
-        _ => entities::decode_circle(reader),
-    }
+impl_version_dispatch! {
+    with_r14;
+    fn decode_circle_for_version -> entities::CircleEntity;
+    r14: entities::decode_circle_r14;
+    r2010: entities::decode_circle_r2010;
+    r2013: entities::decode_circle_r2013;
+    r2007: entities::decode_circle_r2007;
+    default: entities::decode_circle;
 }
 
-fn decode_ellipse_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::EllipseEntity> {
-    match version {
-        version::DwgVersion::R14 => entities::decode_ellipse_r14(reader, object_handle),
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_ellipse_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_ellipse_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_ellipse_r2007(reader),
-        _ => entities::decode_ellipse(reader),
-    }
+impl_version_dispatch! {
+    with_r14;
+    fn decode_ellipse_for_version -> entities::EllipseEntity;
+    r14: entities::decode_ellipse_r14;
+    r2010: entities::decode_ellipse_r2010;
+    r2013: entities::decode_ellipse_r2013;
+    r2007: entities::decode_ellipse_r2007;
+    default: entities::decode_ellipse;
 }
 
-fn decode_spline_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::SplineEntity> {
-    match version {
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_spline_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_spline_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_spline_r2007(reader),
-        _ => entities::decode_spline(reader),
-    }
+impl_version_dispatch! {
+    no_r14;
+    fn decode_spline_for_version -> entities::SplineEntity;
+    r2010: entities::decode_spline_r2010;
+    r2013: entities::decode_spline_r2013;
+    r2007: entities::decode_spline_r2007;
+    default: entities::decode_spline;
 }
 
 fn decode_text_for_version(
@@ -4793,24 +4291,13 @@ fn score_mtext_entity_candidate(entity: &entities::MTextEntity) -> i64 {
 }
 
 
-fn decode_leader_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::LeaderEntity> {
-    match version {
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_leader_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_leader_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_leader_r2007(reader),
-        _ => entities::decode_leader(reader),
-    }
+impl_version_dispatch! {
+    no_r14;
+    fn decode_leader_for_version -> entities::LeaderEntity;
+    r2010: entities::decode_leader_r2010;
+    r2013: entities::decode_leader_r2013;
+    r2007: entities::decode_leader_r2007;
+    default: entities::decode_leader;
 }
 
 fn decode_hatch_for_version(
@@ -4834,313 +4321,148 @@ fn decode_hatch_for_version(
     }
 }
 
-fn decode_tolerance_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::ToleranceEntity> {
-    match version {
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_tolerance_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_tolerance_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_tolerance_r2007(reader),
-        _ => entities::decode_tolerance(reader),
-    }
+impl_version_dispatch! {
+    no_r14;
+    fn decode_tolerance_for_version -> entities::ToleranceEntity;
+    r2010: entities::decode_tolerance_r2010;
+    r2013: entities::decode_tolerance_r2013;
+    r2007: entities::decode_tolerance_r2007;
+    default: entities::decode_tolerance;
 }
 
-fn decode_mline_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::MLineEntity> {
-    match version {
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_mline_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_mline_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_mline_r2007(reader),
-        _ => entities::decode_mline(reader),
-    }
+impl_version_dispatch! {
+    no_r14;
+    fn decode_mline_for_version -> entities::MLineEntity;
+    r2010: entities::decode_mline_r2010;
+    r2013: entities::decode_mline_r2013;
+    r2007: entities::decode_mline_r2007;
+    default: entities::decode_mline;
 }
 
-fn decode_3dface_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::Face3dEntity> {
-    match version {
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_3dface_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_3dface_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_3dface_r2007(reader),
-        _ => entities::decode_3dface(reader),
-    }
+impl_version_dispatch! {
+    no_r14;
+    fn decode_3dface_for_version -> entities::Face3dEntity;
+    r2010: entities::decode_3dface_r2010;
+    r2013: entities::decode_3dface_r2013;
+    r2007: entities::decode_3dface_r2007;
+    default: entities::decode_3dface;
 }
 
-fn decode_solid_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::SolidEntity> {
-    match version {
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_solid_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_solid_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_solid_r2007(reader),
-        _ => entities::decode_solid(reader),
-    }
+impl_version_dispatch! {
+    no_r14;
+    fn decode_solid_for_version -> entities::SolidEntity;
+    r2010: entities::decode_solid_r2010;
+    r2013: entities::decode_solid_r2013;
+    r2007: entities::decode_solid_r2007;
+    default: entities::decode_solid;
 }
 
-fn decode_trace_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::TraceEntity> {
-    match version {
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_trace_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_trace_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_trace_r2007(reader),
-        _ => entities::decode_trace(reader),
-    }
+impl_version_dispatch! {
+    no_r14;
+    fn decode_trace_for_version -> entities::TraceEntity;
+    r2010: entities::decode_trace_r2010;
+    r2013: entities::decode_trace_r2013;
+    r2007: entities::decode_trace_r2007;
+    default: entities::decode_trace;
 }
 
-fn decode_shape_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::ShapeEntity> {
-    match version {
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_shape_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_shape_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_shape_r2007(reader),
-        _ => entities::decode_shape(reader),
-    }
+impl_version_dispatch! {
+    no_r14;
+    fn decode_shape_for_version -> entities::ShapeEntity;
+    r2010: entities::decode_shape_r2010;
+    r2013: entities::decode_shape_r2013;
+    r2007: entities::decode_shape_r2007;
+    default: entities::decode_shape;
 }
 
-fn decode_viewport_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::ViewportEntity> {
-    match version {
-        version::DwgVersion::R14 => entities::decode_viewport_r14(reader, object_handle),
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_viewport_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_viewport_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_viewport_r2007(reader),
-        _ => entities::decode_viewport(reader),
-    }
+impl_version_dispatch! {
+    with_r14;
+    fn decode_viewport_for_version -> entities::ViewportEntity;
+    r14: entities::decode_viewport_r14;
+    r2010: entities::decode_viewport_r2010;
+    r2013: entities::decode_viewport_r2013;
+    r2007: entities::decode_viewport_r2007;
+    default: entities::decode_viewport;
 }
 
-fn decode_oleframe_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::OleFrameEntity> {
-    match version {
-        version::DwgVersion::R14 => entities::decode_oleframe_r14(reader, object_handle),
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_oleframe_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_oleframe_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_oleframe_r2007(reader),
-        _ => entities::decode_oleframe(reader),
-    }
+impl_version_dispatch! {
+    with_r14;
+    fn decode_oleframe_for_version -> entities::OleFrameEntity;
+    r14: entities::decode_oleframe_r14;
+    r2010: entities::decode_oleframe_r2010;
+    r2013: entities::decode_oleframe_r2013;
+    r2007: entities::decode_oleframe_r2007;
+    default: entities::decode_oleframe;
 }
 
-fn decode_ole2frame_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::OleFrameEntity> {
-    match version {
-        version::DwgVersion::R14 => entities::decode_ole2frame_r14(reader, object_handle),
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_ole2frame_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_ole2frame_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_ole2frame_r2007(reader),
-        _ => entities::decode_ole2frame(reader),
-    }
+impl_version_dispatch! {
+    with_r14;
+    fn decode_ole2frame_for_version -> entities::OleFrameEntity;
+    r14: entities::decode_ole2frame_r14;
+    r2010: entities::decode_ole2frame_r2010;
+    r2013: entities::decode_ole2frame_r2013;
+    r2007: entities::decode_ole2frame_r2007;
+    default: entities::decode_ole2frame;
 }
 
-fn decode_long_transaction_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::LongTransactionEntity> {
-    match version {
-        version::DwgVersion::R14 => entities::decode_long_transaction_r14(reader, object_handle),
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_long_transaction_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_long_transaction_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_long_transaction_r2007(reader),
-        _ => entities::decode_long_transaction(reader),
-    }
+impl_version_dispatch! {
+    with_r14;
+    fn decode_long_transaction_for_version -> entities::LongTransactionEntity;
+    r14: entities::decode_long_transaction_r14;
+    r2010: entities::decode_long_transaction_r2010;
+    r2013: entities::decode_long_transaction_r2013;
+    r2007: entities::decode_long_transaction_r2007;
+    default: entities::decode_long_transaction;
 }
 
-fn decode_region_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::RegionEntity> {
-    match version {
-        version::DwgVersion::R14 => entities::decode_region_r14(reader, object_handle),
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_region_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_region_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_region_r2007(reader),
-        _ => entities::decode_region(reader),
-    }
+impl_version_dispatch! {
+    with_r14;
+    fn decode_region_for_version -> entities::RegionEntity;
+    r14: entities::decode_region_r14;
+    r2010: entities::decode_region_r2010;
+    r2013: entities::decode_region_r2013;
+    r2007: entities::decode_region_r2007;
+    default: entities::decode_region;
 }
 
-fn decode_3dsolid_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::Solid3dEntity> {
-    match version {
-        version::DwgVersion::R14 => entities::decode_3dsolid_r14(reader, object_handle),
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_3dsolid_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_3dsolid_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_3dsolid_r2007(reader),
-        _ => entities::decode_3dsolid(reader),
-    }
+impl_version_dispatch! {
+    with_r14;
+    fn decode_3dsolid_for_version -> entities::Solid3dEntity;
+    r14: entities::decode_3dsolid_r14;
+    r2010: entities::decode_3dsolid_r2010;
+    r2013: entities::decode_3dsolid_r2013;
+    r2007: entities::decode_3dsolid_r2007;
+    default: entities::decode_3dsolid;
 }
 
-fn decode_body_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::BodyEntity> {
-    match version {
-        version::DwgVersion::R14 => entities::decode_body_r14(reader, object_handle),
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_body_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_body_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_body_r2007(reader),
-        _ => entities::decode_body(reader),
-    }
+impl_version_dispatch! {
+    with_r14;
+    fn decode_body_for_version -> entities::BodyEntity;
+    r14: entities::decode_body_r14;
+    r2010: entities::decode_body_r2010;
+    r2013: entities::decode_body_r2013;
+    r2007: entities::decode_body_r2007;
+    default: entities::decode_body;
 }
 
-fn decode_ray_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::RayEntity> {
-    match version {
-        version::DwgVersion::R14 => entities::decode_ray_r14(reader, object_handle),
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_ray_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_ray_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_ray_r2007(reader),
-        _ => entities::decode_ray(reader),
-    }
+impl_version_dispatch! {
+    with_r14;
+    fn decode_ray_for_version -> entities::RayEntity;
+    r14: entities::decode_ray_r14;
+    r2010: entities::decode_ray_r2010;
+    r2013: entities::decode_ray_r2013;
+    r2007: entities::decode_ray_r2007;
+    default: entities::decode_ray;
 }
 
-fn decode_xline_for_version(
-    reader: &mut BitReader<'_>,
-    version: &version::DwgVersion,
-    header: &ApiObjectHeader,
-    object_handle: u64,
-) -> crate::core::result::Result<entities::XLineEntity> {
-    match version {
-        version::DwgVersion::R14 => entities::decode_xline_r14(reader, object_handle),
-        version::DwgVersion::R2010 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_xline_r2010(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
-            entities::decode_xline_r2013(reader, object_data_end_bit, object_handle)
-        }
-        version::DwgVersion::R2007 => entities::decode_xline_r2007(reader),
-        _ => entities::decode_xline(reader),
-    }
+impl_version_dispatch! {
+    with_r14;
+    fn decode_xline_for_version -> entities::XLineEntity;
+    r14: entities::decode_xline_r14;
+    r2010: entities::decode_xline_r2010;
+    r2013: entities::decode_xline_r2013;
+    r2007: entities::decode_xline_r2007;
+    default: entities::decode_xline;
 }
 
 fn read_handle_reference_chained(

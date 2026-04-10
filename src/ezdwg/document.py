@@ -208,6 +208,35 @@ class Layout:
 
         return to_dwg(self, output_path, **kwargs)
 
+    def _yield_simple_entities(
+        self,
+        dxftype: str,
+        rows: Iterable,
+        build_dxf,
+        entity_style_map: dict[int, tuple[int | None, int | None, int]],
+        layer_color_map: dict[int, tuple[int, int | None]],
+        layer_color_overrides: dict[int, tuple[int, int | None]] | None,
+    ) -> Iterator[Entity]:
+        """Emit ``Entity`` records for simple entity types that share the common
+        decode-row → ``_attach_entity_color`` → ``Entity`` pattern.
+
+        ``build_dxf(row)`` must return ``(handle, dxf_data_dict)``.
+        """
+        for row in rows:
+            handle, dxf_data = build_dxf(row)
+            yield Entity(
+                dxftype=dxftype,
+                handle=handle,
+                dxf=_attach_entity_color(
+                    handle,
+                    dxf_data,
+                    entity_style_map,
+                    layer_color_map,
+                    layer_color_overrides,
+                    dxftype=dxftype,
+                ),
+            )
+
     def _iter_type(
         self,
         dxftype: str,
@@ -714,68 +743,56 @@ class Layout:
             return
 
         if dxftype == "3DFACE":
-            for handle, p1, p2, p3, p4, invisible_edge_flags in raw.decode_3dface_entities(
-                decode_path
-            ):
-                yield Entity(
-                    dxftype="3DFACE",
-                    handle=handle,
-                    dxf=_attach_entity_color(
-                        handle,
-                        {
-                            "points": [p1, p2, p3, p4],
-                            "invisible_edge_flags": int(invisible_edge_flags),
-                        },
-                        entity_style_map,
-                        layer_color_map,
-                        layer_color_overrides,
-                        dxftype="3DFACE",
-                    ),
-                )
+            yield from self._yield_simple_entities(
+                "3DFACE",
+                raw.decode_3dface_entities(decode_path),
+                lambda row: (
+                    row[0],
+                    {
+                        "points": [row[1], row[2], row[3], row[4]],
+                        "invisible_edge_flags": int(row[5]),
+                    },
+                ),
+                entity_style_map,
+                layer_color_map,
+                layer_color_overrides,
+            )
             return
 
         if dxftype == "SOLID":
-            for handle, p1, p2, p3, p4, thickness, extrusion in raw.decode_solid_entities(
-                decode_path
-            ):
-                yield Entity(
-                    dxftype="SOLID",
-                    handle=handle,
-                    dxf=_attach_entity_color(
-                        handle,
-                        {
-                            "points": [p1, p2, p3, p4],
-                            "thickness": thickness,
-                            "extrusion": extrusion,
-                        },
-                        entity_style_map,
-                        layer_color_map,
-                        layer_color_overrides,
-                        dxftype="SOLID",
-                    ),
-                )
+            yield from self._yield_simple_entities(
+                "SOLID",
+                raw.decode_solid_entities(decode_path),
+                lambda row: (
+                    row[0],
+                    {
+                        "points": [row[1], row[2], row[3], row[4]],
+                        "thickness": row[5],
+                        "extrusion": row[6],
+                    },
+                ),
+                entity_style_map,
+                layer_color_map,
+                layer_color_overrides,
+            )
             return
 
         if dxftype == "TRACE":
-            for handle, p1, p2, p3, p4, thickness, extrusion in raw.decode_trace_entities(
-                decode_path
-            ):
-                yield Entity(
-                    dxftype="TRACE",
-                    handle=handle,
-                    dxf=_attach_entity_color(
-                        handle,
-                        {
-                            "points": [p1, p2, p3, p4],
-                            "thickness": thickness,
-                            "extrusion": extrusion,
-                        },
-                        entity_style_map,
-                        layer_color_map,
-                        layer_color_overrides,
-                        dxftype="TRACE",
-                    ),
-                )
+            yield from self._yield_simple_entities(
+                "TRACE",
+                raw.decode_trace_entities(decode_path),
+                lambda row: (
+                    row[0],
+                    {
+                        "points": [row[1], row[2], row[3], row[4]],
+                        "thickness": row[5],
+                        "extrusion": row[6],
+                    },
+                ),
+                entity_style_map,
+                layer_color_map,
+                layer_color_overrides,
+            )
             return
 
         if dxftype == "SHAPE":
@@ -876,22 +893,14 @@ class Layout:
             return
 
         if dxftype == "VIEWPORT":
-            for row in raw.decode_viewport_entities(decode_path):
-                if not row:
-                    continue
-                handle = int(row[0])
-                yield Entity(
-                    dxftype="VIEWPORT",
-                    handle=handle,
-                    dxf=_attach_entity_color(
-                        handle,
-                        {},
-                        entity_style_map,
-                        layer_color_map,
-                        layer_color_overrides,
-                        dxftype="VIEWPORT",
-                    ),
-                )
+            yield from self._yield_simple_entities(
+                "VIEWPORT",
+                (row for row in raw.decode_viewport_entities(decode_path) if row),
+                lambda row: (int(row[0]), {}),
+                entity_style_map,
+                layer_color_map,
+                layer_color_overrides,
+            )
             return
 
         if dxftype == "OLEFRAME":
@@ -1047,41 +1056,25 @@ class Layout:
             return
 
         if dxftype == "RAY":
-            for handle, start, unit_vector in raw.decode_ray_entities(decode_path):
-                yield Entity(
-                    dxftype="RAY",
-                    handle=handle,
-                    dxf=_attach_entity_color(
-                        handle,
-                        {
-                            "start": start,
-                            "unit_vector": unit_vector,
-                        },
-                        entity_style_map,
-                        layer_color_map,
-                        layer_color_overrides,
-                        dxftype="RAY",
-                    ),
-                )
+            yield from self._yield_simple_entities(
+                "RAY",
+                raw.decode_ray_entities(decode_path),
+                lambda row: (row[0], {"start": row[1], "unit_vector": row[2]}),
+                entity_style_map,
+                layer_color_map,
+                layer_color_overrides,
+            )
             return
 
         if dxftype == "XLINE":
-            for handle, start, unit_vector in raw.decode_xline_entities(decode_path):
-                yield Entity(
-                    dxftype="XLINE",
-                    handle=handle,
-                    dxf=_attach_entity_color(
-                        handle,
-                        {
-                            "start": start,
-                            "unit_vector": unit_vector,
-                        },
-                        entity_style_map,
-                        layer_color_map,
-                        layer_color_overrides,
-                        dxftype="XLINE",
-                    ),
-                )
+            yield from self._yield_simple_entities(
+                "XLINE",
+                raw.decode_xline_entities(decode_path),
+                lambda row: (row[0], {"start": row[1], "unit_vector": row[2]}),
+                entity_style_map,
+                layer_color_map,
+                layer_color_overrides,
+            )
             return
 
         if dxftype == "POINT":
@@ -1138,34 +1131,24 @@ class Layout:
             return
 
         if dxftype == "ELLIPSE":
-            for (
-                handle,
-                center,
-                major_axis,
-                extrusion,
-                axis_ratio,
-                start_angle,
-                end_angle,
-            ) in raw.decode_ellipse_entities(decode_path):
-                yield Entity(
-                    dxftype="ELLIPSE",
-                    handle=handle,
-                    dxf=_attach_entity_color(
-                        handle,
-                        {
-                            "center": center,
-                            "major_axis": major_axis,
-                            "extrusion": extrusion,
-                            "axis_ratio": axis_ratio,
-                            "start_angle": start_angle,
-                            "end_angle": end_angle,
-                        },
-                        entity_style_map,
-                        layer_color_map,
-                        layer_color_overrides,
-                        dxftype="ELLIPSE",
-                    ),
-                )
+            yield from self._yield_simple_entities(
+                "ELLIPSE",
+                raw.decode_ellipse_entities(decode_path),
+                lambda row: (
+                    row[0],
+                    {
+                        "center": row[1],
+                        "major_axis": row[2],
+                        "extrusion": row[3],
+                        "axis_ratio": row[4],
+                        "start_angle": row[5],
+                        "end_angle": row[6],
+                    },
+                ),
+                entity_style_map,
+                layer_color_map,
+                layer_color_overrides,
+            )
             return
 
         if dxftype == "SPLINE":
@@ -1634,26 +1617,21 @@ class Layout:
             return
 
         if dxftype == "LEADER":
-            for handle, annotation_type, path_type, points in raw.decode_leader_entities(
-                decode_path
-            ):
-                points_list = list(points)
-                yield Entity(
-                    dxftype="LEADER",
-                    handle=handle,
-                    dxf=_attach_entity_color(
-                        handle,
-                        {
-                            "annotation_type": int(annotation_type),
-                            "path_type": int(path_type),
-                            "points": points_list,
-                        },
-                        entity_style_map,
-                        layer_color_map,
-                        layer_color_overrides,
-                        dxftype="LEADER",
-                    ),
-                )
+            yield from self._yield_simple_entities(
+                "LEADER",
+                raw.decode_leader_entities(decode_path),
+                lambda row: (
+                    row[0],
+                    {
+                        "annotation_type": int(row[1]),
+                        "path_type": int(row[2]),
+                        "points": list(row[3]),
+                    },
+                ),
+                entity_style_map,
+                layer_color_map,
+                layer_color_overrides,
+            )
             return
 
         if dxftype == "HATCH":
