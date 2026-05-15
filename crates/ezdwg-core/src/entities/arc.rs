@@ -97,21 +97,20 @@ fn decode_arc_with_header(
     let _extrusion = reader.read_be()?;
     let angle_start = reader.read_bd()?;
     let angle_end = reader.read_bd()?;
-    let (owner_handle, layer_handle) = match parse_common_entity_owner_and_layer_handle(
-        reader,
-        &header,
-        r2007_layer_only,
-    ) {
-        Ok(owner_layer) => owner_layer,
-        Err(err)
-            if allow_handle_decode_failure
-                && matches!(
-                    err.kind,
-                    ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
-                ) =>
-        { (None, 0) }
-        Err(err) => return Err(err),
-    };
+    let (owner_handle, layer_handle) =
+        match parse_common_entity_owner_and_layer_handle(reader, &header, r2007_layer_only) {
+            Ok(owner_layer) => owner_layer,
+            Err(err)
+                if allow_handle_decode_failure
+                    && matches!(
+                        err.kind,
+                        ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
+                    ) =>
+            {
+                (None, 0)
+            }
+            Err(err) => return Err(err),
+        };
 
     Ok(ArcEntity {
         handle: header.handle,

@@ -397,4 +397,3 @@ const fn variant(
         style_before_common,
     }
 }
-

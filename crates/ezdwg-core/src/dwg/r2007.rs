@@ -1410,17 +1410,24 @@ mod tests {
     use super::*;
     use crate::dwg::decoder::Decoder;
     use crate::dwg::version::{detect_version, DwgVersion};
+    use std::path::PathBuf;
+
+    fn fixture_path(path: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(path)
+    }
 
     #[test]
     fn detects_ac1021_from_sample() {
-        let bytes = std::fs::read("test_dwg/line_2007.dwg").expect("sample file");
+        let bytes = std::fs::read(fixture_path("test_dwg/line_2007.dwg")).expect("sample file");
         let version = detect_version(&bytes).expect("version tag");
         assert_eq!(version, DwgVersion::R2007);
     }
 
     #[test]
     fn ensure_supported_accepts_r2007() {
-        let bytes = std::fs::read("test_dwg/line_2007.dwg").expect("sample file");
+        let bytes = std::fs::read(fixture_path("test_dwg/line_2007.dwg")).expect("sample file");
         let decoder = Decoder::new(&bytes, Default::default()).expect("decoder");
         decoder
             .ensure_supported()
@@ -1429,7 +1436,7 @@ mod tests {
 
     #[test]
     fn parses_section_directory_and_core_names_for_ac1021() {
-        let bytes = std::fs::read("test_dwg/line_2007.dwg").expect("sample file");
+        let bytes = std::fs::read(fixture_path("test_dwg/line_2007.dwg")).expect("sample file");
         let dir = parse_section_directory(&bytes, &Default::default()).expect("section directory");
         assert!(dir.record_count > 0);
         assert!(dir
@@ -1453,7 +1460,7 @@ mod tests {
 
     #[test]
     fn loads_sections_and_builds_object_core_for_ac1021() {
-        let bytes = std::fs::read("test_dwg/line_2007.dwg").expect("sample file");
+        let bytes = std::fs::read(fixture_path("test_dwg/line_2007.dwg")).expect("sample file");
         let dir = parse_section_directory(&bytes, &Default::default()).expect("section directory");
 
         let index = dir
@@ -1486,7 +1493,7 @@ mod tests {
         ];
 
         for (path, expected_type) in cases {
-            let bytes = std::fs::read(path).expect("sample file");
+            let bytes = std::fs::read(fixture_path(path)).expect("sample file");
             let index = build_object_index(&bytes, &Default::default()).expect("object index");
             assert!(!index.objects.is_empty(), "empty object index for {path}");
 
@@ -1511,7 +1518,7 @@ mod tests {
 
     #[test]
     fn decodes_line_entity_geometry_from_ac1021_sample() {
-        let bytes = std::fs::read("test_dwg/line_2007.dwg").expect("sample file");
+        let bytes = std::fs::read(fixture_path("test_dwg/line_2007.dwg")).expect("sample file");
         let index = build_object_index(&bytes, &Default::default()).expect("object index");
 
         let mut decoded_count = 0usize;
@@ -1541,7 +1548,8 @@ mod tests {
 
     #[test]
     fn decodes_lwpolyline_vertices_from_ac1021_sample() {
-        let bytes = std::fs::read("test_dwg/polyline2d_line_2007.dwg").expect("sample file");
+        let bytes =
+            std::fs::read(fixture_path("test_dwg/polyline2d_line_2007.dwg")).expect("sample file");
         let index = build_object_index(&bytes, &Default::default()).expect("object index");
 
         let mut decoded_count = 0usize;
@@ -1572,7 +1580,7 @@ mod tests {
 
     #[test]
     fn decodes_arc_entity_geometry_from_ac1021_sample() {
-        let bytes = std::fs::read("test_dwg/arc_2007.dwg").expect("sample file");
+        let bytes = std::fs::read(fixture_path("test_dwg/arc_2007.dwg")).expect("sample file");
         let index = build_object_index(&bytes, &Default::default()).expect("object index");
 
         let mut decoded_count = 0usize;
@@ -1662,5 +1670,4 @@ mod tests {
             .collect();
         assert_eq!(refs, vec![(1, 10), (3, 14), (10, 22), (12, 25)]);
     }
-
 }

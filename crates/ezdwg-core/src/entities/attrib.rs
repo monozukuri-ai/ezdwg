@@ -449,8 +449,12 @@ fn try_parse_r2010_plus_attrib_tail_candidate<'a>(
 
     let mut candidate_reader = reader.clone();
     candidate_reader.set_bit_pos(candidate_bits);
-    let tail =
-        parse_attrib_tail_data_r2010_plus(&mut candidate_reader, is_attdef, object_handle, r2013_plus)?;
+    let tail = parse_attrib_tail_data_r2010_plus(
+        &mut candidate_reader,
+        is_attdef,
+        object_handle,
+        r2013_plus,
+    )?;
 
     let mut score = score_r2010_plus_attrib_tail_candidate(&tail);
     let distance = u64::from(candidate_bits).abs_diff(tail_start_bits);
@@ -509,8 +513,11 @@ fn parse_multiline_attrib_tail_data_r2010_plus(
     let mut best: Option<(i32, BitReader<'_>, AttribTailData)> = None;
     let mut first_err: Option<crate::core::error::DwgError> = None;
 
-    for delta in [-64i32, -48, -32, -24, -16, -12, -8, -4, 0, 4, 8, 12, 16, 24, 32, 48, 64] {
-        let candidate_bits_i64 = i64::try_from(original_abs_bits).unwrap_or(i64::MAX) + i64::from(delta);
+    for delta in [
+        -64i32, -48, -32, -24, -16, -12, -8, -4, 0, 4, 8, 12, 16, 24, 32, 48, 64,
+    ] {
+        let candidate_bits_i64 =
+            i64::try_from(original_abs_bits).unwrap_or(i64::MAX) + i64::from(delta);
         if candidate_bits_i64 < 0 {
             continue;
         }
@@ -678,7 +685,9 @@ fn is_plausible_embedded_mtext(embedded: &EmbeddedMTextData) -> bool {
     {
         return false;
     }
-    embedded.text_height.is_finite() && embedded.text_height > 0.0 && embedded.text_height <= 10_000.0
+    embedded.text_height.is_finite()
+        && embedded.text_height > 0.0
+        && embedded.text_height <= 10_000.0
 }
 
 fn parse_attrib_tail_data(
@@ -818,7 +827,7 @@ fn score_attrib_text_char(ch: char) -> i32 {
     -2
 }
 
-pub(crate) fn is_plausible_attrib_entity(entity: &AttribEntity) -> bool {
+pub fn is_plausible_attrib_entity(entity: &AttribEntity) -> bool {
     score_attrib_entity_candidate(entity).is_some()
 }
 
@@ -992,12 +1001,8 @@ mod tests {
         writer.write_b(0).expect("write edge visual style");
         writer.write_bs(0).expect("write invisibility");
         writer.write_rc(0).expect("write line weight");
-        writer
-            .write_3bd(10.0, 20.0, 0.0)
-            .expect("write insertion");
-        writer
-            .write_3bd(0.0, 0.0, 1.0)
-            .expect("write extrusion");
+        writer.write_3bd(10.0, 20.0, 0.0).expect("write insertion");
+        writer.write_3bd(0.0, 0.0, 1.0).expect("write extrusion");
         writer.write_3bd(1.0, 0.0, 0.0).expect("write x axis");
         writer.write_bd(0.0).expect("write rect width");
         writer.write_bd(0.0).expect("write rect height");
@@ -1030,8 +1035,8 @@ mod tests {
         let bytes = writer.into_bytes();
 
         let mut reader = BitReader::new(&bytes);
-        let tail =
-            parse_attrib_tail_data_r2010_plus(&mut reader, false, 0x100, false).expect("parse tail");
+        let tail = parse_attrib_tail_data_r2010_plus(&mut reader, false, 0x100, false)
+            .expect("parse tail");
 
         assert_eq!(tail.tag.as_deref(), Some("TAG1"));
         assert_eq!(tail.flags, 8);
@@ -1079,8 +1084,8 @@ mod tests {
         let bytes = writer.into_bytes();
 
         let mut reader = BitReader::new(&bytes);
-        let tail =
-            parse_attrib_tail_data_r2010_plus(&mut reader, false, 0x100, false).expect("multiline tail");
+        let tail = parse_attrib_tail_data_r2010_plus(&mut reader, false, 0x100, false)
+            .expect("multiline tail");
 
         assert_eq!(tail.tag.as_deref(), Some("TAG"));
         assert_eq!(tail.flags, 4);
@@ -1109,8 +1114,8 @@ mod tests {
         let bytes = writer.into_bytes();
 
         let mut reader = BitReader::new(&bytes);
-        let tail =
-            parse_attrib_tail_data_r2010_plus(&mut reader, true, 0x100, false).expect("multiline attdef tail");
+        let tail = parse_attrib_tail_data_r2010_plus(&mut reader, true, 0x100, false)
+            .expect("multiline attdef tail");
 
         assert_eq!(tail.tag.as_deref(), Some("NAME"));
         assert_eq!(tail.prompt.as_deref(), Some("PROMPT"));
@@ -1128,8 +1133,8 @@ mod tests {
         let bytes = writer.into_bytes();
 
         let mut reader = BitReader::new(&bytes);
-        let tail =
-            parse_attrib_tail_data_r2010_plus(&mut reader, false, 0x100, false).expect("shifted multiline tail");
+        let tail = parse_attrib_tail_data_r2010_plus(&mut reader, false, 0x100, false)
+            .expect("shifted multiline tail");
 
         let embedded = tail.embedded_mtext.expect("embedded mtext");
         assert_eq!(embedded.text, "VALUE");
@@ -1160,5 +1165,4 @@ mod tests {
         assert_eq!(embedded.text, "VALUE");
         assert_eq!(embedded.insertion, (10.0, 20.0, 0.0));
     }
-
 }

@@ -443,7 +443,7 @@ impl<'a> BitReader<'a> {
     }
 }
 
-pub(crate) fn decode_tv_bytes(bytes: &[u8], codepage: Option<u16>) -> String {
+pub fn decode_tv_bytes(bytes: &[u8], codepage: Option<u16>) -> String {
     if bytes.is_empty() {
         return String::new();
     }

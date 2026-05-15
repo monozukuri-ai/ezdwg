@@ -16,6 +16,7 @@ dxf = ["ezdxf>=1.4"]
 ezdwg = "ezdwg:main"
 
 [tool.maturin]
+manifest-path = "crates/ezdwg-python/Cargo.toml"
 module-name = "ezdwg._core"
 python-packages = ["ezdwg"]
 python-source = "src"

@@ -105,7 +105,12 @@ fn decode_mtext_with_header(
     use_unicode_text: bool,
     has_rect_height: bool,
 ) -> Result<MTextEntity> {
-    let body = parse_mtext_body(reader, has_background_data, use_unicode_text, has_rect_height)?;
+    let body = parse_mtext_body(
+        reader,
+        has_background_data,
+        use_unicode_text,
+        has_rect_height,
+    )?;
 
     // Handles are stored in the handle stream at obj_size bit offset.
     reader.set_bit_pos(header.obj_size);

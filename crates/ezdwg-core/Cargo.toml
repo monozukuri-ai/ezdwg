@@ -1,0 +1,7 @@
+[package]
+name = "ezdwg-core"
+version = "0.8.1"
+edition = "2021"
+
+[dependencies]
+encoding_rs = "0.8.35"

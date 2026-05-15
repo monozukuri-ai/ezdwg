@@ -399,20 +399,19 @@ fn decode_owner_and_layer_with_common_header(
     allow_handle_decode_failure: bool,
     r2007_layer_only: bool,
 ) -> Result<(Option<u64>, u64)> {
-    let owner_layer = match parse_common_entity_owner_and_layer_handle(
-        reader,
-        header,
-        r2007_layer_only,
-    ) {
-        Ok(owner_layer) => owner_layer,
-        Err(err)
-            if allow_handle_decode_failure
-                && matches!(
-                    err.kind,
-                    ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
-                ) =>
-        { (None, 0) }
-        Err(err) => return Err(err),
-    };
+    let owner_layer =
+        match parse_common_entity_owner_and_layer_handle(reader, header, r2007_layer_only) {
+            Ok(owner_layer) => owner_layer,
+            Err(err)
+                if allow_handle_decode_failure
+                    && matches!(
+                        err.kind,
+                        ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
+                    ) =>
+            {
+                (None, 0)
+            }
+            Err(err) => return Err(err),
+        };
     Ok(owner_layer)
 }

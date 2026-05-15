@@ -175,21 +175,20 @@ fn decode_point_with_header(
     let _thickness = reader.read_bt()?;
     let _extrusion = reader.read_be()?;
     let x_axis_angle = reader.read_bd()?;
-    let (owner_handle, layer_handle) = match parse_common_entity_owner_and_layer_handle(
-        reader,
-        &header,
-        r2007_layer_only,
-    ) {
-        Ok(owner_layer) => owner_layer,
-        Err(err)
-            if allow_handle_decode_failure
-                && matches!(
-                    err.kind,
-                    ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
-                ) =>
-        { (None, 0) }
-        Err(err) => return Err(err),
-    };
+    let (owner_handle, layer_handle) =
+        match parse_common_entity_owner_and_layer_handle(reader, &header, r2007_layer_only) {
+            Ok(owner_layer) => owner_layer,
+            Err(err)
+                if allow_handle_decode_failure
+                    && matches!(
+                        err.kind,
+                        ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
+                    ) =>
+            {
+                (None, 0)
+            }
+            Err(err) => return Err(err),
+        };
 
     Ok(PointEntity {
         handle: header.handle,
@@ -236,14 +235,14 @@ fn consider_point_r14_delta(
         list.push((score, delta, location, extrusion, x_axis_angle));
     }
 
-            let candidate = PointEntity {
-                handle: object_handle,
-                color_index: None,
-                true_color: None,
-                owner_handle: None,
-                layer_handle: 0,
-                location,
-                x_axis_angle,
+    let candidate = PointEntity {
+        handle: object_handle,
+        color_index: None,
+        true_color: None,
+        owner_handle: None,
+        layer_handle: 0,
+        location,
+        x_axis_angle,
     };
 
     if is_high_confidence_point_candidate(delta, location, extrusion, x_axis_angle, score) {
