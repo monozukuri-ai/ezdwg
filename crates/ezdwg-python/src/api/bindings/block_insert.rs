@@ -74,11 +74,30 @@ fn prepare_insert_name_resolution_state(
         known_block_handles.insert(alias_handle);
         block_header_names.entry(alias_handle).or_insert(name);
     }
+    if matches!(decoder.version(), version::DwgVersion::R2013) {
+        repair_sequential_generated_block_names_in_order(
+            decoder,
+            dynamic_types,
+            index,
+            best_effort,
+            &object_type_codes,
+            &mut block_header_names,
+        )?;
+    }
+    let insert_block_names = collect_block_header_insert_aliases_in_order(
+        decoder,
+        dynamic_types,
+        index,
+        best_effort,
+        &block_header_names,
+        &object_type_codes,
+    )?;
     let named_block_handles: HashSet<u64> = block_header_names.keys().copied().collect();
     Ok(InsertNameResolutionState {
         known_block_handles,
         block_header_names,
         named_block_handles,
+        insert_block_names,
     })
 }
 
@@ -291,8 +310,11 @@ fn decode_insert_entities_with_state(
         .ok()
         .is_some_and(|v| v != "0");
     for (handle, px, py, pz, sx, sy, sz, rotation, block_handle) in decoded_rows {
-        let mut resolved_name =
-            block_handle.and_then(|h| state.block_header_names.get(&h).cloned());
+        let mut resolved_name = state
+            .insert_block_names
+            .get(&handle)
+            .cloned()
+            .or_else(|| block_handle.and_then(|h| state.block_header_names.get(&h).cloned()));
         if resolved_name.is_none() {
             if let Some(candidates) = unresolved_insert_candidates.get(&handle) {
                 resolved_name = candidates
@@ -539,8 +561,11 @@ fn decode_minsert_entities_with_state(
         block_handle,
     ) in decoded_rows
     {
-        let mut resolved_name =
-            block_handle.and_then(|h| state.block_header_names.get(&h).cloned());
+        let mut resolved_name = state
+            .insert_block_names
+            .get(&handle)
+            .cloned()
+            .or_else(|| block_handle.and_then(|h| state.block_header_names.get(&h).cloned()));
         if resolved_name.is_none() {
             if let Some(candidates) = unresolved_minsert_candidates.get(&handle) {
                 resolved_name = candidates
@@ -2045,7 +2070,7 @@ fn collect_block_header_stream_aliases_in_order(
         let Some(name) = block_header_names.get(&obj.handle.0).cloned() else {
             continue;
         };
-        if name.is_empty() {
+        if name.is_empty() || is_layout_pseudo_block_name(&name) {
             continue;
         }
 
@@ -2128,6 +2153,390 @@ fn collect_block_header_stream_aliases_in_order(
         }
     }
     Ok(aliases)
+}
+
+fn collect_block_header_insert_aliases_in_order(
+    decoder: &decoder::Decoder<'_>,
+    dynamic_types: &HashMap<u16, String>,
+    index: &objects::ObjectIndex,
+    best_effort: bool,
+    block_header_names: &HashMap<u64, String>,
+    object_type_codes: &HashMap<u64, u16>,
+) -> PyResult<HashMap<u64, String>> {
+    if !matches!(
+        decoder.version(),
+        version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
+    ) {
+        return Ok(HashMap::new());
+    }
+
+    let mut aliases: HashMap<u64, String> = HashMap::new();
+    let mut exact_rows: Vec<(u64, String, Vec<u64>)> = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x31, "BLOCK_HEADER", dynamic_types) {
+            continue;
+        }
+        let Some(name) = block_header_names.get(&obj.handle.0).cloned() else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+
+        let exact_handles = parse_block_header_insert_handles_r2010_plus(
+            &record,
+            &header,
+            obj.handle.0,
+            object_type_codes,
+        );
+        if !exact_handles.is_empty() {
+            exact_rows.push((obj.handle.0, name, exact_handles));
+            continue;
+        }
+
+        let scanned_handles =
+            scan_block_header_insert_handle_run(&record, obj.handle.0, object_type_codes);
+        if !scanned_handles.is_empty() {
+            exact_rows.push((obj.handle.0, name, scanned_handles));
+        }
+    }
+
+    if !exact_rows.is_empty() {
+        let mut insert_handles: Vec<u64> = object_type_codes
+            .iter()
+            .filter_map(|(handle, code)| {
+                if matches!(*code, 0x07 | 0x08) {
+                    Some(*handle)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        insert_handles.sort_unstable();
+
+        let mut future_reserved: HashMap<u64, usize> = HashMap::new();
+        for (_block_handle, _name, handles) in &exact_rows {
+            for handle in handles {
+                if object_type_codes
+                    .get(handle)
+                    .is_some_and(|code| matches!(*code, 0x07 | 0x08))
+                {
+                    *future_reserved.entry(*handle).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let mut assigned: HashSet<u64> = HashSet::new();
+        for (_block_handle, name, handles) in exact_rows {
+            for raw_handle in handles {
+                if let Some(count) = future_reserved.get_mut(&raw_handle) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        future_reserved.remove(&raw_handle);
+                    }
+                }
+
+                let resolved = if object_type_codes
+                    .get(&raw_handle)
+                    .is_some_and(|code| matches!(*code, 0x07 | 0x08))
+                    && !assigned.contains(&raw_handle)
+                {
+                    Some(raw_handle)
+                } else {
+                    first_unassigned_insert_at_or_after(
+                        raw_handle,
+                        &insert_handles,
+                        &assigned,
+                        &future_reserved,
+                    )
+                    .or_else(|| {
+                        first_unassigned_insert_at_or_after(
+                            raw_handle,
+                            &insert_handles,
+                            &assigned,
+                            &HashMap::new(),
+                        )
+                    })
+                };
+                if let Some(insert_handle) = resolved {
+                    assigned.insert(insert_handle);
+                    insert_block_alias_name(&mut aliases, insert_handle, &name);
+                }
+            }
+        }
+    }
+    Ok(aliases)
+}
+
+fn insert_block_alias_name(aliases: &mut HashMap<u64, String>, insert_handle: u64, name: &str) {
+    if name.is_empty() {
+        return;
+    }
+    match aliases.get(&insert_handle) {
+        Some(existing) if is_layout_pseudo_block_name(existing) && !is_layout_pseudo_block_name(name) => {
+            aliases.insert(insert_handle, name.to_string());
+        }
+        Some(_) => {}
+        None => {
+            aliases.insert(insert_handle, name.to_string());
+        }
+    }
+}
+
+fn first_unassigned_insert_at_or_after(
+    raw_handle: u64,
+    insert_handles: &[u64],
+    assigned: &HashSet<u64>,
+    future_reserved: &HashMap<u64, usize>,
+) -> Option<u64> {
+    let start = insert_handles.partition_point(|handle| *handle < raw_handle);
+    insert_handles
+        .iter()
+        .copied()
+        .skip(start)
+        .find(|handle| !assigned.contains(handle) && !future_reserved.contains_key(handle))
+}
+
+fn repair_sequential_generated_block_names_in_order(
+    decoder: &decoder::Decoder<'_>,
+    dynamic_types: &HashMap<u16, String>,
+    index: &objects::ObjectIndex,
+    best_effort: bool,
+    object_type_codes: &HashMap<u64, u16>,
+    block_header_names: &mut HashMap<u64, String>,
+) -> PyResult<()> {
+    let mut header_handles = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((_record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if matches_type_name(header.type_code, 0x31, "BLOCK_HEADER", dynamic_types) {
+            header_handles.push(obj.handle.0);
+        }
+    }
+    header_handles.sort_unstable();
+
+    for window in header_handles.windows(3) {
+        let [previous, current, next] = [window[0], window[1], window[2]];
+        let Some(previous_name) = block_header_names.get(&previous).cloned() else {
+            continue;
+        };
+        let Some(next_name) = block_header_names.get(&next).cloned() else {
+            continue;
+        };
+        let repaired = generated_sequence_gap_name(&previous_name, &next_name);
+        let Some(repaired) = repaired else {
+            continue;
+        };
+        let current_name = block_header_names.get(&current).cloned().unwrap_or_default();
+        if current_name == repaired {
+            continue;
+        }
+        let current_is_generated = parse_generated_name_number(&current_name, "BLOCK").is_some()
+            || parse_generated_name_number(&current_name, "*D").is_some()
+            || current_name == "*D"
+            || current_name.starts_with("__");
+        if !current_name.is_empty() && !current_is_generated {
+            continue;
+        }
+        block_header_names.insert(current, repaired.clone());
+        for alias in [current.saturating_add(1), current.saturating_add(2)] {
+            if object_type_codes
+                .get(&alias)
+                .is_some_and(|code| matches!(*code, 0x04 | 0x05))
+            {
+                let alias_name = block_header_names.get(&alias).cloned().unwrap_or_default();
+                let alias_is_generated =
+                    parse_generated_name_number(&alias_name, "BLOCK").is_some()
+                        || parse_generated_name_number(&alias_name, "*D").is_some()
+                        || alias_name == "*D"
+                        || alias_name.starts_with("__");
+                if alias_name.is_empty() || alias_is_generated {
+                    block_header_names.insert(alias, repaired.clone());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn generated_sequence_gap_name(previous_name: &str, next_name: &str) -> Option<String> {
+    for prefix in ["BLOCK", "*D"] {
+        let previous = parse_generated_name_number(previous_name, prefix)?;
+        let next = parse_generated_name_number(next_name, prefix)?;
+        if next == previous.saturating_add(2) {
+            return Some(format!("{prefix}{}", previous + 1));
+        }
+    }
+    None
+}
+
+fn parse_generated_name_number(name: &str, prefix: &str) -> Option<u32> {
+    let suffix = name.strip_prefix(prefix)?;
+    if suffix.is_empty() {
+        return None;
+    }
+    suffix.parse::<u32>().ok()
+}
+
+fn parse_block_header_insert_handles_r2010_plus(
+    record: &objects::ObjectRecord<'_>,
+    api_header: &ApiObjectHeader,
+    block_handle: u64,
+    _object_type_codes: &HashMap<u64, u16>,
+) -> Vec<u64> {
+    let total_bits = record.body.as_ref().len().saturating_mul(8);
+    let Some(handle_stream_size_bits) = api_header.handle_stream_size_bits else {
+        return Vec::new();
+    };
+    let Some(handle_start_bit) = total_bits
+        .checked_sub(handle_stream_size_bits as usize)
+        .and_then(|value| value.checked_add(16))
+    else {
+        return Vec::new();
+    };
+    let Ok(handle_start_bit_u32) = u32::try_from(handle_start_bit) else {
+        return Vec::new();
+    };
+
+    let mut prefix_reader = record.bit_reader();
+    if skip_object_type_prefix(&mut prefix_reader, &version::DwgVersion::R2013).is_err() {
+        return Vec::new();
+    }
+    let prefix_end_bit = prefix_reader.tell_bits() as usize;
+
+    let Some((owned_obj_count, insert_count)) = best_block_header_insert_metadata(
+        record,
+        prefix_end_bit,
+        handle_start_bit,
+    ) else {
+        return Vec::new();
+    };
+    if insert_count == 0 || insert_count > 512 || owned_obj_count > 20_000 {
+        return Vec::new();
+    }
+
+    let mut reader = record.bit_reader();
+    reader.set_bit_pos(handle_start_bit_u32);
+    if entities::common::read_handle_reference(&mut reader, block_handle).is_err() {
+        return Vec::new();
+    }
+    if entities::common::read_handle_reference(&mut reader, block_handle).is_err() {
+        return Vec::new();
+    }
+    if entities::common::read_handle_reference(&mut reader, block_handle).is_err() {
+        return Vec::new();
+    }
+    for _ in 0..owned_obj_count {
+        if entities::common::read_handle_reference(&mut reader, block_handle).is_err() {
+            return Vec::new();
+        }
+    }
+    if entities::common::read_handle_reference(&mut reader, block_handle).is_err() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity(insert_count);
+    for _ in 0..insert_count {
+        let Ok(handle) = entities::common::read_handle_reference(&mut reader, block_handle) else {
+            break;
+        };
+        if handle != 0 {
+            out.push(handle);
+        }
+    }
+    out
+}
+
+fn best_block_header_insert_metadata(
+    record: &objects::ObjectRecord<'_>,
+    prefix_end_bit: usize,
+    handle_start_bit: usize,
+) -> Option<(u32, usize)> {
+    let mut best: Option<(i64, u32, usize)> = None;
+    for start_bit in prefix_end_bit..handle_start_bit.min(prefix_end_bit.saturating_add(96)) {
+        let Ok(start_bit_u32) = u32::try_from(start_bit) else {
+            continue;
+        };
+        let mut reader = record.bit_reader();
+        reader.set_bit_pos(start_bit_u32);
+        let Ok((owned_obj_count, insert_count)) =
+            parse_block_header_nonstring_data_r2010_plus(&mut reader)
+        else {
+            continue;
+        };
+        if owned_obj_count > 20_000 || insert_count > 512 {
+            continue;
+        }
+        if reader.tell_bits() as usize > handle_start_bit {
+            continue;
+        }
+
+        let preferred_start = prefix_end_bit.saturating_add(4);
+        let secondary_start = prefix_end_bit.saturating_add(12);
+        let mut score = 0i64;
+        if start_bit != preferred_start && start_bit != secondary_start {
+            score += 50;
+        }
+        score -= i64::from(owned_obj_count.min(100));
+        score -= i64::try_from(insert_count.min(32)).unwrap_or(0);
+        match best {
+            Some((best_score, _, _)) if best_score <= score => {}
+            _ => best = Some((score, owned_obj_count, insert_count)),
+        }
+    }
+    best.map(|(_, owned_obj_count, insert_count)| (owned_obj_count, insert_count))
+}
+
+fn scan_block_header_insert_handle_run(
+    record: &objects::ObjectRecord<'_>,
+    base_handle: u64,
+    object_type_codes: &HashMap<u64, u16>,
+) -> Vec<u64> {
+    let total_bits = record.body.as_ref().len().saturating_mul(8);
+    let mut best: Option<(usize, usize, Vec<u64>)> = None;
+    for start_bit in 0..total_bits {
+        let mut reader = record.bit_reader();
+        let Ok(start_bit_u32) = u32::try_from(start_bit) else {
+            continue;
+        };
+        reader.set_bit_pos(start_bit_u32);
+
+        let mut handles = Vec::new();
+        let mut seen = HashSet::new();
+        while let Ok(handle) = entities::common::read_handle_reference(&mut reader, base_handle) {
+            if !object_type_codes
+                .get(&handle)
+                .is_some_and(|code| matches!(*code, 0x07 | 0x08))
+            {
+                break;
+            }
+            if !seen.insert(handle) {
+                break;
+            }
+            handles.push(handle);
+            if handles.len() >= 512 {
+                break;
+            }
+        }
+        if handles.is_empty() {
+            continue;
+        }
+
+        let score_len = handles.len();
+        let score_pos = start_bit;
+        match &best {
+            Some((best_len, best_pos, _))
+                if *best_len > score_len || (*best_len == score_len && *best_pos >= score_pos) => {}
+            _ => best = Some((score_len, score_pos, handles)),
+        }
+    }
+    best.map(|(_, _, handles)| handles).unwrap_or_default()
 }
 
 fn collect_block_header_targeted_aliases_in_order(
@@ -2966,7 +3375,7 @@ fn decode_block_header_name_record(
 
 fn parse_block_header_nonstring_data_r2010_plus(
     reader: &mut BitReader<'_>,
-) -> crate::core::result::Result<()> {
+) -> crate::core::result::Result<(u32, usize)> {
     let _flag_64 = reader.read_b()?;
     let _xref_index_plus1 = reader.read_bs()?;
     let _xdep = reader.read_b()?;
@@ -2975,20 +3384,22 @@ fn parse_block_header_nonstring_data_r2010_plus(
     let _blk_is_xref = reader.read_b()?;
     let _xref_overlaid = reader.read_b()?;
     let _loaded_bit = reader.read_b()?;
-    let _owned_obj_count = reader.read_bl()?;
+    let owned_obj_count = reader.read_bl()?;
     let _base_pt = reader.read_3bd()?;
+    let mut insert_count = 0usize;
     loop {
         let marker = reader.read_rc()?;
         if marker == 0 {
             break;
         }
+        insert_count = insert_count.saturating_add(1);
     }
     let preview_data_size = reader.read_bl()? as usize;
     let _preview_data = reader.read_rcs(preview_data_size)?;
     let _insert_units = reader.read_bs()?;
     let _explodable = reader.read_b()?;
     let _block_scaling = reader.read_rc()?;
-    Ok(())
+    Ok((owned_obj_count, insert_count))
 }
 
 fn is_plausible_block_name(name: &str) -> bool {

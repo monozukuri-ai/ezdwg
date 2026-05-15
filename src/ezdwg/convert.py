@@ -95,6 +95,23 @@ _POLYLINE_OWNER_TYPES = {
     "POLYLINE_PFACE",
 }
 _BLOCK_REFERENCE_ENTITY_TYPES = {"INSERT", "MINSERT", "DIMENSION"}
+_LOCAL_NON_MODELSPACE_GEOMETRY_TYPES = {
+    "LINE",
+    "ARC",
+    "CIRCLE",
+    "ELLIPSE",
+    "LWPOLYLINE",
+    "POLYLINE_2D",
+    "3DFACE",
+    "SOLID",
+    "TRACE",
+    "SPLINE",
+    "TEXT",
+    "ATTRIB",
+    "ATTDEF",
+    "MTEXT",
+    "POINT",
+}
 _WRITABLE_ENTITY_TYPES = {
     "LINE",
     "RAY",
@@ -383,6 +400,11 @@ def to_dxf(
         )
         source_entities = _drop_small_local_non_modelspace_geometry(
             layout.doc.decode_path,
+            source_entities,
+            decode_cache=decode_cache,
+        )
+        source_entities = _repair_monotonic_generated_block_insert_names(
+            layout.doc.decode_path or layout.doc.path,
             source_entities,
             decode_cache=decode_cache,
         )
@@ -2418,16 +2440,21 @@ def _entity_is_modelspace_owned(
     modelspace_handles: set[int],
     modelspace_owner_handles: set[int],
 ) -> bool:
+    try:
+        handle_is_modelspace = int(entity.handle) in modelspace_handles
+    except Exception:
+        handle_is_modelspace = False
+
     owner_handle = entity.dxf.get("owner_handle")
     if owner_handle is not None:
         try:
-            return int(owner_handle) in modelspace_owner_handles
+            owner_is_modelspace = int(owner_handle) in modelspace_owner_handles
         except Exception:
-            return False
-    try:
-        return int(entity.handle) in modelspace_handles
-    except Exception:
-        return False
+            return handle_is_modelspace
+        if entity.dxftype in {"INSERT", "MINSERT"}:
+            return owner_is_modelspace or handle_is_modelspace
+        return owner_is_modelspace
+    return handle_is_modelspace
 
 
 def _maybe_filter_modelspace_block_references(
@@ -2478,22 +2505,117 @@ def _maybe_filter_modelspace_block_references(
     return filtered
 
 
+def _generated_block_number(name: str | None) -> int | None:
+    if not name or not name.startswith("BLOCK"):
+        return None
+    suffix = name[5:]
+    if not suffix.isdigit():
+        return None
+    number = int(suffix)
+    return number if number > 0 else None
+
+
+def _repair_monotonic_generated_block_insert_names(
+    decode_path: str | None,
+    entities: list[Entity],
+    *,
+    decode_cache: _ConvertDecodeCache | None = None,
+) -> list[Entity]:
+    # Some AC1027 files expose the modelspace INSERT run as duplicated
+    # generated names and layout pseudo names, while the block table still
+    # carries a clean BLOCK1..BLOCKn sequence.
+    if not decode_path or not entities:
+        return entities
+
+    available_block_numbers = sorted(
+        {
+            number
+            for row in _decode_block_header_name_rows(
+                decode_path,
+                decode_cache=decode_cache,
+            )
+            if isinstance(row, tuple)
+            and len(row) >= 2
+            and (
+                number := _generated_block_number(_normalize_block_name(row[1]))
+            )
+            is not None
+        }
+    )
+    if len(available_block_numbers) < 96:
+        return entities
+    if available_block_numbers[0] != 1 or available_block_numbers[-1] != len(
+        available_block_numbers
+    ):
+        return entities
+
+    max_block_number = available_block_numbers[-1]
+    candidate_indexes: list[int] = []
+    layout_pseudo_count = 0
+    generated_name_counts: dict[str, int] = {}
+
+    for index, entity in enumerate(entities):
+        if entity.dxftype not in {"INSERT", "MINSERT"}:
+            continue
+        name = _normalize_block_name(entity.dxf.get("name"))
+        if _generated_block_number(name) is not None:
+            candidate_indexes.append(index)
+            generated_name_counts[name] = generated_name_counts.get(name, 0) + 1
+            continue
+        if name is not None and _is_layout_pseudo_block_name(name):
+            candidate_indexes.append(index)
+            layout_pseudo_count += 1
+
+    if layout_pseudo_count < 16:
+        return entities
+    if len(candidate_indexes) < int(max_block_number * 0.75):
+        return entities
+    if len(candidate_indexes) > max_block_number + 16:
+        return entities
+    if not any(count > 1 for count in generated_name_counts.values()):
+        return entities
+
+    repaired = list(entities)
+    changed = False
+    for sequence_number, entity_index in enumerate(candidate_indexes, start=1):
+        if sequence_number > max_block_number:
+            break
+        entity = repaired[entity_index]
+        desired_name = f"BLOCK{sequence_number}"
+        if _normalize_block_name(entity.dxf.get("name")) == desired_name:
+            continue
+        remapped = dict(entity.dxf)
+        remapped["name"] = desired_name
+        repaired[entity_index] = Entity(
+            dxftype=entity.dxftype,
+            handle=entity.handle,
+            dxf=remapped,
+        )
+        changed = True
+
+    return repaired if changed else entities
+
+
 def _entity_planar_bounds(entity: Entity) -> tuple[float, float, float, float] | None:
     dxf = entity.dxf
     dxftype = str(entity.dxftype).strip().upper()
     points: list[tuple[float, float]] = []
+
+    def add_point(value: Any) -> None:
+        point = _point2_or_none(value)
+        if point is not None:
+            points.append(point)
+
+    def add_points(value: Any) -> None:
+        if not isinstance(value, list):
+            return
+        for point in value:
+            add_point(point)
+
     try:
         if dxftype == "LINE":
-            start = dxf.get("start")
-            end = dxf.get("end")
-            if start is None or end is None:
-                return None
-            points.extend(
-                (
-                    (float(start[0]), float(start[1])),
-                    (float(end[0]), float(end[1])),
-                )
-            )
+            add_point(dxf.get("start"))
+            add_point(dxf.get("end"))
         elif dxftype in {"ARC", "CIRCLE"}:
             center = dxf.get("center")
             radius = float(dxf.get("radius"))
@@ -2507,14 +2629,36 @@ def _entity_planar_bounds(entity: Entity) -> tuple[float, float, float, float] |
                     (center_x + radius, center_y + radius),
                 )
             )
-        elif dxftype == "LWPOLYLINE":
-            raw_points = dxf.get("points")
-            if not isinstance(raw_points, list):
+        elif dxftype == "ELLIPSE":
+            center = _point2_or_none(dxf.get("center"))
+            major_axis = _point2_or_none(dxf.get("major_axis"))
+            if center is None or major_axis is None:
                 return None
-            for point in raw_points:
-                if not isinstance(point, tuple) or len(point) < 2:
-                    continue
-                points.append((float(point[0]), float(point[1])))
+            major_len = math.hypot(major_axis[0], major_axis[1])
+            ratio = abs(_finite_float(dxf.get("axis_ratio", dxf.get("ratio", 1.0)), 1.0))
+            radius = max(major_len, major_len * ratio)
+            points.extend(
+                (
+                    (center[0] - radius, center[1] - radius),
+                    (center[0] + radius, center[1] + radius),
+                )
+            )
+        elif dxftype in {"LWPOLYLINE", "POLYLINE_2D"}:
+            add_points(dxf.get("points"))
+            add_points(dxf.get("interpolated_points"))
+        elif dxftype in {"3DFACE", "SOLID", "TRACE"}:
+            add_points(dxf.get("points"))
+        elif dxftype == "SPLINE":
+            add_points(dxf.get("points"))
+            add_points(dxf.get("control_points"))
+            add_points(dxf.get("fit_points"))
+        elif dxftype in {"TEXT", "ATTRIB", "ATTDEF"}:
+            add_point(dxf.get("insert"))
+            add_point(dxf.get("align_point"))
+        elif dxftype == "MTEXT":
+            add_point(dxf.get("insert"))
+        elif dxftype == "POINT":
+            add_point(dxf.get("location"))
         else:
             return None
     except Exception:
@@ -2551,7 +2695,7 @@ def _drop_small_local_non_modelspace_geometry(
     cluster_max_y = -math.inf
 
     for entity in entities:
-        if entity.dxftype not in {"LINE", "ARC", "CIRCLE", "LWPOLYLINE"}:
+        if entity.dxftype not in _LOCAL_NON_MODELSPACE_GEOMETRY_TYPES:
             continue
         if _entity_is_modelspace_owned(
             entity,
@@ -6466,5 +6610,3 @@ def _should_skip_layout_proxy_i_insert(
     if local_center_abs is None or local_center_abs <= 1000.0:
         return False
     return True
-
-

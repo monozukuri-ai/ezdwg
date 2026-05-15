@@ -266,4 +266,5 @@ struct InsertNameResolutionState {
     known_block_handles: HashSet<u64>,
     block_header_names: HashMap<u64, String>,
     named_block_handles: HashSet<u64>,
+    insert_block_names: HashMap<u64, String>,
 }
