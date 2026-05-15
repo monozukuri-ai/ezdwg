@@ -35,4 +35,3 @@ for entity in msp.query("LINE ARC CIRCLE"):
 - [Quick Start](getting-started/quickstart.md) — learn the basics in 5 minutes
 - [User Guide](guide/reading-files.md) — detailed usage guides
 - [API Reference](api/index.md) — full API documentation
-- [Roadmap](roadmap.md) — implementation priorities for expanding parser coverage

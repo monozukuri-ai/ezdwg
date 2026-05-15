@@ -6,8 +6,6 @@ This project is a **DWG read-focused parser** with growing high-level entity cov
 
 Documentation: https://monozukuri-ai.github.io/ezdwg/
 
-Roadmap: see [docs/roadmap.md](docs/roadmap.md) for the implementation plan toward a broader, less minimal parser.
-
 ## Status
 - High-level API (`ezdwg.read`): **R14 / AC1014** (experimental), **R2000 / AC1015**, **R2004 / AC1018**, **R2007 / AC1021**, **R2010 / AC1024**, **R2013 / AC1027**, **R2018 / AC1032**
 - Raw API (`ezdwg.raw`): **R14 / AC1014** (version detect + object headers), **R2000 / AC1015**, **R2004 / AC1018**, **R2007 / AC1021**, plus native **AC1024/AC1027/AC1032** support for object listing and `LINE`/`ARC`/`LWPOLYLINE` decode
