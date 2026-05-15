@@ -251,6 +251,649 @@ pub fn list_object_headers_with_type(
     Ok(result)
 }
 
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_document_graph(path: &str, limit: Option<usize>) -> PyResult<DocumentGraphRows> {
+    let version = detect_version(path)?;
+    let all_objects = list_object_headers_with_type(path, None)?;
+    let object_type_by_handle: HashMap<u64, String> = all_objects
+        .iter()
+        .map(|(handle, _, _, _, type_name, _)| (*handle, type_name.clone()))
+        .collect();
+    let mut objects = all_objects.clone();
+    if let Some(limit) = limit {
+        objects.truncate(limit);
+    }
+    let source_handles: HashSet<u64> = objects
+        .iter()
+        .map(|(handle, _, _, _, _, _)| *handle)
+        .collect();
+    let owner_by_handle = collect_graph_owner_handles(path)?;
+    let common_handles_by_handle = collect_graph_common_entity_handles(path, &all_objects)?;
+
+    let entities: Vec<GraphEntityCommonRow> = decode_entity_styles(path, None)?
+        .into_iter()
+        .filter(|(handle, _, _, _)| source_handles.contains(handle))
+        .map(|(handle, color_index, true_color, layer_handle)| {
+            let type_name = object_type_by_handle
+                .get(&handle)
+                .cloned()
+                .unwrap_or_else(|| "UNKNOWN".to_string());
+            let common_handles = common_handles_by_handle.get(&handle);
+            let owner_handle = owner_by_handle
+                .get(&handle)
+                .copied()
+                .flatten()
+                .or_else(|| common_handles.and_then(|handles| handles.owner_handle));
+            (
+                handle,
+                type_name,
+                owner_handle,
+                color_index,
+                true_color,
+                layer_handle,
+                common_handles.and_then(|handles| handles.linetype_handle),
+                common_handles.and_then(|handles| handles.material_handle),
+                common_handles.and_then(|handles| handles.plotstyle_handle),
+                common_handles.and_then(|handles| handles.extension_dict_handle),
+                common_handles
+                    .map(|handles| handles.reactor_handles.clone())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect();
+
+    let edges = build_graph_edges(path, &objects, &entities, &owner_by_handle)?;
+    let layers = build_graph_layer_rows(
+        decode_layer_colors(path, None)?,
+        decode_layer_names(path, None)?,
+    );
+    let block_headers = decode_block_header_names(path, None)?;
+    let mut header_handles = infer_graph_header_handles(&block_headers, &all_objects);
+    merge_graph_header_handles(
+        &mut header_handles,
+        decode_header_section_handle_rows(path, &all_objects)?,
+    );
+
+    Ok((
+        version,
+        objects,
+        entities,
+        edges,
+        layers,
+        block_headers,
+        header_handles,
+    ))
+}
+
+fn collect_graph_owner_handles(path: &str) -> PyResult<HashMap<u64, Option<u64>>> {
+    let mut owner_by_handle = HashMap::new();
+    extend_graph_owner_handles(&mut owner_by_handle, decode_line_owner_handles(path, None)?);
+    extend_graph_owner_handles(&mut owner_by_handle, decode_point_owner_handles(path, None)?);
+    extend_graph_owner_handles(&mut owner_by_handle, decode_arc_owner_handles(path, None)?);
+    extend_graph_owner_handles(&mut owner_by_handle, decode_circle_owner_handles(path, None)?);
+    extend_graph_owner_handles(
+        &mut owner_by_handle,
+        decode_lwpolyline_owner_handles(path, None)?,
+    );
+    extend_graph_owner_handles(&mut owner_by_handle, decode_insert_owner_handles(path, None)?);
+    Ok(owner_by_handle)
+}
+
+fn extend_graph_owner_handles(
+    owner_by_handle: &mut HashMap<u64, Option<u64>>,
+    rows: Vec<InsertOwnerRow>,
+) {
+    for (handle, owner_handle) in rows {
+        owner_by_handle.entry(handle).or_insert(owner_handle);
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct GraphCommonEntityHandles {
+    owner_handle: Option<u64>,
+    linetype_handle: Option<u64>,
+    material_handle: Option<u64>,
+    plotstyle_handle: Option<u64>,
+    extension_dict_handle: Option<u64>,
+    reactor_handles: Vec<u64>,
+}
+
+fn collect_graph_common_entity_handles(
+    path: &str,
+    objects: &[ObjectHeaderWithTypeRow],
+) -> PyResult<HashMap<u64, GraphCommonEntityHandles>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let mut result = HashMap::new();
+
+    for (handle, offset, _, _, _, type_class) in objects {
+        if type_class == "O" {
+            continue;
+        }
+        let Some((record, header)) = parse_record_and_header(&decoder, *offset, best_effort)?
+        else {
+            continue;
+        };
+        let Some(common_handles) = decode_graph_common_entity_handles_from_record(
+            &record,
+            decoder.version(),
+            &header,
+            *handle,
+        ) else {
+            continue;
+        };
+        result.insert(*handle, common_handles);
+    }
+
+    Ok(result)
+}
+
+fn decode_graph_common_entity_handles_from_record(
+    record: &objects::ObjectRecord<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> Option<GraphCommonEntityHandles> {
+    let mut reader = record.bit_reader();
+    skip_object_type_prefix(&mut reader, version).ok()?;
+    let common = match version {
+        version::DwgVersion::R14 => {
+            entities::common::parse_common_entity_header_r14(&mut reader).ok()?
+        }
+        version::DwgVersion::R2000
+        | version::DwgVersion::R2004
+        | version::DwgVersion::R2007 => {
+            entities::common::parse_common_entity_header_r2007(&mut reader).ok()?
+        }
+        version::DwgVersion::R2010 => parse_dim_common_header_r2010_plus_with_candidates(
+            &mut reader,
+            header,
+            |candidate_reader, end_bit| {
+                entities::common::parse_common_entity_header_r2010(candidate_reader, end_bit)
+            },
+        )?,
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+            parse_dim_common_header_r2010_plus_with_candidates(
+                &mut reader,
+                header,
+                |candidate_reader, end_bit| {
+                    entities::common::parse_common_entity_header_r2013(candidate_reader, end_bit)
+                },
+            )?
+        }
+        _ => return None,
+    };
+
+    reader.set_bit_pos(common.obj_size);
+    let handles = entities::common::parse_common_entity_handles(&mut reader, &common).ok()?;
+    let owner_handle = handles.owner_ref.filter(|handle| *handle != object_handle);
+    Some(GraphCommonEntityHandles {
+        owner_handle,
+        linetype_handle: handles.ltype,
+        material_handle: handles.material,
+        plotstyle_handle: handles.plotstyle,
+        extension_dict_handle: handles.xdic_obj,
+        reactor_handles: handles.reactors,
+    })
+}
+
+fn build_graph_edges(
+    path: &str,
+    objects: &[ObjectHeaderWithTypeRow],
+    entities: &[GraphEntityCommonRow],
+    owner_by_handle: &HashMap<u64, Option<u64>>,
+) -> PyResult<Vec<GraphEdgeRow>> {
+    let object_handles: Vec<u64> = objects.iter().map(|(handle, _, _, _, _, _)| *handle).collect();
+    let source_handles: HashSet<u64> = object_handles.iter().copied().collect();
+    let mut edges = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (source_handle, owner_handle) in owner_by_handle {
+        if !source_handles.contains(source_handle) {
+            continue;
+        }
+        if let Some(target_handle) = *owner_handle {
+            push_graph_edge(
+                &mut edges,
+                &mut seen,
+                *source_handle,
+                "owner",
+                target_handle,
+            );
+        }
+    }
+
+    for (
+        source_handle,
+        _,
+        _,
+        _,
+        _,
+        layer_handle,
+        linetype_handle,
+        material_handle,
+        plotstyle_handle,
+        extension_dict_handle,
+        reactor_handles,
+    ) in entities
+    {
+        if !source_handles.contains(source_handle) {
+            continue;
+        }
+        if *layer_handle != 0 {
+            push_graph_edge(
+                &mut edges,
+                &mut seen,
+                *source_handle,
+                "layer",
+                *layer_handle,
+            );
+        }
+        for (kind, target_handle) in [
+            ("linetype", *linetype_handle),
+            ("material", *material_handle),
+            ("plotstyle", *plotstyle_handle),
+            ("extension_dict", *extension_dict_handle),
+        ] {
+            if let Some(target_handle) = target_handle {
+                push_graph_edge(&mut edges, &mut seen, *source_handle, kind, target_handle);
+            }
+        }
+        for target_handle in reactor_handles {
+            push_graph_edge(
+                &mut edges,
+                &mut seen,
+                *source_handle,
+                "reactor",
+                *target_handle,
+            );
+        }
+    }
+
+    for (source_handle, refs) in decode_object_handle_stream_refs(path, object_handles, None)? {
+        for target_handle in refs {
+            push_graph_edge(
+                &mut edges,
+                &mut seen,
+                source_handle,
+                "handle_ref",
+                target_handle,
+            );
+        }
+    }
+
+    Ok(edges)
+}
+
+fn push_graph_edge(
+    edges: &mut Vec<GraphEdgeRow>,
+    seen: &mut HashSet<(u64, &'static str, u64)>,
+    source_handle: u64,
+    kind: &'static str,
+    target_handle: u64,
+) {
+    if target_handle == 0 || source_handle == target_handle {
+        return;
+    }
+    if seen.insert((source_handle, kind, target_handle)) {
+        edges.push((source_handle, kind.to_string(), target_handle));
+    }
+}
+
+fn build_graph_layer_rows(
+    colors: Vec<LayerColorRow>,
+    names: Vec<LayerNameRow>,
+) -> Vec<GraphLayerRow> {
+    let mut handles: Vec<u64> = Vec::new();
+    let mut seen: HashSet<u64> = HashSet::new();
+    let mut color_by_handle: HashMap<u64, (u16, Option<u32>)> = HashMap::new();
+    let mut name_by_handle: HashMap<u64, String> = HashMap::new();
+
+    for (handle, color_index, true_color) in colors {
+        if seen.insert(handle) {
+            handles.push(handle);
+        }
+        color_by_handle.entry(handle).or_insert((color_index, true_color));
+    }
+    for (handle, name) in names {
+        if seen.insert(handle) {
+            handles.push(handle);
+        }
+        name_by_handle.entry(handle).or_insert(name);
+    }
+
+    handles.sort_unstable();
+    handles
+        .into_iter()
+        .map(|handle| {
+            let name = name_by_handle.remove(&handle);
+            let (color_index, true_color) = color_by_handle
+                .remove(&handle)
+                .map(|(color_index, true_color)| (Some(color_index), true_color))
+                .unwrap_or((None, None));
+            (handle, name, color_index, true_color)
+        })
+        .collect()
+}
+
+fn infer_graph_header_handles(
+    block_headers: &[BlockHeaderNameRow],
+    objects: &[ObjectHeaderWithTypeRow],
+) -> Vec<GraphHeaderHandleRow> {
+    let model_space = find_layout_block_header_handle(block_headers, "*MODEL_SPACE");
+    let paper_space = find_layout_block_header_handle(block_headers, "*PAPER_SPACE");
+    let mut rows = vec![
+        ("model_space_block_header".to_string(), model_space),
+        ("paper_space_block_header".to_string(), paper_space),
+    ];
+    for (label, type_name) in [
+        ("block_control", "BLOCK_CONTROL"),
+        ("layer_control", "LAYER_CONTROL"),
+        ("shapefile_control", "SHAPEFILE_CONTROL"),
+        ("linetype_control", "LTYPE_CONTROL"),
+        ("view_control", "VIEW_CONTROL"),
+        ("ucs_control", "UCS_CONTROL"),
+        ("vport_control", "VPORT_CONTROL"),
+        ("appid_control", "APPID_CONTROL"),
+        ("dimstyle_control", "DIMSTYLE_CONTROL"),
+        ("viewport_entity_header_control", "VP_ENT_HDR_CONTROL"),
+    ] {
+        rows.push((
+            label.to_string(),
+            find_object_handle_by_type_name(objects, type_name),
+        ));
+    }
+    rows
+}
+
+const HEADER_SENTINEL_BEFORE: [u8; 16] = [
+    0xCF, 0x7B, 0x1F, 0x23, 0xFD, 0xDE, 0x38, 0xA9, 0x5F, 0x7C, 0x68, 0xB8, 0x4E, 0x6D, 0x33,
+    0x5F,
+];
+
+fn decode_header_section_handle_rows(
+    path: &str,
+    objects: &[ObjectHeaderWithTypeRow],
+) -> PyResult<Vec<GraphHeaderHandleRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    if !matches!(
+        decoder.version(),
+        version::DwgVersion::R2007
+            | version::DwgVersion::R2010
+            | version::DwgVersion::R2013
+            | version::DwgVersion::R2018
+    ) {
+        return Ok(Vec::new());
+    }
+
+    let directory = decoder.section_directory().map_err(to_py_err)?;
+    let Some(header_index) = directory.records.iter().position(|record| {
+        record
+            .name
+            .as_deref()
+            .is_some_and(|name| matches!(name, "AcDb:Header" | "AcDb:Headers"))
+    }) else {
+        return Ok(Vec::new());
+    };
+    let section = decoder
+        .load_section_by_index(&directory, header_index)
+        .map_err(to_py_err)?;
+
+    let rows = decode_header_section_handle_rows_from_data(
+        &section.data,
+        decoder.version(),
+        objects,
+    )
+    .unwrap_or_default();
+    Ok(rows)
+}
+
+fn decode_header_section_handle_rows_from_data(
+    data: &[u8],
+    version: &version::DwgVersion,
+    objects: &[ObjectHeaderWithTypeRow],
+) -> Option<Vec<GraphHeaderHandleRow>> {
+    if data.len() < HEADER_SENTINEL_BEFORE.len() + 8 {
+        return None;
+    }
+    if data.get(..HEADER_SENTINEL_BEFORE.len())? != HEADER_SENTINEL_BEFORE {
+        return None;
+    }
+
+    let object_type_by_handle: HashMap<u64, String> = objects
+        .iter()
+        .map(|(handle, _, _, _, type_name, _)| (*handle, type_name.clone()))
+        .collect();
+
+    let mut best: Option<(i32, Vec<GraphHeaderHandleRow>)> = None;
+    for initial_byte in [20usize, 24usize] {
+        if initial_byte + 4 > data.len() {
+            continue;
+        }
+        let size_bits = u32::from_le_bytes([
+            data[initial_byte],
+            data[initial_byte + 1],
+            data[initial_byte + 2],
+            data[initial_byte + 3],
+        ]);
+        if size_bits == 0 {
+            continue;
+        }
+        let handle_start_bit = (initial_byte as u64)
+            .saturating_mul(8)
+            .saturating_add(u64::from(size_bits));
+        if handle_start_bit >= (data.len() as u64).saturating_mul(8) {
+            continue;
+        }
+        let Ok(handle_start_bit) = u32::try_from(handle_start_bit) else {
+            continue;
+        };
+
+        for include_cpsnid in [false, true] {
+            let labels = header_handle_labels_for_version(version, include_cpsnid);
+            let Some(rows) = read_header_handle_rows_at(data, handle_start_bit, &labels) else {
+                continue;
+            };
+            let score = score_header_handle_rows(&rows, &object_type_by_handle);
+            let should_replace = best
+                .as_ref()
+                .map(|(best_score, _)| score > *best_score)
+                .unwrap_or(true);
+            if should_replace {
+                best = Some((score, rows));
+            }
+        }
+    }
+
+    best.map(|(_, rows)| rows)
+}
+
+fn read_header_handle_rows_at(
+    data: &[u8],
+    handle_start_bit: u32,
+    labels: &[&'static str],
+) -> Option<Vec<GraphHeaderHandleRow>> {
+    let mut reader = BitReader::new(data);
+    reader.set_bit_pos(handle_start_bit);
+    let mut rows = Vec::with_capacity(labels.len());
+    for label in labels {
+        let handle = reader.read_h().ok()?.value;
+        rows.push((
+            (*label).to_string(),
+            if handle == 0 { None } else { Some(handle) },
+        ));
+    }
+    Some(rows)
+}
+
+fn header_handle_labels_for_version(
+    version: &version::DwgVersion,
+    include_cpsnid: bool,
+) -> Vec<&'static str> {
+    let r2007_plus = matches!(
+        version,
+        version::DwgVersion::R2007
+            | version::DwgVersion::R2010
+            | version::DwgVersion::R2013
+            | version::DwgVersion::R2018
+    );
+    let r2013_plus = matches!(version, version::DwgVersion::R2013 | version::DwgVersion::R2018);
+
+    let mut labels = vec!["clayer", "textstyle", "celtype"];
+    if r2007_plus {
+        labels.push("cmaterial");
+    }
+    labels.extend(["dimstyle", "cmlstyle", "ucsname_pspace"]);
+    labels.extend(["pucsorthoref", "pucsbase"]);
+    labels.push("ucsname_mspace");
+    labels.extend(["ucsorthoref", "ucsbase"]);
+    labels.extend(["dimtxsty", "dimldrblk", "dimblk", "dimblk1", "dimblk2"]);
+    if r2007_plus {
+        labels.extend(["dimltype", "dimltex1", "dimltex2"]);
+    }
+    labels.extend([
+        "block_control",
+        "layer_control",
+        "style_control",
+        "linetype_control",
+        "view_control",
+        "ucs_control",
+        "vport_control",
+        "appid_control",
+        "dimstyle_control",
+        "dictionary_acad_group",
+        "dictionary_acad_mlinestyle",
+        "dictionary_named_objects",
+        "dictionary_layouts",
+        "dictionary_plotsettings",
+        "dictionary_plotstyles",
+        "dictionary_materials",
+        "dictionary_colors",
+    ]);
+    if r2007_plus {
+        labels.push("dictionary_visualstyle");
+        if r2013_plus {
+            labels.push("dictionary_visualstyle2");
+        }
+    }
+    if include_cpsnid {
+        labels.push("cpsnid");
+    }
+    labels.extend([
+        "paper_space_block_header",
+        "model_space_block_header",
+        "bylayer",
+        "byblock",
+        "continuous",
+    ]);
+    if r2007_plus {
+        labels.extend(["interfereobjvs", "interferevpvs", "dragvs"]);
+    }
+    labels
+}
+
+fn score_header_handle_rows(
+    rows: &[GraphHeaderHandleRow],
+    object_type_by_handle: &HashMap<u64, String>,
+) -> i32 {
+    let mut score = rows
+        .iter()
+        .filter(|(_, handle)| handle.is_some())
+        .count() as i32;
+    for (label, expected_type) in [
+        ("clayer", "LAYER"),
+        ("textstyle", "SHAPEFILE"),
+        ("celtype", "LTYPE"),
+        ("dimstyle", "DIMSTYLE"),
+        ("cmlstyle", "MLINESTYLE"),
+        ("block_control", "BLOCK_CONTROL"),
+        ("layer_control", "LAYER_CONTROL"),
+        ("style_control", "SHAPEFILE_CONTROL"),
+        ("linetype_control", "LTYPE_CONTROL"),
+        ("view_control", "VIEW_CONTROL"),
+        ("ucs_control", "UCS_CONTROL"),
+        ("vport_control", "VPORT_CONTROL"),
+        ("appid_control", "APPID_CONTROL"),
+        ("dimstyle_control", "DIMSTYLE_CONTROL"),
+        ("paper_space_block_header", "BLOCK_HEADER"),
+        ("model_space_block_header", "BLOCK_HEADER"),
+        ("bylayer", "LTYPE"),
+        ("byblock", "LTYPE"),
+        ("continuous", "LTYPE"),
+    ] {
+        let Some(handle) = rows
+            .iter()
+            .find_map(|(row_label, handle)| (row_label == label).then_some(*handle))
+            .flatten()
+        else {
+            continue;
+        };
+        if object_type_by_handle
+            .get(&handle)
+            .is_some_and(|actual| actual == expected_type)
+        {
+            score += 24;
+        } else {
+            score -= 12;
+        }
+    }
+    score
+}
+
+fn merge_graph_header_handles(
+    rows: &mut Vec<GraphHeaderHandleRow>,
+    header_rows: Vec<GraphHeaderHandleRow>,
+) {
+    for (label, handle) in header_rows {
+        if handle.is_none() {
+            continue;
+        }
+        if let Some((_, existing)) = rows
+            .iter_mut()
+            .find(|(existing_label, _)| existing_label == &label)
+        {
+            *existing = handle;
+        } else {
+            rows.push((label, handle));
+        }
+    }
+}
+
+fn find_layout_block_header_handle(
+    block_headers: &[BlockHeaderNameRow],
+    prefix: &str,
+) -> Option<u64> {
+    block_headers
+        .iter()
+        .filter_map(|(handle, name)| {
+            let upper = name.trim().to_ascii_uppercase();
+            if upper == prefix || upper.starts_with(prefix) {
+                Some(*handle)
+            } else {
+                None
+            }
+        })
+        .min()
+}
+
+fn find_object_handle_by_type_name(
+    objects: &[ObjectHeaderWithTypeRow],
+    type_name: &str,
+) -> Option<u64> {
+    objects
+        .iter()
+        .filter_map(|(handle, _, _, _, object_type_name, _)| {
+            if object_type_name == type_name {
+                Some(*handle)
+            } else {
+                None
+            }
+        })
+        .min()
+}
+
 #[pyfunction(signature = (path, type_codes, limit=None))]
 pub fn list_object_headers_by_type(
     path: &str,

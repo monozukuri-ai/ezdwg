@@ -5,10 +5,13 @@ import math
 import re
 from functools import lru_cache
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator
 
 from . import raw
 from .entity import Entity
+
+if TYPE_CHECKING:
+    from .graph import DocumentGraph
 
 SUPPORTED_VERSIONS = {"AC1014", "AC1015", "AC1018", "AC1021", "AC1024", "AC1027", "AC1032"}
 SUPPORTED_ENTITY_TYPES = (
@@ -147,6 +150,11 @@ class Document:
     @property
     def raw(self):
         return raw
+
+    def graph(self, limit: int | None = None) -> "DocumentGraph":
+        from .graph import read_graph
+
+        return read_graph(self.decode_path or self.path, limit=limit)
 
 
 @dataclass(frozen=True)

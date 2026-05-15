@@ -29,6 +29,31 @@ type EntityStyleRow = (u64, Option<u16>, Option<u32>, u64);
 type ObjectLayerHandleRow = (u64, u64);
 type LayerColorRow = (u64, u16, Option<u32>);
 type LayerNameRow = (u64, String);
+type GraphEntityCommonRow = (
+    u64,
+    String,
+    Option<u64>,
+    Option<u16>,
+    Option<u32>,
+    u64,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Vec<u64>,
+);
+type GraphEdgeRow = (u64, String, u64);
+type GraphLayerRow = (u64, Option<String>, Option<u16>, Option<u32>);
+type GraphHeaderHandleRow = (String, Option<u64>);
+type DocumentGraphRows = (
+    String,
+    Vec<ObjectHeaderWithTypeRow>,
+    Vec<GraphEntityCommonRow>,
+    Vec<GraphEdgeRow>,
+    Vec<GraphLayerRow>,
+    Vec<BlockHeaderNameRow>,
+    Vec<GraphHeaderHandleRow>,
+);
 
 type LineEntityRow = (u64, f64, f64, f64, f64, f64, f64);
 type PointEntityRow = (u64, f64, f64, f64, f64);

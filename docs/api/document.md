@@ -39,6 +39,14 @@ doc = ezdwg.read("drawing.dwg")
 msp = doc.modelspace()
 ```
 
+#### graph
+
+```python
+Document.graph(limit: int | None = None) -> DocumentGraph
+```
+
+Return the graph-oriented IR for the document. The graph contains object nodes, common entity data, object edges, layer table rows, block header rows, and inferred model/paper space header handles.
+
 #### plot
 
 ```python

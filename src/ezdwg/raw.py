@@ -88,6 +88,7 @@ from ._core import (
     decode_acis_candidate_infos,
     decode_proxy_graphic_chunk_infos,
     decode_proxy_graphic_text_entities,
+    decode_document_graph,
 )
 from ._embedded_text import collect_unknown_embedded_text_entities
 
@@ -99,6 +100,7 @@ __all__ = [
     "list_object_headers",
     "list_object_headers_by_type",
     "list_object_headers_with_type",
+    "decode_document_graph",
     "read_object_records_by_handle",
     "read_object_records_by_offset",
     "read_object_records_by_type",

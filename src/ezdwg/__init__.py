@@ -4,11 +4,16 @@ from .convert import ConvertResult, WriteResult, to_dwg, to_dxf
 from .document import Document, Layout, read
 from .entity import Entity
 from . import raw
+from .graph import DocumentGraph, HeaderHandles, ObjectEdge, read_graph
 from .render import plot
 
 __all__ = [
     "read",
+    "read_graph",
     "Document",
+    "DocumentGraph",
+    "HeaderHandles",
+    "ObjectEdge",
     "Layout",
     "Entity",
     "plot",

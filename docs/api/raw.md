@@ -49,6 +49,46 @@ List object headers with resolved type names. Each tuple: `(handle, offset, size
 
 `type_class` is `"E"` for entities and `"O"` for objects.
 
+### decode_document_graph
+
+```python
+raw.decode_document_graph(path: str, limit: int | None = None) -> tuple[
+    str,
+    list[tuple[int, int, int, int, str, str]],
+    list[
+        tuple[
+            int,
+            str,
+            int | None,
+            int | None,
+            int | None,
+            int,
+            int | None,
+            int | None,
+            int | None,
+            int | None,
+            list[int],
+        ]
+    ],
+    list[tuple[int, str, int]],
+    list[tuple[int, str | None, int | None, int | None]],
+    list[tuple[int, str]],
+    list[tuple[str, int | None]],
+]
+```
+
+Decode a compact graph-oriented IR. The returned tuple contains:
+
+- DWG version string.
+- Object headers with resolved type names.
+- Common entity data: `(handle, type_name, owner_handle, color_index, true_color, layer_handle, linetype_handle, material_handle, plotstyle_handle, extension_dict_handle, reactor_handles)`.
+- Object graph edges: `(source_handle, kind, target_handle)`.
+- Layer table rows: `(handle, name, color_index, true_color)`.
+- Block header table rows: `(handle, name)`.
+- Header handle rows such as `("model_space_block_header", handle)`, current table handles such as `("clayer", handle)`, dictionaries, and table control handles such as `("layer_control", handle)`.
+
+When `limit` is provided, object rows are truncated first and graph rows are limited to those object handles.
+
 ### list_object_headers_by_type
 
 ```python

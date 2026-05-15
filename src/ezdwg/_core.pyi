@@ -17,6 +17,29 @@ def read_section_bytes(path: str, index: int) -> bytes: ...
 def list_object_map_entries(path: str, limit: int | None = ...) -> list[tuple[int, int]]: ...
 def list_object_headers(path: str, limit: int | None = ...) -> list[tuple[int, int, int, int]]: ...
 def list_object_headers_with_type(path: str, limit: int | None = ...) -> list[tuple[int, int, int, int, str, str]]: ...
+def decode_document_graph(path: str, limit: int | None = ...) -> tuple[
+    str,
+    list[tuple[int, int, int, int, str, str]],
+    list[
+        tuple[
+            int,
+            str,
+            int | None,
+            int | None,
+            int | None,
+            int,
+            int | None,
+            int | None,
+            int | None,
+            int | None,
+            list[int],
+        ]
+    ],
+    list[tuple[int, str, int]],
+    list[tuple[int, str | None, int | None, int | None]],
+    list[tuple[int, str]],
+    list[tuple[str, int | None]],
+]: ...
 def list_object_headers_by_type(path: str, type_codes: list[int], limit: int | None = ...) -> list[tuple[int, int, int, int, str, str]]: ...
 def read_object_records_by_type(path: str, type_codes: list[int], limit: int | None = ...) -> list[tuple[int, int, int, int, bytes]]: ...
 def read_object_records_by_handle(path: str, handles: list[int], limit: int | None = ...) -> list[tuple[int, int, int, int, bytes]]: ...
