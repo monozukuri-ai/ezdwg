@@ -29,6 +29,19 @@ type EntityStyleRow = (u64, Option<u16>, Option<u32>, u64);
 type ObjectLayerHandleRow = (u64, u64);
 type LayerColorRow = (u64, u16, Option<u32>);
 type LayerNameRow = (u64, String);
+type HeaderVariablesRow = (
+    Option<u16>,    // insunits
+    Option<u16>,    // lunits
+    Option<u16>,    // luprec
+    Option<u16>,    // aunits
+    Option<u16>,    // auprec
+    Option<f64>,    // ltscale
+    Option<f64>,    // textsize
+    Option<Point3>, // extmin
+    Option<Point3>, // extmax
+    Option<Point2>, // limmin
+    Option<Point2>, // limmax
+);
 type GraphEntityCommonRow = (
     u64,
     String,

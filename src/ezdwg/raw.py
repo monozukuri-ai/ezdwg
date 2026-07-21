@@ -71,6 +71,7 @@ from ._core import (
     decode_vertex_pface_entities,
     decode_vertex_pface_face_entities,
     decode_vertex_2d_entities,
+    decode_header_variables,
     detect_version,
     write_ac1015_dwg,
     write_ac1015_line_dwg,
@@ -93,6 +94,7 @@ from ._core import (
 from ._embedded_text import collect_unknown_embedded_text_entities
 
 __all__ = [
+    "decode_header_variables",
     "detect_version",
     "list_section_locators",
     "read_section_bytes",

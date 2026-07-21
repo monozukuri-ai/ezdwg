@@ -4,6 +4,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(write_ac1015_line_dwg, module)?)?;
     module.add_function(wrap_pyfunction!(list_section_locators, module)?)?;
     module.add_function(wrap_pyfunction!(read_section_bytes, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_header_variables, module)?)?;
     module.add_function(wrap_pyfunction!(list_object_map_entries, module)?)?;
     module.add_function(wrap_pyfunction!(list_object_headers, module)?)?;
     module.add_function(wrap_pyfunction!(list_object_headers_with_type, module)?)?;

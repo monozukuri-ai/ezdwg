@@ -3,6 +3,14 @@
 ## Unreleased
 
 ### Added
+- Header-variables decoding across `AC1015`-`AC1032`: `Document.header_variables()`
+  ($INSUNITS, $LUNITS/$LUPREC, $AUNITS/$AUPREC, $LTSCALE, $TEXTSIZE, model-space
+  $EXTMIN/$EXTMAX/$LIMMIN/$LIMMAX) plus the `Document.units` / `Document.insunits`
+  conveniences and the `decode_header_variables` raw function. R14 has no
+  `$INSUNITS` and yields `None` values. Validated against paired DXF headers for
+  every supported version family.
+- Bundled the MIT `LICENSE` file in wheels (`License-Expression` metadata via
+  PEP 639 `license` / `license-files` in `pyproject.toml`).
 - Completed high-level coordinate extraction and API documentation for `INSERT`/`MINSERT`, `HATCH`, and `SPLINE`.
 - Added fixture-backed high-level `INSERT` regression coverage for block name and transform metadata.
 - Native `AC1021` (`R2007`) read path in the high-level API (`ezdwg.read`) without compatibility conversion.

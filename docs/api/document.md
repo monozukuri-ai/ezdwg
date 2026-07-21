@@ -47,6 +47,42 @@ Document.graph(limit: int | None = None) -> DocumentGraph
 
 Return the graph-oriented IR for the document. The graph contains object nodes, common entity data, object edges, layer table rows, block header rows, and inferred model/paper space header handles.
 
+#### header_variables
+
+```python
+Document.header_variables() -> dict[str, Any]
+```
+
+Decode a subset of the DWG header variables. Keys: `insunits`, `lunits`,
+`luprec`, `aunits`, `auprec`, `ltscale`, `textsize`, `extmin`, `extmax`,
+`limmin`, `limmax`. Values are `None` when the variable is absent for the file
+version — R14 (`AC1014`) has no `$INSUNITS` header variable, so every field is
+`None` for R14 files. Raises on unreadable header sections.
+
+```python
+doc = ezdwg.read("drawing.dwg")
+variables = doc.header_variables()
+variables["insunits"]  # 4
+variables["extmin"]    # (0.0, 0.0, 0.0)
+```
+
+#### units
+
+```python
+Document.units -> str | None
+```
+
+Drawing units name resolved from `$INSUNITS` (e.g. `"millimeters"`,
+`"inches"`, `"unitless"`). Returns `None` when the code is unavailable (R14, or
+an unreadable header). Unknown codes are reported as `"unknown_<code>"`. The
+raw integer code is available as `Document.insunits`.
+
+```python
+doc = ezdwg.read("drawing.dwg")
+doc.units     # "millimeters"
+doc.insunits  # 4
+```
+
 #### plot
 
 ```python

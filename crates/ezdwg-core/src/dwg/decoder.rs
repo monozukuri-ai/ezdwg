@@ -2,6 +2,7 @@ use crate::container::{SectionDirectory, SectionSlice};
 use crate::core::config::ParseConfig;
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
+use crate::dwg::header::{self, HeaderVariables};
 use crate::dwg::r2000;
 use crate::dwg::r2004;
 use crate::dwg::r2007;
@@ -93,6 +94,24 @@ impl<'a> Decoder<'a> {
                 format!("unsupported DWG version: {}", self.version.as_str()),
             )),
         }
+    }
+
+    /// Decode the header-variables subset ($INSUNITS, unit formats, extents).
+    ///
+    /// R14 files have no INSUNITS header variable and yield a result with
+    /// every field set to `None`.
+    pub fn header_variables(&self) -> Result<HeaderVariables> {
+        if matches!(self.version, DwgVersion::R14) {
+            return Ok(HeaderVariables::default());
+        }
+        let directory = self.section_directory()?;
+        let index = directory
+            .records
+            .iter()
+            .position(|record| record.name.as_deref() == Some("AcDb:Header"))
+            .unwrap_or(0);
+        let section = self.load_section_by_index(&directory, index)?;
+        header::decode_header_variables(section.data.as_ref(), &self.version, self.codepage)
     }
 
     pub fn build_object_index(&self) -> Result<ObjectIndex> {

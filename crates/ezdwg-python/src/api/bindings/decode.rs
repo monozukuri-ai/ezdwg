@@ -159,6 +159,26 @@ pub fn read_section_bytes(path: &str, index: usize) -> PyResult<Vec<u8>> {
     Ok(section.data.as_ref().to_vec())
 }
 
+#[pyfunction]
+pub fn decode_header_variables(path: &str) -> PyResult<HeaderVariablesRow> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let vars = decoder.header_variables().map_err(to_py_err)?;
+    Ok((
+        vars.insunits,
+        vars.lunits,
+        vars.luprec,
+        vars.aunits,
+        vars.auprec,
+        vars.ltscale,
+        vars.textsize,
+        vars.extmin,
+        vars.extmax,
+        vars.limmin,
+        vars.limmax,
+    ))
+}
+
 #[pyfunction(signature = (path, limit=None))]
 pub fn list_object_map_entries(
     path: &str,

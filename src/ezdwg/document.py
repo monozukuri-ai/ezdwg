@@ -109,6 +109,47 @@ class _SimpleEntitySpec:
     setup: Callable[[str], Any] | None = None
 
 
+# $INSUNITS drawing-units codes (DXF reference).
+INSUNITS_NAMES = {
+    0: "unitless",
+    1: "inches",
+    2: "feet",
+    3: "miles",
+    4: "millimeters",
+    5: "centimeters",
+    6: "meters",
+    7: "kilometers",
+    8: "microinches",
+    9: "mils",
+    10: "yards",
+    11: "angstroms",
+    12: "nanometers",
+    13: "microns",
+    14: "decimeters",
+    15: "decameters",
+    16: "hectometers",
+    17: "gigameters",
+    18: "astronomical_units",
+    19: "light_years",
+    20: "parsecs",
+    21: "us_survey_feet",
+}
+
+_HEADER_VARIABLE_KEYS = (
+    "insunits",
+    "lunits",
+    "luprec",
+    "aunits",
+    "auprec",
+    "ltscale",
+    "textsize",
+    "extmin",
+    "extmax",
+    "limmin",
+    "limmax",
+)
+
+
 def read(path: str) -> "Document":
     version = raw.detect_version(path)
     if version not in SUPPORTED_VERSIONS:
@@ -155,6 +196,37 @@ class Document:
         from .graph import read_graph
 
         return read_graph(self.decode_path or self.path, limit=limit)
+
+    def header_variables(self) -> dict[str, Any]:
+        """Decode the header-variables subset ($INSUNITS, unit formats, extents).
+
+        Keys: ``insunits``, ``lunits``, ``luprec``, ``aunits``, ``auprec``,
+        ``ltscale``, ``textsize``, ``extmin``, ``extmax``, ``limmin``,
+        ``limmax``. Values are ``None`` when the variable is absent for the
+        file version (R14 has no ``$INSUNITS``).
+        """
+        row = raw.decode_header_variables(self.decode_path or self.path)
+        return dict(zip(_HEADER_VARIABLE_KEYS, row))
+
+    @property
+    def insunits(self) -> int | None:
+        """Raw ``$INSUNITS`` drawing-units code, or ``None`` when unavailable."""
+        try:
+            return self.header_variables()["insunits"]
+        except Exception:
+            return None
+
+    @property
+    def units(self) -> str | None:
+        """Drawing units name resolved from ``$INSUNITS`` (e.g. ``"millimeters"``).
+
+        Returns ``None`` when the code is unavailable (R14, or an unreadable
+        header). Unknown codes are reported as ``"unknown_<code>"``.
+        """
+        code = self.insunits
+        if code is None:
+            return None
+        return INSUNITS_NAMES.get(code, f"unknown_{code}")
 
 
 @dataclass(frozen=True)

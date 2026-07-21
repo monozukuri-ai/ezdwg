@@ -56,6 +56,16 @@ for e in msp.query(
     print(e.dxftype, e.handle, e.dxf)
 ```
 
+Drawing units and header variables:
+
+```python
+import ezdwg
+
+doc = ezdwg.read("path/to/file.dwg")
+doc.units                        # "millimeters" ($INSUNITS; None for R14)
+doc.header_variables()["extmin"]  # model-space extents, unit formats, ...
+```
+
 Plot in matplotlib:
 
 ```python
