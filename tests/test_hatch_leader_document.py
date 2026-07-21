@@ -68,3 +68,11 @@ def test_query_hatch_maps_paths(monkeypatch) -> None:
     assert first_path["closed"] is True
     assert first_path["points"][0] == first_path["points"][-1]
     assert first_path["points"][0][2] == 2.5
+    assert entity.to_points() == [
+        (0.0, 0.0, 2.5),
+        (4.0, 0.0, 2.5),
+        (4.0, 4.0, 2.5),
+        (0.0, 0.0, 2.5),
+        (1.0, 1.0, 2.5),
+        (2.0, 1.0, 2.5),
+    ]

@@ -9,8 +9,8 @@ Documentation: https://monozukuri-ai.github.io/ezdwg/
 ## Status
 - High-level API (`ezdwg.read`): **R14 / AC1014** (experimental), **R2000 / AC1015**, **R2004 / AC1018**, **R2007 / AC1021**, **R2010 / AC1024**, **R2013 / AC1027**, **R2018 / AC1032**
 - Raw API (`ezdwg.raw`): **R14 / AC1014** (version detect + object headers), **R2000 / AC1015**, **R2004 / AC1018**, **R2007 / AC1021**, plus native **AC1024/AC1027/AC1032** support for object listing and `LINE`/`ARC`/`LWPOLYLINE` decode
-- High-level entities: **LINE**, **ARC**, **LWPOLYLINE**, **POINT**, **CIRCLE**, **ELLIPSE**, **TEXT**, **MTEXT**, **DIMENSION** (linear + radius + diameter)
-- Additional raw decode: **INSERT** (+ low-level POLYLINE/VERTEX helpers)
+- High-level entities include **LINE**, **ARC**, **LWPOLYLINE**, **POINT**, **CIRCLE**, **ELLIPSE**, **TEXT**, **MTEXT**, **DIMENSION**, **INSERT/MINSERT**, **HATCH**, and **SPLINE**
+- Raw API exposes the corresponding entity decoders plus low-level POLYLINE/VERTEX helpers
 - Output units/angles: high-level API returns ARC angles in **degrees**
 
 ## Install
@@ -49,7 +49,10 @@ import ezdwg
 doc = ezdwg.read("path/to/file.dwg")
 msp = doc.modelspace()
 
-for e in msp.query("LINE LWPOLYLINE ARC CIRCLE ELLIPSE POINT TEXT MTEXT DIMENSION"):
+for e in msp.query(
+    "LINE LWPOLYLINE ARC CIRCLE ELLIPSE POINT TEXT MTEXT "
+    "DIMENSION INSERT MINSERT HATCH SPLINE"
+):
     print(e.dxftype, e.handle, e.dxf)
 ```
 

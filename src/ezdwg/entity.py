@@ -32,6 +32,15 @@ class Entity:
             return [self.dxf["location"]]
         if self.dxftype in {"TEXT", "MTEXT"}:
             return [self.dxf["insert"]]
+        if self.dxftype in {"INSERT", "MINSERT"}:
+            return [self.dxf["insert"]]
+        if self.dxftype == "HATCH":
+            points: list[Point3D] = []
+            for path in self.dxf.get("paths", []):
+                points.extend(path.get("points", []))
+            return points
+        if self.dxftype == "SPLINE":
+            return list(self.dxf.get("points", []))
         if self.dxftype == "DIMENSION":
             points = []
             if "defpoint2" in self.dxf:

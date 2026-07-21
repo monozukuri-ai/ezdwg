@@ -43,6 +43,9 @@ Extract key coordinate points from the entity.
 | `POINT` | `[location]` |
 | `TEXT` | `[insert]` |
 | `MTEXT` | `[insert]` |
+| `INSERT` / `MINSERT` | `[insert]` |
+| `HATCH` | All boundary points, flattened in path order |
+| `SPLINE` | Fit points when available, otherwise control points |
 | `DIMENSION` | `[defpoint2, defpoint3]` or `[text_midpoint]` |
 | `RAY` | `[start, start + unit_vector]` |
 | `XLINE` | `[start - unit_vector, start + unit_vector]` |

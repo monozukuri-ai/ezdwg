@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- Completed high-level coordinate extraction and API documentation for `INSERT`/`MINSERT`, `HATCH`, and `SPLINE`.
+- Added fixture-backed high-level `INSERT` regression coverage for block name and transform metadata.
 - Native `AC1021` (`R2007`) read path in the high-level API (`ezdwg.read`) without compatibility conversion.
 - Native `AC1024` (`R2010`) read path in the high-level API (`ezdwg.read`) for `LINE`, `ARC`, and `LWPOLYLINE`.
 - Native `AC1027` (`R2013`) read path in the high-level API (`ezdwg.read`) for `LINE`, `ARC`, and `LWPOLYLINE`.

@@ -45,7 +45,7 @@ for entity in msp.iter_entities("LINE"):
 The `to_points()` method extracts key coordinates from an entity:
 
 ```python
-for entity in msp.query("LINE LWPOLYLINE POINT"):
+for entity in msp.query("LINE LWPOLYLINE POINT INSERT HATCH SPLINE"):
     points = entity.to_points()
     print(entity.dxftype, points)
 ```
@@ -58,6 +58,9 @@ Supported types for `to_points()`:
 | LWPOLYLINE | List of vertex points |
 | POINT | `[location]` |
 | TEXT / MTEXT | `[insert]` |
+| INSERT / MINSERT | `[insert]` |
+| HATCH | All boundary points, flattened in path order |
+| SPLINE | Fit points when available, otherwise control points |
 | DIMENSION | `[defpoint2, defpoint3]` or `[text_midpoint]` |
 | RAY | `[start, start + unit_vector]` |
 | XLINE | `[start - unit_vector, start + unit_vector]` |
@@ -131,6 +134,53 @@ Supported types for `to_points()`:
 | `char_height` | `float` | Character height |
 | `width` | `float` | Reference rectangle width |
 | `attachment_point` | `int` | Attachment point code |
+
+### INSERT / MINSERT
+
+`INSERT` exposes a block reference without expanding the referenced block geometry.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `name` | `str` | Referenced block name (present when resolved) |
+| `insert` | `(float, float, float)` | Insertion point |
+| `xscale` | `float` | X-axis scale factor |
+| `yscale` | `float` | Y-axis scale factor |
+| `zscale` | `float` | Z-axis scale factor |
+| `rotation` | `float` | Rotation angle in degrees |
+| `owner_handle` | `int` | Owning block or layout handle (present when resolved) |
+
+`MINSERT` additionally exposes `column_count`, `row_count`,
+`column_spacing`, and `row_spacing`.
+
+### HATCH
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `pattern_name` | `str` | Hatch pattern name |
+| `solid_fill` | `bool` | Whether the hatch is a solid fill |
+| `associative` | `bool` | Whether the boundary is associative |
+| `elevation` | `float` | Boundary elevation |
+| `extrusion` | `(float, float, float)` | Extrusion vector |
+| `paths` | `list[dict]` | Boundary paths with `closed` and 3D `points` fields |
+
+For closed paths, the high-level API repeats the first point at the end of the
+path. `to_points()` concatenates every path in source order.
+
+### SPLINE
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `degree` | `int` | Spline degree |
+| `rational` | `bool` | Whether rational weights are used |
+| `closed` | `bool` | Whether the spline is closed |
+| `periodic` | `bool` | Whether the spline is periodic |
+| `knots` | `list[float]` | Knot values |
+| `control_points` | `list[(float, float, float)]` | Control points |
+| `weights` | `list[float]` | Control-point weights |
+| `fit_points` | `list[(float, float, float)]` | Fit points |
+| `points` | `list[(float, float, float)]` | Fit points when available, otherwise control points |
+
+For a closed spline, `points` repeats the first point at the end.
 
 ### DIMENSION
 

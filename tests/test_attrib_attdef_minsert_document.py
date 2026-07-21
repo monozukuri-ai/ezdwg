@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
+import ezdwg
 import ezdwg.document as document_module
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SAMPLES = ROOT / "test_dwg"
 
 
 def _patch_empty_color_maps(monkeypatch) -> None:
@@ -123,6 +129,7 @@ def test_query_minsert_maps_array_parameters(monkeypatch) -> None:
     assert dxf["column_spacing"] == 6.5
     assert dxf["row_spacing"] == 7.5
     assert dxf["name"] == "BLK_ARRAY"
+    assert entities[0].to_points() == [(10.0, 20.0, 0.0)]
 
 
 def test_query_insert_maps_transform_parameters(monkeypatch) -> None:
@@ -163,6 +170,25 @@ def test_query_insert_maps_transform_parameters(monkeypatch) -> None:
     assert abs(dxf["rotation"] - 30.0) < 1.0e-9
     assert dxf["name"] == "BLOCK_A"
     assert dxf["owner_handle"] == 0x20
+    assert entities[0].to_points() == [(100.0, 50.0, 0.0)]
+
+
+def test_query_insert_real_fixture_exposes_high_level_contract() -> None:
+    doc = ezdwg.read(str(SAMPLES / "insert_2004.dwg"))
+
+    entities = list(doc.modelspace().query("INSERT"))
+
+    assert len(entities) == 1
+    entity = entities[0]
+    assert entity.dxftype == "INSERT"
+    assert entity.handle == 0x2C
+    assert entity.dxf["name"] == "BLK1"
+    assert entity.dxf["insert"] == (100.0, 50.0, 0.0)
+    assert entity.dxf["xscale"] == 2.0
+    assert entity.dxf["yscale"] == 1.5
+    assert entity.dxf["zscale"] == 1.0
+    assert math.isclose(entity.dxf["rotation"], 15.0)
+    assert entity.to_points() == [(100.0, 50.0, 0.0)]
 
 
 def test_query_insert_and_minsert_uses_combined_decoder(monkeypatch) -> None:

@@ -37,6 +37,7 @@ def test_query_spline_prefers_fit_points(monkeypatch) -> None:
     assert dxf["scenario"] == 2
     assert dxf["degree"] == 3
     assert dxf["points"] == [(1.0, 2.0, 0.0), (2.0, 1.0, 0.0)]
+    assert entities[0].to_points() == [(1.0, 2.0, 0.0), (2.0, 1.0, 0.0)]
 
 
 def test_query_spline_uses_control_points_when_fit_absent(monkeypatch) -> None:
@@ -66,3 +67,9 @@ def test_query_spline_uses_control_points_when_fit_absent(monkeypatch) -> None:
     assert dxf["closed"] is True
     assert dxf["points"][0] == dxf["points"][-1]
     assert len(dxf["points"]) == 4
+    assert entities[0].to_points() == [
+        (0.0, 0.0, 0.0),
+        (1.0, 1.0, 0.0),
+        (2.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+    ]
