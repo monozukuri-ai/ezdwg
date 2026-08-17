@@ -9,6 +9,7 @@ use crate::dwg::decoder;
 use crate::dwg::file_open;
 use crate::dwg::version;
 use crate::dwg::version::DwgVersion;
+use crate::embedded_text;
 use crate::entities;
 use crate::objects;
 use crate::writer;

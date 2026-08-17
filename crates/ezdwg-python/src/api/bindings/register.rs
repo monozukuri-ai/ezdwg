@@ -58,6 +58,28 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(decode_block_header_names, module)?)?;
+    module.add_function(wrap_pyfunction!(embedded_text_shift_bits_bytes, module)?)?;
+    module.add_function(wrap_pyfunction!(embedded_text_utf16_runs, module)?)?;
+    module.add_function(wrap_pyfunction!(embedded_text_is_plausible_char, module)?)?;
+    module.add_function(wrap_pyfunction!(embedded_text_score_fragment, module)?)?;
+    module.add_function(wrap_pyfunction!(embedded_text_normalize_fragment, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        embedded_text_extract_plausible_fragment,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        embedded_text_normalize_direct_custom_fragment,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(embedded_text_visible_fragments, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        embedded_text_shifted_visible_fragments,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        embedded_text_shifted_short_direct_fragments,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(decode_block_entity_names, module)?)?;
     module.add_function(wrap_pyfunction!(decode_block_entity_name_maps, module)?)?;
     module.add_function(wrap_pyfunction!(decode_polyline_2d_entities, module)?)?;

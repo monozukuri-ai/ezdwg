@@ -796,7 +796,30 @@ fn score_attrib_text_candidate(text: &str) -> i32 {
     score
 }
 
+/// Per-code-point score table for the BMP, built once. Candidate strings are
+/// scored for every offset/layout guess, and for garbage-length TU strings
+/// that means millions of characters; `char::is_alphabetic()` on non-ASCII
+/// characters is a Unicode table search that dominated the profile.
+static BMP_TEXT_CHAR_SCORES: std::sync::OnceLock<Vec<i8>> = std::sync::OnceLock::new();
+
 fn score_attrib_text_char(ch: char) -> i32 {
+    let code = ch as u32;
+    if code < 0x1_0000 {
+        let table = BMP_TEXT_CHAR_SCORES.get_or_init(|| {
+            (0..0x1_0000u32)
+                .map(|value| match char::from_u32(value) {
+                    // Surrogate code points cannot occur in a `char`; any value works.
+                    None => 0,
+                    Some(ch) => score_attrib_text_char_uncached(ch) as i8,
+                })
+                .collect()
+        });
+        return table[code as usize] as i32;
+    }
+    score_attrib_text_char_uncached(ch)
+}
+
+fn score_attrib_text_char_uncached(ch: char) -> i32 {
     if ch == '\u{FFFD}' || ('\u{E000}'..='\u{F8FF}').contains(&ch) {
         return -8;
     }
@@ -1164,5 +1187,28 @@ mod tests {
         let embedded = tail.embedded_mtext.expect("embedded mtext");
         assert_eq!(embedded.text, "VALUE");
         assert_eq!(embedded.insertion, (10.0, 20.0, 0.0));
+    }
+}
+
+#[cfg(test)]
+mod score_table_tests {
+    use super::{score_attrib_text_char, score_attrib_text_char_uncached};
+
+    #[test]
+    fn cached_scores_match_uncached_for_every_bmp_char() {
+        for value in 0..0x1_0000u32 {
+            let Some(ch) = char::from_u32(value) else {
+                continue;
+            };
+            assert_eq!(
+                score_attrib_text_char(ch),
+                score_attrib_text_char_uncached(ch),
+                "U+{value:04X}"
+            );
+        }
+        assert_eq!(
+            score_attrib_text_char('\u{1F600}'),
+            score_attrib_text_char_uncached('\u{1F600}')
+        );
     }
 }

@@ -5149,6 +5149,29 @@ fn read_tu(reader: &mut BitReader<'_>) -> crate::core::result::Result<String> {
     reader.read_tu()
 }
 
+/// Read a TU string during an offset scan, but only if its length prefix says
+/// it can be accepted: at most `max_units` code units and ending at or before
+/// `end_bit`. Returns `Ok(None)` (without touching `reader`) when the prefix
+/// rules the candidate out. Scans that try every byte/bit offset otherwise
+/// spend nearly all their time decoding garbage-length strings that the
+/// plausibility checks reject afterwards; the outcome is identical because
+/// `BitReader::read_tu` advances exactly `16 * length` bits after the prefix.
+fn read_tu_bounded(
+    reader: &mut BitReader<'_>,
+    end_bit: u64,
+    max_units: usize,
+) -> crate::core::result::Result<Option<String>> {
+    let mut probe = reader.clone();
+    let length = probe.read_bs()? as usize;
+    if length > max_units {
+        return Ok(None);
+    }
+    if probe.tell_bits().saturating_add((length as u64).saturating_mul(16)) > end_bit {
+        return Ok(None);
+    }
+    reader.read_tu().map(Some)
+}
+
 #[cfg(test)]
 mod proxy_chunk_tests {
     use super::parse_proxy_graphic_chunk_infos;
@@ -5176,5 +5199,58 @@ mod proxy_chunk_tests {
 
         let infos = parse_proxy_graphic_chunk_infos(&data);
         assert!(infos.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod read_tu_bounded_tests {
+    use super::{read_tu, read_tu_bounded};
+    use crate::bit::BitReader;
+
+    /// Tiny deterministic PRNG (xorshift) so the test needs no extra crates.
+    fn next(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    #[test]
+    fn bounded_read_matches_unbounded_read_plus_checks() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for round in 0..400u32 {
+            let len = 4 + (next(&mut state) % 96) as usize;
+            let mut data = vec![0u8; len];
+            for byte in data.iter_mut() {
+                // Mix small values in so plausible (short) length prefixes occur often.
+                *byte = match next(&mut state) % 4 {
+                    0 => (next(&mut state) % 8) as u8,
+                    _ => next(&mut state) as u8,
+                };
+            }
+            let total_bits = (len * 8) as u64;
+            let end_bit = total_bits - (next(&mut state) % 32).min(total_bits - 16);
+            let max_units = if round % 2 == 0 { 255 } else { usize::MAX };
+            for bit in 0..(len as u32 * 8).saturating_sub(16) {
+                let mut plain = BitReader::new(&data);
+                plain.set_bit_pos(bit);
+                let expected = match read_tu(&mut plain) {
+                    Ok(name) if plain.tell_bits() <= end_bit => {
+                        // `name.len()` is the UTF-8 length; the scans reject longer names anyway,
+                        // so `max_units` only has to be a superset of what those checks accept.
+                        let units_ok = max_units == usize::MAX || name.encode_utf16().count() <= max_units;
+                        if units_ok { Some(name) } else { None }
+                    }
+                    _ => None,
+                };
+                let mut bounded = BitReader::new(&data);
+                bounded.set_bit_pos(bit);
+                let actual = read_tu_bounded(&mut bounded, end_bit, max_units).ok().flatten();
+                assert_eq!(actual, expected, "round {round} bit {bit}");
+                if actual.is_some() {
+                    assert_eq!(bounded.tell_bits(), plain.tell_bits());
+                }
+            }
+        }
     }
 }

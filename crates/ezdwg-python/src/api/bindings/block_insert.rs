@@ -3478,7 +3478,9 @@ fn scan_block_header_name_in_string_stream(
     while bit + 16 <= end_bit && tried < max_tries {
         let mut candidate_reader = base_reader.clone();
         candidate_reader.set_bit_pos(bit);
-        let Ok(name) = read_tu(&mut candidate_reader) else {
+        // A plausible block name has at most 255 UTF-8 bytes, hence at most 255
+        // UTF-16 units; longer (garbage) lengths are rejected before decoding.
+        let Ok(Some(name)) = read_tu_bounded(&mut candidate_reader, end_bit as u64, 255) else {
             bit = bit.saturating_add(8);
             tried = tried.saturating_add(1);
             continue;

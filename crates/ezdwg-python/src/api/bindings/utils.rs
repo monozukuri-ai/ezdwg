@@ -948,7 +948,8 @@ fn scan_mtext_text_in_string_stream(
     while bit + 16 <= end_bit && tried < max_tries {
         let mut candidate_reader = base_reader.clone();
         candidate_reader.set_bit_pos(bit);
-        let Ok(candidate) = read_tu(&mut candidate_reader) else {
+        let Ok(Some(candidate)) = read_tu_bounded(&mut candidate_reader, end_bit as u64, usize::MAX)
+        else {
             bit = bit.saturating_add(8);
             tried = tried.saturating_add(1);
             continue;
@@ -991,7 +992,9 @@ fn scan_mtext_text_ending_at(
     while bit + 16 <= target_end_bit && tried < max_tries {
         let mut candidate_reader = base_reader.clone();
         candidate_reader.set_bit_pos(bit);
-        let Ok(candidate) = read_tu(&mut candidate_reader) else {
+        let Ok(Some(candidate)) =
+            read_tu_bounded(&mut candidate_reader, u64::from(target_end_bit), usize::MAX)
+        else {
             bit = bit.saturating_add(1);
             tried = tried.saturating_add(1);
             continue;
@@ -1032,7 +1035,8 @@ fn scan_mtext_text_in_full_body(
     while bit + 16 <= end_bit && tried < max_tries {
         let mut candidate_reader = base_reader.clone();
         candidate_reader.set_bit_pos(bit);
-        let Ok(candidate) = read_tu(&mut candidate_reader) else {
+        let Ok(Some(candidate)) = read_tu_bounded(&mut candidate_reader, end_bit as u64, usize::MAX)
+        else {
             bit = bit.saturating_add(1);
             tried = tried.saturating_add(1);
             continue;
