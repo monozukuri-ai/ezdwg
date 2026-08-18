@@ -149,6 +149,10 @@ type DimExtrusionScaleRow = (Point3, Point3);
 type DimAnglesRow = (f64, f64, f64, f64);
 type DimStyleRow = (u8, Option<f64>, Option<u16>, Option<u16>, Option<f64>, f64);
 type DimHandlesRow = (Option<u64>, Option<u64>);
+/// Type-specific extra definition points: DXF code 15 (angular vertex /
+/// second-line start) and DXF code 16 (2-line angular arc point). `None` for
+/// dimension types that do not carry them.
+type DimExtraPointsRow = (Option<Point3>, Option<(f64, f64)>);
 type DimEntityRow = (
     u64,
     String,
@@ -161,6 +165,7 @@ type DimEntityRow = (
     DimAnglesRow,
     DimStyleRow,
     DimHandlesRow,
+    DimExtraPointsRow,
 );
 type DimTypedEntityRow = (String, DimEntityRow);
 type DimLinearDecodeFn = for<'a> fn(
@@ -268,25 +273,25 @@ const DIM_DECODE_SPECS: [DimDecodeSpec; 7] = [
         type_code: 0x14,
         type_name: "DIM_ORDINATE",
         dimtype: "ORDINATE",
-        decode_entity: decode_dim_linear_for_version,
+        decode_entity: decode_dim_ordinate_for_version,
     },
     DimDecodeSpec {
         type_code: 0x16,
         type_name: "DIM_ALIGNED",
         dimtype: "ALIGNED",
-        decode_entity: decode_dim_linear_for_version,
+        decode_entity: decode_dim_aligned_for_version,
     },
     DimDecodeSpec {
         type_code: 0x17,
         type_name: "DIM_ANG3PT",
         dimtype: "ANG3PT",
-        decode_entity: decode_dim_linear_for_version,
+        decode_entity: decode_dim_ang3pt_for_version,
     },
     DimDecodeSpec {
         type_code: 0x18,
         type_name: "DIM_ANG2LN",
         dimtype: "ANG2LN",
-        decode_entity: decode_dim_linear_for_version,
+        decode_entity: decode_dim_ang2ln_for_version,
     },
     DimDecodeSpec {
         type_code: 0x1A,

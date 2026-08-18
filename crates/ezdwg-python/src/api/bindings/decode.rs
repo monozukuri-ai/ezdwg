@@ -3073,7 +3073,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 layer_handle,
             ));
         } else if matches_type_name(header.type_code, 0x14, "DIM_ORDINATE", &dynamic_types) {
-            let entity = match decode_dim_linear_for_version(
+            let entity = match decode_dim_ordinate_for_version(
                 &mut reader,
                 decoder.version(),
                 &header,
@@ -3103,7 +3103,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 layer_handle,
             ));
         } else if matches_type_name(header.type_code, 0x16, "DIM_ALIGNED", &dynamic_types) {
-            let entity = match decode_dim_linear_for_version(
+            let entity = match decode_dim_aligned_for_version(
                 &mut reader,
                 decoder.version(),
                 &header,
@@ -3133,7 +3133,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 layer_handle,
             ));
         } else if matches_type_name(header.type_code, 0x17, "DIM_ANG3PT", &dynamic_types) {
-            let entity = match decode_dim_linear_for_version(
+            let entity = match decode_dim_ang3pt_for_version(
                 &mut reader,
                 decoder.version(),
                 &header,
@@ -3163,7 +3163,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 layer_handle,
             ));
         } else if matches_type_name(header.type_code, 0x18, "DIM_ANG2LN", &dynamic_types) {
-            let entity = match decode_dim_linear_for_version(
+            let entity = match decode_dim_ang2ln_for_version(
                 &mut reader,
                 decoder.version(),
                 &header,

@@ -60,8 +60,9 @@ pub use dim_diameter::{
     decode_dim_diameter_r2013, DimDiameterEntity,
 };
 pub use dim_linear::{
+    decode_dim_layout, decode_dim_layout_r2007, decode_dim_layout_r2010, decode_dim_layout_r2013,
     decode_dim_linear, decode_dim_linear_r2007, decode_dim_linear_r2010, decode_dim_linear_r2013,
-    DimLinearEntity, DimensionCommonData,
+    DimLinearEntity, DimSpecificLayout, DimensionCommonData,
 };
 pub use dim_radius::{
     decode_dim_radius, decode_dim_radius_r2007, decode_dim_radius_r2010, decode_dim_radius_r2013,

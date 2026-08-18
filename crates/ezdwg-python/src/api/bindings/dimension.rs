@@ -21,7 +21,7 @@ pub fn decode_dim_ordinate_entities(
         0x14,
         "DIM_ORDINATE",
         true,
-        decode_dim_linear_for_version,
+        decode_dim_ordinate_for_version,
     )
 }
 
@@ -51,7 +51,7 @@ pub fn decode_dim_aligned_entities(
         0x16,
         "DIM_ALIGNED",
         true,
-        decode_dim_linear_for_version,
+        decode_dim_aligned_for_version,
     )
 }
 
@@ -63,7 +63,7 @@ pub fn decode_dim_ang3pt_entities(path: &str, limit: Option<usize>) -> PyResult<
         0x17,
         "DIM_ANG3PT",
         true,
-        decode_dim_linear_for_version,
+        decode_dim_ang3pt_for_version,
     )
 }
 
@@ -75,7 +75,7 @@ pub fn decode_dim_ang2ln_entities(path: &str, limit: Option<usize>) -> PyResult<
         0x18,
         "DIM_ANG2LN",
         true,
-        decode_dim_linear_for_version,
+        decode_dim_ang2ln_for_version,
     )
 }
 
@@ -230,6 +230,8 @@ fn build_ultra_minimal_dim_linear_entity(object_handle: u64) -> entities::DimLin
         point10: (0.0, 0.0, 0.0),
         ext_line_rotation: 0.0,
         dim_rotation: 0.0,
+        point15: None,
+        point16: None,
     }
 }
 
@@ -337,6 +339,8 @@ fn decode_dim_linear_like_entity_minimal_for_version(
         point10: (0.0, 0.0, 0.0),
         ext_line_rotation: 0.0,
         dim_rotation: 0.0,
+        point15: None,
+        point16: None,
     })
 }
 
@@ -513,6 +517,7 @@ fn dim_entity_row_from_linear_like(entity: &entities::DimLinearEntity) -> DimEnt
             common.insert_rotation,
         ),
         (common.dimstyle_handle, common.anonymous_block_handle),
+        (entity.point15, entity.point16),
     )
 }
 
@@ -524,6 +529,47 @@ impl_version_dispatch! {
     r2007: entities::decode_dim_linear_r2007;
     default: entities::decode_dim_linear;
 }
+
+/// Version dispatch for the dimension types that share the LINEAR-like entity
+/// but have their own type-specific tail (ODA spec 20.4.22-20.4.25).
+macro_rules! impl_dim_layout_dispatch {
+    (fn $fn_name:ident => $layout:expr) => {
+        fn $fn_name(
+            reader: &mut BitReader<'_>,
+            version: &version::DwgVersion,
+            header: &ApiObjectHeader,
+            object_handle: u64,
+        ) -> crate::core::result::Result<entities::DimLinearEntity> {
+            match version {
+                version::DwgVersion::R2010 => {
+                    let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+                    entities::decode_dim_layout_r2010(
+                        reader,
+                        object_data_end_bit,
+                        object_handle,
+                        $layout,
+                    )
+                }
+                version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+                    let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
+                    entities::decode_dim_layout_r2013(
+                        reader,
+                        object_data_end_bit,
+                        object_handle,
+                        $layout,
+                    )
+                }
+                version::DwgVersion::R2007 => entities::decode_dim_layout_r2007(reader, $layout),
+                _ => entities::decode_dim_layout(reader, $layout),
+            }
+        }
+    };
+}
+
+impl_dim_layout_dispatch!(fn decode_dim_ordinate_for_version => entities::DimSpecificLayout::Ordinate);
+impl_dim_layout_dispatch!(fn decode_dim_aligned_for_version => entities::DimSpecificLayout::Aligned);
+impl_dim_layout_dispatch!(fn decode_dim_ang3pt_for_version => entities::DimSpecificLayout::Ang3Pt);
+impl_dim_layout_dispatch!(fn decode_dim_ang2ln_for_version => entities::DimSpecificLayout::Ang2Ln);
 
 impl_version_dispatch! {
     no_r14;
@@ -813,6 +859,8 @@ mod dimension_tests {
             point10: (20.0, 5.0, 0.0),
             ext_line_rotation: 0.0,
             dim_rotation: 0.0,
+            point15: None,
+            point16: None,
         }
     }
 

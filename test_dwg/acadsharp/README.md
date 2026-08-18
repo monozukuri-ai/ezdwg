@@ -6,6 +6,7 @@ These DWG fixtures were copied from the public ACadSharp repository:
 - `BLOCKPOINTPARAMETER.dwg`
 - `sample_AC1027.dwg`
 - `sample_AC1021.dwg`
+- `sample_AC1018.dwg`
 
 Source repository:
 
@@ -17,6 +18,7 @@ Original paths:
 - `samples/dynamic-blocks/BLOCKPOINTPARAMETER.dwg`
 - `samples/sample_AC1027.dwg`
 - `samples/sample_AC1021.dwg`
+- `samples/sample_AC1018.dwg`
 
 License:
 

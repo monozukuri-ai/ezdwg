@@ -218,7 +218,15 @@ Decode MTEXT entities with text content, insertion point, size, and attachment i
 raw.decode_dimension_entities(path: str, limit: int | None = None) -> list[tuple]
 ```
 
-Decode all DIMENSION entity subtypes. Returns complex tuples containing dimension type, definition points, text, and measurement data.
+Decode all DIMENSION entity subtypes. Returns `(dimtype, row)` pairs; `row` is the
+12-tuple shared by every `decode_dim_*_entities` function:
+`(handle, user_text, defpoint(10), defpoint2(13), defpoint3(14), text_midpoint(11),
+insert_point(12) | None, (extrusion, insert_scale), (text_rotation, horizontal_direction,
+ext_line_rotation, dim_rotation), (dim_flags, actual_measurement, attachment_point,
+line_spacing_style, line_spacing_factor, insert_rotation), (dimstyle_handle,
+anonymous_block_handle), (point15 | None, point16 | None))`. The last element carries
+the type-specific extra points: DXF code 15 for `ANG3PT`/`ANG2LN`/`RADIUS`/`DIAMETER`
+and code 16 (`(x, y)`) for `ANG2LN`; other types yield `(None, None)`.
 
 ### decode_insert_entities
 

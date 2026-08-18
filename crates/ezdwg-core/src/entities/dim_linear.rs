@@ -40,6 +40,89 @@ pub struct DimLinearEntity {
     pub point10: (f64, f64, f64),
     pub ext_line_rotation: f64,
     pub dim_rotation: f64,
+    /// DXF code 15 (angular vertex / second-line start); `None` for other types.
+    pub point15: Option<(f64, f64, f64)>,
+    /// DXF code 16 (2-line angular dimension arc point); `None` for other types.
+    pub point16: Option<(f64, f64)>,
+}
+
+/// Type-specific tail of a dimension object (ODA spec 20.4.22-20.4.27).
+///
+/// The common dimension data is shared; only the fields after the 12-pt differ:
+/// - LINEAR: 3BD 13, 3BD 14, 3BD 10, BD ext-line rotation, BD dim rotation
+/// - ALIGNED: 3BD 13, 3BD 14, 3BD 10, BD ext-line rotation
+/// - ANG3PT: 3BD 10, 3BD 13, 3BD 14, 3BD 15
+/// - ANG2LN: 2RD 16, 3BD 13, 3BD 14, 3BD 15, 3BD 10
+/// - ORDINATE: 3BD 10, 3BD 13, 3BD 14, RC flags2
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DimSpecificLayout {
+    Linear,
+    Aligned,
+    Ang3Pt,
+    Ang2Ln,
+    Ordinate,
+}
+
+struct DimSpecificData {
+    point13: (f64, f64, f64),
+    point14: (f64, f64, f64),
+    point10: (f64, f64, f64),
+    ext_line_rotation: f64,
+    dim_rotation: f64,
+    point15: Option<(f64, f64, f64)>,
+    point16: Option<(f64, f64)>,
+}
+
+fn read_dim_specific(
+    reader: &mut BitReader<'_>,
+    layout: DimSpecificLayout,
+) -> Result<DimSpecificData> {
+    let mut data = DimSpecificData {
+        point13: (0.0, 0.0, 0.0),
+        point14: (0.0, 0.0, 0.0),
+        point10: (0.0, 0.0, 0.0),
+        ext_line_rotation: 0.0,
+        dim_rotation: 0.0,
+        point15: None,
+        point16: None,
+    };
+    match layout {
+        DimSpecificLayout::Linear => {
+            data.point13 = reader.read_3bd()?;
+            data.point14 = reader.read_3bd()?;
+            data.point10 = reader.read_3bd()?;
+            data.ext_line_rotation = reader.read_bd()?;
+            data.dim_rotation = reader.read_bd()?;
+        }
+        DimSpecificLayout::Aligned => {
+            data.point13 = reader.read_3bd()?;
+            data.point14 = reader.read_3bd()?;
+            data.point10 = reader.read_3bd()?;
+            data.ext_line_rotation = reader.read_bd()?;
+        }
+        DimSpecificLayout::Ang3Pt => {
+            data.point10 = reader.read_3bd()?;
+            data.point13 = reader.read_3bd()?;
+            data.point14 = reader.read_3bd()?;
+            data.point15 = Some(reader.read_3bd()?);
+        }
+        DimSpecificLayout::Ang2Ln => {
+            let x16 = reader.read_rd(Endian::Little)?;
+            let y16 = reader.read_rd(Endian::Little)?;
+            data.point16 = Some((x16, y16));
+            data.point13 = reader.read_3bd()?;
+            data.point14 = reader.read_3bd()?;
+            data.point15 = Some(reader.read_3bd()?);
+            data.point10 = reader.read_3bd()?;
+        }
+        DimSpecificLayout::Ordinate => {
+            data.point10 = reader.read_3bd()?;
+            data.point13 = reader.read_3bd()?;
+            data.point14 = reader.read_3bd()?;
+            let _flags2 = reader.read_rc()?;
+        }
+    }
+    Ok(data)
 }
 
 #[derive(Clone, Copy)]
@@ -53,22 +136,11 @@ struct DimLinearVariant {
 }
 
 pub fn decode_dim_linear(reader: &mut BitReader<'_>) -> Result<DimLinearEntity> {
-    let header = parse_common_entity_header(reader)?;
-    decode_dim_linear_with_header(reader, header, false)
+    decode_dim_layout(reader, DimSpecificLayout::Linear)
 }
 
 pub fn decode_dim_linear_r2007(reader: &mut BitReader<'_>) -> Result<DimLinearEntity> {
-    let header = parse_common_entity_header_r2007(reader)?;
-    let data_pos = reader.get_pos();
-    // R2007 has no dimension version byte and keeps the user text in the string
-    // stream (no bits in the data stream). The R2010+ variant table contains that
-    // exact layout, so try it first; the R2000-style variants (inline TV text)
-    // stay as a fallback for writers that deviate.
-    if let Ok(entity) = decode_dim_linear_r2010_plus_with_header(reader, header.clone(), true) {
-        return Ok(entity);
-    }
-    reader.set_pos(data_pos.0, data_pos.1);
-    decode_dim_linear_with_header(reader, header, true)
+    decode_dim_layout_r2007(reader, DimSpecificLayout::Linear)
 }
 
 pub fn decode_dim_linear_r2010(
@@ -76,9 +148,12 @@ pub fn decode_dim_linear_r2010(
     object_data_end_bit: u32,
     object_handle: u64,
 ) -> Result<DimLinearEntity> {
-    let mut header = parse_common_entity_header_r2010(reader, object_data_end_bit)?;
-    header.handle = object_handle;
-    decode_dim_linear_r2010_plus_with_header(reader, header, true)
+    decode_dim_layout_r2010(
+        reader,
+        object_data_end_bit,
+        object_handle,
+        DimSpecificLayout::Linear,
+    )
 }
 
 pub fn decode_dim_linear_r2013(
@@ -86,32 +161,124 @@ pub fn decode_dim_linear_r2013(
     object_data_end_bit: u32,
     object_handle: u64,
 ) -> Result<DimLinearEntity> {
+    decode_dim_layout_r2013(
+        reader,
+        object_data_end_bit,
+        object_handle,
+        DimSpecificLayout::Linear,
+    )
+}
+
+/// R2000/R2004 dimension of the given type-specific layout.
+pub fn decode_dim_layout(
+    reader: &mut BitReader<'_>,
+    layout: DimSpecificLayout,
+) -> Result<DimLinearEntity> {
+    let header = parse_common_entity_header(reader)?;
+    decode_dim_linear_with_header(reader, header, false, layout)
+}
+
+/// R2007 dimension of the given type-specific layout.
+pub fn decode_dim_layout_r2007(
+    reader: &mut BitReader<'_>,
+    layout: DimSpecificLayout,
+) -> Result<DimLinearEntity> {
+    let header = parse_common_entity_header_r2007(reader)?;
+    let data_pos = reader.get_pos();
+    // R2007 has no dimension version byte and keeps the user text in the string
+    // stream (no bits in the data stream). The R2010+ variant table contains that
+    // exact layout, so try it first; the R2000-style variants (inline TV text)
+    // stay as a fallback for writers that deviate.
+    if let Ok(entity) =
+        decode_dim_linear_r2010_plus_with_header(reader, header.clone(), true, layout)
+    {
+        return Ok(entity);
+    }
+    reader.set_pos(data_pos.0, data_pos.1);
+    decode_dim_linear_with_header(reader, header, true, layout)
+}
+
+/// R2010 dimension of the given type-specific layout.
+pub fn decode_dim_layout_r2010(
+    reader: &mut BitReader<'_>,
+    object_data_end_bit: u32,
+    object_handle: u64,
+    layout: DimSpecificLayout,
+) -> Result<DimLinearEntity> {
+    let mut header = parse_common_entity_header_r2010(reader, object_data_end_bit)?;
+    header.handle = object_handle;
+    decode_dim_linear_r2010_plus_with_header(reader, header, true, layout)
+}
+
+/// R2013+ dimension of the given type-specific layout.
+pub fn decode_dim_layout_r2013(
+    reader: &mut BitReader<'_>,
+    object_data_end_bit: u32,
+    object_handle: u64,
+    layout: DimSpecificLayout,
+) -> Result<DimLinearEntity> {
     let mut header = parse_common_entity_header_r2013(reader, object_data_end_bit)?;
     header.handle = object_handle;
-    decode_dim_linear_r2010_plus_with_header(reader, header, true)
+    decode_dim_linear_r2010_plus_with_header(reader, header, true, layout)
 }
 
 fn decode_dim_linear_r2010_plus_with_header(
     reader: &mut BitReader<'_>,
     header: CommonEntityHeader,
     allow_handle_decode_failure: bool,
+    layout: DimSpecificLayout,
 ) -> Result<DimLinearEntity> {
     let data_pos = reader.get_pos();
 
     let mut best: Option<(u64, DimLinearEntity)> = None;
     let mut last_error: Option<DwgError> = None;
+    let debug = std::env::var("EZDWG_DEBUG_DIM")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|handle| handle == header.handle);
     for parse_variant in R2010_PLUS_VARIANTS {
         reader.set_pos(data_pos.0, data_pos.1);
-        match decode_r2010_plus_variant(reader, &header, parse_variant, allow_handle_decode_failure)
-        {
+        match decode_r2010_plus_variant(
+            reader,
+            &header,
+            parse_variant,
+            allow_handle_decode_failure,
+            layout,
+        ) {
             Ok(entity) => {
                 let score = plausibility_score(&entity);
+                if debug {
+                    eprintln!(
+                        "[ezdwg dim r2010+ {:?}] handle={:#x} variant={:?} score={} p10={:?} p13={:?} p14={:?} p15={:?} p16={:?} mid={:?} ins={:?} meas={:?} ext={:?}",
+                        layout,
+                        header.handle,
+                        parse_variant,
+                        score,
+                        entity.point10,
+                        entity.point13,
+                        entity.point14,
+                        entity.point15,
+                        entity.point16,
+                        entity.common.text_midpoint,
+                        entity.common.insert_point,
+                        entity.common.actual_measurement,
+                        entity.common.extrusion,
+                    );
+                }
                 match &best {
                     Some((best_score, _)) if score >= *best_score => {}
                     _ => best = Some((score, entity)),
                 }
             }
-            Err(err) => last_error = Some(err),
+            Err(err) => {
+                if debug {
+                    eprintln!(
+                        "[ezdwg dim r2010+ {:?}] handle={:#x} variant={:?} error={}",
+                        layout, header.handle, parse_variant, err
+                    );
+                }
+                last_error = Some(err)
+            }
         }
     }
 
@@ -132,6 +299,7 @@ fn decode_r2010_plus_variant(
     header: &CommonEntityHeader,
     parse_variant: R2010PlusVariant,
     allow_handle_decode_failure: bool,
+    layout: DimSpecificLayout,
 ) -> Result<DimLinearEntity> {
     if parse_variant.has_dimension_version {
         let _dimension_version = reader.read_rc()?;
@@ -160,18 +328,21 @@ fn decode_r2010_plus_variant(
     let line_spacing_style = Some(reader.read_bs()?);
     let line_spacing_factor = Some(reader.read_bd()?);
     let actual_measurement = Some(reader.read_bd()?);
-    let _unknown = reader.read_b()?;
-    let _flip_arrow1 = reader.read_b()?;
-    let _flip_arrow2 = reader.read_b()?;
+    if parse_variant.has_r2007_flags {
+        let _unknown = reader.read_b()?;
+        let _flip_arrow1 = reader.read_b()?;
+        let _flip_arrow2 = reader.read_b()?;
+    }
     let point12_x = reader.read_rd(Endian::Little)?;
     let point12_y = reader.read_rd(Endian::Little)?;
     let insert_point = Some((point12_x, point12_y, elevation));
 
-    let point13 = reader.read_3bd()?;
-    let point14 = reader.read_3bd()?;
-    let point10 = reader.read_3bd()?;
-    let ext_line_rotation = reader.read_bd()?;
-    let dim_rotation = reader.read_bd()?;
+    let specific = read_dim_specific(reader, layout)?;
+    let point13 = specific.point13;
+    let point14 = specific.point14;
+    let point10 = specific.point10;
+    let ext_line_rotation = specific.ext_line_rotation;
+    let dim_rotation = specific.dim_rotation;
 
     reader.set_bit_pos(header.obj_size);
     let handles_pos = reader.get_pos();
@@ -227,6 +398,8 @@ fn decode_r2010_plus_variant(
         point10,
         ext_line_rotation,
         dim_rotation,
+        point15: specific.point15,
+        point16: specific.point16,
     })
 }
 
@@ -234,31 +407,66 @@ fn decode_dim_linear_with_header(
     reader: &mut BitReader<'_>,
     header: CommonEntityHeader,
     allow_handle_decode_failure: bool,
+    layout: DimSpecificLayout,
 ) -> Result<DimLinearEntity> {
     let data_pos = reader.get_pos();
 
+    // The R2000-R2004 layout per spec (attachment block present, no R2007+
+    // unknown/flip-arrow flags, 12-pt present) goes first: candidates are only
+    // replaced by a strictly better score, so on ties the spec layout wins
+    // instead of a coincidentally plausible mis-alignment.
     let variants = [
+        variant(true, false, false, false, true, true),
+        variant(true, false, false, false, true, false),
         variant(true, true, true, true, true, true),
         variant(true, true, true, false, true, true),
         variant(true, true, false, false, true, true),
-        variant(true, false, false, false, true, true),
         variant(true, false, false, false, false, true),
         variant(false, false, false, false, false, true),
         variant(true, true, true, true, true, false),
         variant(true, true, true, false, true, false),
         variant(true, true, false, false, true, false),
-        variant(true, false, false, false, true, false),
         variant(true, false, false, false, false, false),
         variant(false, false, false, false, false, false),
     ];
 
     let mut best: Option<(u64, DimLinearEntity)> = None;
     let mut last_error: Option<DwgError> = None;
+    let debug = std::env::var("EZDWG_DEBUG_DIM")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|handle| handle == header.handle);
     for parse_variant in variants {
         reader.set_pos(data_pos.0, data_pos.1);
-        match decode_variant(reader, &header, parse_variant, allow_handle_decode_failure) {
+        match decode_variant(
+            reader,
+            &header,
+            parse_variant,
+            allow_handle_decode_failure,
+            layout,
+        ) {
             Ok(entity) => {
                 let score = plausibility_score(&entity);
+                if debug {
+                    eprintln!(
+                        "[dim debug] handle={} variant=(att={} unk={} f1={} f2={} p12={} sbc={}) score={score} p13={:?} p14={:?} p10={:?} ext_rot={} dim_rot={} text={:?} meas={:?} insert={:?}",
+                        header.handle,
+                        parse_variant.has_attachment,
+                        parse_variant.has_unknown_flag,
+                        parse_variant.has_flip_arrow1,
+                        parse_variant.has_flip_arrow2,
+                        parse_variant.has_point12,
+                        parse_variant.style_before_common,
+                        entity.point13,
+                        entity.point14,
+                        entity.point10,
+                        entity.ext_line_rotation,
+                        entity.dim_rotation,
+                        entity.common.user_text,
+                        entity.common.actual_measurement,
+                        entity.common.insert_point
+                    );
+                }
                 match &best {
                     Some((best_score, _)) if score >= *best_score => {}
                     _ => best = Some((score, entity)),
@@ -281,6 +489,7 @@ fn decode_variant(
     header: &CommonEntityHeader,
     parse_variant: DimLinearVariant,
     allow_handle_decode_failure: bool,
+    layout: DimSpecificLayout,
 ) -> Result<DimLinearEntity> {
     let extrusion = reader.read_3bd()?;
     let text_mid_x = reader.read_rd(Endian::Little)?;
@@ -325,11 +534,12 @@ fn decode_variant(
         None
     };
 
-    let point13 = reader.read_3bd()?;
-    let point14 = reader.read_3bd()?;
-    let point10 = reader.read_3bd()?;
-    let ext_line_rotation = reader.read_bd()?;
-    let dim_rotation = reader.read_bd()?;
+    let specific = read_dim_specific(reader, layout)?;
+    let point13 = specific.point13;
+    let point14 = specific.point14;
+    let point10 = specific.point10;
+    let ext_line_rotation = specific.ext_line_rotation;
+    let dim_rotation = specific.dim_rotation;
 
     // Handles are stored in the handle stream at obj_size bit offset.
     reader.set_bit_pos(header.obj_size);
@@ -386,6 +596,8 @@ fn decode_variant(
         point10,
         ext_line_rotation,
         dim_rotation,
+        point15: specific.point15,
+        point16: specific.point16,
     })
 }
 

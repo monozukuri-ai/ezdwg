@@ -2,11 +2,13 @@ use crate::bit::{BitReader, Endian};
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
 use crate::entities::common::{
-    parse_common_entity_handles, parse_common_entity_header_r2010,
-    parse_common_entity_header_r2013, parse_common_entity_layer_handle, read_handle_reference,
-    CommonEntityHeader,
+    parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r2007,
+    parse_common_entity_header_r2010, parse_common_entity_header_r2013,
+    parse_common_entity_layer_handle, read_handle_reference, CommonEntityHeader,
 };
-use crate::entities::dim_common::{plausibility_score, R2010PlusVariant, R2010_PLUS_VARIANTS};
+use crate::entities::dim_common::{
+    plausibility_score, R2010PlusVariant, R2000_VARIANTS, R2010_PLUS_VARIANTS,
+};
 use crate::entities::dim_linear::{
     decode_dim_linear, decode_dim_linear_r2007, DimLinearEntity, DimensionCommonData,
 };
@@ -14,12 +16,31 @@ use crate::entities::dim_linear::{
 pub type DimRadiusEntity = DimLinearEntity;
 
 pub fn decode_dim_radius(reader: &mut BitReader<'_>) -> Result<DimRadiusEntity> {
-    // R2000/R2004 radius dimensions share a largely compatible body layout
-    // with linear dimensions for the fields we currently surface.
+    // R2000/R2004: same common dimension data as R2010+ minus the version byte
+    // and the R2007+ flag bits, followed by the radial-specific points (the old
+    // delegation to the LINEAR layout misaligned 15-pt/10-pt/leader length).
+    let header = parse_common_entity_header(reader)?;
+    let data_pos = reader.get_pos();
+    if let Ok(entity) =
+        decode_dim_radius_variants_with_header(reader, header.clone(), false, &R2000_VARIANTS)
+    {
+        return Ok(entity);
+    }
+    reader.set_pos(data_pos.0, data_pos.1);
     decode_dim_linear(reader)
 }
 
 pub fn decode_dim_radius_r2007(reader: &mut BitReader<'_>) -> Result<DimRadiusEntity> {
+    // R2007: no version byte, user text in the string stream, R2007+ flags
+    // present — all covered by the R2010+ variant table.
+    let header = parse_common_entity_header_r2007(reader)?;
+    let data_pos = reader.get_pos();
+    if let Ok(entity) =
+        decode_dim_radius_variants_with_header(reader, header.clone(), true, &R2010_PLUS_VARIANTS)
+    {
+        return Ok(entity);
+    }
+    reader.set_pos(data_pos.0, data_pos.1);
     decode_dim_linear_r2007(reader)
 }
 
@@ -48,11 +69,25 @@ fn decode_dim_radius_r2010_plus_with_header(
     header: CommonEntityHeader,
     allow_handle_decode_failure: bool,
 ) -> Result<DimRadiusEntity> {
+    decode_dim_radius_variants_with_header(
+        reader,
+        header,
+        allow_handle_decode_failure,
+        &R2010_PLUS_VARIANTS,
+    )
+}
+
+fn decode_dim_radius_variants_with_header(
+    reader: &mut BitReader<'_>,
+    header: CommonEntityHeader,
+    allow_handle_decode_failure: bool,
+    variants: &[R2010PlusVariant],
+) -> Result<DimRadiusEntity> {
     let data_pos = reader.get_pos();
 
     let mut best: Option<(u64, DimRadiusEntity)> = None;
     let mut last_error: Option<DwgError> = None;
-    for parse_variant in R2010_PLUS_VARIANTS {
+    for parse_variant in variants.iter().copied() {
         reader.set_pos(data_pos.0, data_pos.1);
         match decode_r2010_plus_variant(reader, &header, parse_variant, allow_handle_decode_failure)
         {
@@ -112,9 +147,11 @@ fn decode_r2010_plus_variant(
     let line_spacing_style = Some(reader.read_bs()?);
     let line_spacing_factor = Some(reader.read_bd()?);
     let actual_measurement = Some(reader.read_bd()?);
-    let _unknown = reader.read_b()?;
-    let _flip_arrow1 = reader.read_b()?;
-    let _flip_arrow2 = reader.read_b()?;
+    if parse_variant.has_r2007_flags {
+        let _unknown = reader.read_b()?;
+        let _flip_arrow1 = reader.read_b()?;
+        let _flip_arrow2 = reader.read_b()?;
+    }
     let point12_x = reader.read_rd(Endian::Little)?;
     let point12_y = reader.read_rd(Endian::Little)?;
     let insert_point = Some((point12_x, point12_y, elevation));
@@ -178,5 +215,7 @@ fn decode_r2010_plus_variant(
         point10,
         ext_line_rotation: 0.0,
         dim_rotation: 0.0,
+        point15: Some(point15),
+        point16: None,
     })
 }

@@ -1891,7 +1891,14 @@ class Layout:
                     angles,
                     common_data,
                     handle_data,
+                    *extra_fields,
                 ) = row
+                # ezdwg >= 0.12.4 appends the type-specific extra definition
+                # points (DXF codes 15/16) for angular dimensions; older rows
+                # (or fallback rows built by tests) have 11 elements.
+                point15 = point16 = None
+                if extra_fields and isinstance(extra_fields[0], tuple) and len(extra_fields[0]) == 2:
+                    point15, point16 = extra_fields[0]
                 extrusion, insert_scale = transforms
                 text_rotation, horizontal_direction, ext_line_rotation, dim_rotation = angles
                 (
@@ -1928,6 +1935,10 @@ class Layout:
                     "oblique_angle": math.degrees(ext_line_rotation),
                     "angle": math.degrees(dim_rotation),
                 }
+                if point15 is not None:
+                    dim_dxf["defpoint4"] = tuple(point15)
+                if point16 is not None:
+                    dim_dxf["defpoint5"] = (float(point16[0]), float(point16[1]), 0.0)
                 dim_dxf.update(common_dxf)
                 if anonymous_block_handle is not None:
                     try:

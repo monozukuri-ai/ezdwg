@@ -193,6 +193,8 @@ The `dxf` dictionary for DIMENSION entities includes:
 | `defpoint` | `(float, float, float)` | Definition point (dimension line) |
 | `defpoint2` | `(float, float, float)` | First extension line origin |
 | `defpoint3` | `(float, float, float)` | Second extension line origin |
+| `defpoint4` | `(float, float, float)` | Only `ANG3PT` / `ANG2LN` (DXF code 15: angle vertex / second line start) and `RADIUS` / `DIAMETER` (point on the arc / opposite diameter point) |
+| `defpoint5` | `(float, float, float)` | Only `ANG2LN` (DXF code 16: point on the dimension arc) |
 | `text` | `str` | Override text |
 | `angle` | `float` | Rotation angle in degrees |
 | `actual_measurement` | `float` | Computed measurement value |

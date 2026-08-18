@@ -6,53 +6,80 @@
 
 use crate::entities::dim_linear::DimLinearEntity;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct R2010PlusVariant {
     pub(crate) has_dimension_version: bool,
     pub(crate) has_user_text: bool,
     pub(crate) extrusion_is_be: bool,
+    /// R2007+ `B unknown; B flip arrow1; B flip arrow2` after the measurement.
+    pub(crate) has_r2007_flags: bool,
 }
+
+/// R2000/R2004 layout of the common dimension data: no version byte, inline
+/// TV user text, no R2007+ flag bits. Listed spec-first so ties keep it.
+pub(crate) const R2000_VARIANTS: [R2010PlusVariant; 2] = [
+    R2010PlusVariant {
+        has_dimension_version: false,
+        has_user_text: true,
+        extrusion_is_be: false,
+        has_r2007_flags: false,
+    },
+    R2010PlusVariant {
+        has_dimension_version: false,
+        has_user_text: true,
+        extrusion_is_be: true,
+        has_r2007_flags: false,
+    },
+];
 
 pub(crate) const R2010_PLUS_VARIANTS: [R2010PlusVariant; 8] = [
     R2010PlusVariant {
         has_dimension_version: true,
         has_user_text: true,
         extrusion_is_be: false,
+        has_r2007_flags: true,
     },
     R2010PlusVariant {
         has_dimension_version: true,
         has_user_text: false,
         extrusion_is_be: false,
+        has_r2007_flags: true,
     },
     R2010PlusVariant {
         has_dimension_version: false,
         has_user_text: true,
         extrusion_is_be: false,
+        has_r2007_flags: true,
     },
     R2010PlusVariant {
         has_dimension_version: false,
         has_user_text: false,
         extrusion_is_be: false,
+        has_r2007_flags: true,
     },
     R2010PlusVariant {
         has_dimension_version: true,
         has_user_text: true,
         extrusion_is_be: true,
+        has_r2007_flags: true,
     },
     R2010PlusVariant {
         has_dimension_version: true,
         has_user_text: false,
         extrusion_is_be: true,
+        has_r2007_flags: true,
     },
     R2010PlusVariant {
         has_dimension_version: false,
         has_user_text: true,
         extrusion_is_be: true,
+        has_r2007_flags: true,
     },
     R2010PlusVariant {
         has_dimension_version: false,
         has_user_text: false,
         extrusion_is_be: true,
+        has_r2007_flags: true,
     },
 ];
 
@@ -70,6 +97,12 @@ pub(crate) fn plausibility_score(entity: &DimLinearEntity) -> u64 {
     }
     if let Some(insert_point) = common.insert_point {
         score = score.saturating_add(point_score(insert_point));
+    }
+    if let Some(point15) = entity.point15 {
+        score = score.saturating_add(point_score(point15));
+    }
+    if let Some((x16, y16)) = entity.point16 {
+        score = score.saturating_add(point_score((x16, y16, 0.0)));
     }
     score = score.saturating_add(point_score(common.extrusion));
     score = score.saturating_add(point_score(common.insert_scale));
@@ -155,11 +188,19 @@ pub(crate) fn point_score(point: (f64, f64, f64)) -> u64 {
         .saturating_add(value_score(point.2))
 }
 
+/// Magnitudes below this (but not exactly zero) never occur in drawing data;
+/// they are the signature of raw bits read at the wrong offset (denormal-ish
+/// exponents such as 8.9e-307), so they must lose against a clean candidate.
+const GARBAGE_MAGNITUDE: f64 = 1.0e-30;
+
 pub(crate) fn angle_score(value: f64) -> u64 {
     if !value.is_finite() {
         return 1_000_000;
     }
     let abs = value.abs();
+    if abs > 0.0 && abs < GARBAGE_MAGNITUDE {
+        return 5_000;
+    }
     if abs <= 1_000.0 {
         0
     } else if abs <= 1_000_000.0 {
@@ -176,6 +217,9 @@ pub(crate) fn value_score(value: f64) -> u64 {
         return 1_000_000;
     }
     let abs = value.abs();
+    if abs > 0.0 && abs < GARBAGE_MAGNITUDE {
+        return 5_000;
+    }
     if abs <= 1_000_000.0 {
         0
     } else if abs <= 1_000_000_000.0 {
