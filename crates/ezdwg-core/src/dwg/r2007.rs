@@ -322,6 +322,20 @@ fn load_section_data(
     Ok(output)
 }
 
+/// Number of (255, 251) Reed-Solomon blocks of a data page.
+///
+/// ODA 5.4: the page data is padded with zero bytes to a multiple of the CRC
+/// block size (8) *before* Reed-Solomon encoding, so the block count has to be
+/// derived from the padded size. A bare `ceil(compressed / 251)` is one block
+/// short whenever the padding crosses a 251-byte boundary; the de-interleave
+/// stride is then wrong and decompression fails on garbage.
+fn data_page_rs_block_count(size_compressed: u64) -> Result<u64> {
+    const DATA_PAGE_RS_DATA_SIZE: u64 = 251;
+    const DATA_PAGE_CRC_BLOCK_SIZE: u64 = 8;
+    let padded_size = align_up(size_compressed, DATA_PAGE_CRC_BLOCK_SIZE)?;
+    Ok(div_ceil(padded_size, DATA_PAGE_RS_DATA_SIZE))
+}
+
 fn read_data_page(
     bytes: &[u8],
     page_entry: &PageMapEntry,
@@ -331,7 +345,7 @@ fn read_data_page(
 ) -> Result<Vec<u8>> {
     const DATA_PAGE_RS_DATA_SIZE: u64 = 251;
 
-    let block_count_u64 = div_ceil(size_compressed, DATA_PAGE_RS_DATA_SIZE);
+    let block_count_u64 = data_page_rs_block_count(size_compressed)?;
     let min_page_size = DATA_PAGE_RS_DATA_SIZE
         .checked_mul(block_count_u64)
         .ok_or_else(|| DwgError::new(ErrorKind::Format, "R2007 data page size overflow"))?;
@@ -353,15 +367,16 @@ fn read_data_page(
     let block_count = to_usize(block_count_u64, "R2007 data page RS block count")?;
     let encoded_method = u8::try_from(encoded)
         .map_err(|_| DwgError::new(ErrorKind::Format, "R2007 encoded flag exceeds u8"))?;
-    let decoded = match encoded_method {
-        0 => page_buf.to_vec(),
-        1 | 4 => decode_reed_solomon(page_buf, 251, block_count, encoded_method)?,
-        _ => {
-            return Err(DwgError::not_implemented(
+    let decode_page = |block_count: usize| -> Result<Vec<u8>> {
+        match encoded_method {
+            0 => Ok(page_buf.to_vec()),
+            1 | 4 => decode_reed_solomon(page_buf, 251, block_count, encoded_method),
+            _ => Err(DwgError::not_implemented(
                 "unsupported R2007 data page encoding method",
-            ))
+            )),
         }
     };
+    let decoded = decode_page(block_count)?;
 
     if size_compressed < size_uncompressed {
         let compressed_size = to_usize(size_compressed, "R2007 compressed data page size")?;
@@ -372,7 +387,31 @@ fn read_data_page(
                 "R2007 compressed data page exceeds decoded buffer",
             ));
         }
-        decompress_r21(&decoded[..compressed_size], uncompressed_size)
+        match decompress_r21(&decoded[..compressed_size], uncompressed_size) {
+            Ok(data) => Ok(data),
+            Err(err) if encoded_method == 4 => {
+                // Fallback for writers whose block count does not follow the
+                // padded-size rule: try the strides implied by the page size.
+                let by_page = to_usize(page_entry.size / 255, "R2007 RS block count")?;
+                let by_page_ceil = to_usize(page_entry.size.div_ceil(255), "R2007 RS block count")?;
+                for candidate in [by_page, by_page_ceil] {
+                    if candidate == block_count || candidate == 0 {
+                        continue;
+                    }
+                    if candidate * 251 < compressed_size || candidate * 251 > page_buf.len() {
+                        continue;
+                    }
+                    if let Ok(alt) = decode_page(candidate) {
+                        if let Ok(data) = decompress_r21(&alt[..compressed_size], uncompressed_size)
+                        {
+                            return Ok(data);
+                        }
+                    }
+                }
+                Err(err)
+            }
+            Err(err) => Err(err),
+        }
     } else {
         let size = to_usize(size_uncompressed, "R2007 data page size")?;
         if size > decoded.len() {
@@ -1627,6 +1666,16 @@ mod tests {
         }
 
         assert_eq!(decoded_count, 1);
+    }
+
+    #[test]
+    fn data_page_block_count_uses_the_crc_padded_size() {
+        // 10793 bytes pad to 10800, which needs 44 blocks (a bare ceil gives 43).
+        assert_eq!(super::data_page_rs_block_count(10793).unwrap(), 44);
+        assert_eq!(super::data_page_rs_block_count(10792).unwrap(), 43);
+        assert_eq!(super::data_page_rs_block_count(251).unwrap(), 2);
+        assert_eq!(super::data_page_rs_block_count(248).unwrap(), 1);
+        assert_eq!(super::data_page_rs_block_count(0).unwrap(), 0);
     }
 
     #[test]
