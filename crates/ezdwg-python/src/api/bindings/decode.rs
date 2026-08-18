@@ -22,7 +22,7 @@ macro_rules! impl_version_dispatch {
             object_handle: u64,
         ) -> crate::core::result::Result<$entity_ty> {
             match version {
-                version::DwgVersion::R14 => $r14_fn(reader, object_handle),
+                version::DwgVersion::R13 | version::DwgVersion::R14 => $r14_fn(reader, object_handle),
                 version::DwgVersion::R2010 => {
                     let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
                     $r2010_fn(reader, object_data_end_bit, object_handle)
@@ -418,7 +418,7 @@ fn decode_graph_common_entity_handles_from_record(
     let mut reader = record.bit_reader();
     skip_object_type_prefix(&mut reader, version).ok()?;
     let common = match version {
-        version::DwgVersion::R14 => {
+        version::DwgVersion::R13 | version::DwgVersion::R14 => {
             entities::common::parse_common_entity_header_r14(&mut reader).ok()?
         }
         version::DwgVersion::R2000
@@ -1202,7 +1202,7 @@ fn decode_object_entity_layer_handle_from_record(
     }
 
     let parsed_layer_handle = match version {
-        version::DwgVersion::R14 => {
+        version::DwgVersion::R13 | version::DwgVersion::R14 => {
             let common = entities::common::parse_common_entity_header_r14(&mut reader).ok()?;
             reader.set_bit_pos(common.obj_size);
             entities::common::parse_common_entity_layer_handle(&mut reader, &common).ok()?
@@ -2070,7 +2070,7 @@ pub fn decode_entity_placements(
             continue;
         }
         let common = match version {
-            version::DwgVersion::R14 => continue,
+            version::DwgVersion::R13 | version::DwgVersion::R14 => continue,
             version::DwgVersion::R2000 | version::DwgVersion::R2004 => {
                 entities::common::parse_common_entity_header(&mut reader)
             }
@@ -4399,7 +4399,7 @@ fn decode_line_for_version(
 ) -> crate::core::result::Result<entities::LineEntity> {
     let start = reader.get_pos();
     let primary = match version {
-        version::DwgVersion::R14 => entities::decode_line_r14(reader, object_handle),
+        version::DwgVersion::R13 | version::DwgVersion::R14 => entities::decode_line_r14(reader, object_handle),
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             entities::decode_line_r2010(reader, object_data_end_bit, object_handle)
@@ -4485,7 +4485,7 @@ fn decode_text_for_version(
     object_handle: u64,
 ) -> crate::core::result::Result<entities::TextEntity> {
     match version {
-        version::DwgVersion::R14 => entities::decode_text_r14(reader, object_handle),
+        version::DwgVersion::R13 | version::DwgVersion::R14 => entities::decode_text_r14(reader, object_handle),
         version::DwgVersion::R2010 => decode_r2010_entity_with_end_bit_candidates(
             reader,
             header,

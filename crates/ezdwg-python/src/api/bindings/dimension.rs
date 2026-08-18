@@ -256,7 +256,7 @@ fn decode_dim_linear_like_entity_minimal_for_version(
         version::DwgVersion::R2007 => {
             entities::common::parse_common_entity_header_r2007(reader).ok()
         }
-        version::DwgVersion::R14 => entities::common::parse_common_entity_header_r14(reader).ok(),
+        version::DwgVersion::R13 | version::DwgVersion::R14 => entities::common::parse_common_entity_header_r14(reader).ok(),
         _ => entities::common::parse_common_entity_header(reader).ok(),
     };
 

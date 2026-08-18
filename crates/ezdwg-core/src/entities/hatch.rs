@@ -7,6 +7,18 @@ use crate::entities::common::{
     parse_common_entity_layer_handle, CommonEntityHeader,
 };
 
+/// How string fields (pattern name, gradient name) are stored in the data stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HatchStringMode {
+    /// R2000-R2004: TV strings inline in the data stream.
+    InlineTv,
+    /// TU strings inline (only used as a legacy fallback candidate).
+    InlineTu,
+    /// R2007+: strings live in the object's separate string stream, so they
+    /// consume no bits in the data stream.
+    StringStream,
+}
+
 #[derive(Debug, Clone)]
 pub struct HatchPath {
     pub closed: bool,
@@ -29,12 +41,12 @@ pub struct HatchEntity {
 
 pub fn decode_hatch(reader: &mut BitReader<'_>) -> Result<HatchEntity> {
     let header = parse_common_entity_header(reader)?;
-    decode_hatch_with_header(reader, header, false, false, false, false)
+    decode_hatch_with_header(reader, header, false, false, false, false, false)
 }
 
 pub fn decode_hatch_r2004(reader: &mut BitReader<'_>) -> Result<HatchEntity> {
     let header = parse_common_entity_header(reader)?;
-    decode_hatch_with_header(reader, header, false, false, true, false)
+    decode_hatch_with_header(reader, header, false, false, true, false, false)
 }
 
 pub fn decode_hatch_r2007(reader: &mut BitReader<'_>) -> Result<HatchEntity> {
@@ -45,6 +57,7 @@ pub fn decode_hatch_r2007(reader: &mut BitReader<'_>) -> Result<HatchEntity> {
         true,
         true,
         true,
+        false,
     )
 }
 
@@ -60,6 +73,7 @@ pub fn decode_hatch_r2010(
             header.handle = object_handle;
             Ok(header)
         },
+        true,
         true,
         true,
         true,
@@ -83,6 +97,7 @@ pub fn decode_hatch_r2013(
         true,
         true,
         true,
+        true,
     )
 }
 
@@ -93,6 +108,7 @@ fn decode_hatch_with_header_start_candidates<F>(
     r2007_layer_only: bool,
     has_gradient_payload: bool,
     use_unicode_text: bool,
+    spline_fit_points: bool,
 ) -> Result<HatchEntity>
 where
     F: FnMut(&mut BitReader<'_>) -> Result<CommonEntityHeader>,
@@ -130,6 +146,7 @@ where
             r2007_layer_only,
             has_gradient_payload,
             use_unicode_text,
+            spline_fit_points,
         ) {
             Ok(entity) => {
                 let score = score_hatch_candidate(&entity);
@@ -166,6 +183,7 @@ fn decode_hatch_with_header(
     r2007_layer_only: bool,
     has_gradient_payload: bool,
     use_unicode_text: bool,
+    spline_fit_points: bool,
 ) -> Result<HatchEntity> {
     let base_reader = reader.clone();
     if !has_gradient_payload {
@@ -175,15 +193,38 @@ fn decode_hatch_with_header(
             allow_handle_decode_failure,
             r2007_layer_only,
             false,
-            use_unicode_text,
+            if use_unicode_text {
+                HatchStringMode::StringStream
+            } else {
+                HatchStringMode::InlineTv
+            },
+            spline_fit_points,
         );
     }
 
     let mut first_err: Option<DwgError> = None;
     let mut best: Option<(i32, BitReader<'_>, HatchEntity)> = None;
 
-    for skip_gradient in [false, true] {
-        for string_is_unicode in [use_unicode_text, !use_unicode_text] {
+    let debug = std::env::var("EZDWG_DEBUG_HATCH")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|handle| handle == header.handle);
+    // R2007+ keeps TV/TU strings in the string stream: the data stream has no
+    // string bits at all. Older heuristics tried inline TU/TV first, which
+    // misaligned every field after the gradient/pattern name; keep them only as
+    // fallbacks for odd writers.
+    let string_modes: &[HatchStringMode] = if use_unicode_text {
+        &[
+            HatchStringMode::StringStream,
+            HatchStringMode::InlineTu,
+            HatchStringMode::InlineTv,
+        ]
+    } else {
+        &[HatchStringMode::InlineTv, HatchStringMode::InlineTu]
+    };
+    for skip_gradient in [true, false] {
+        for string_mode in string_modes.iter().copied() {
+            let string_is_unicode = string_mode;
             let mut attempt_reader = reader.clone();
             match decode_hatch_body(
                 &mut attempt_reader,
@@ -191,16 +232,38 @@ fn decode_hatch_with_header(
                 allow_handle_decode_failure,
                 r2007_layer_only,
                 skip_gradient,
-                string_is_unicode,
+                string_mode,
+                spline_fit_points,
             ) {
                 Ok(entity) => {
-                    let score = score_hatch_candidate(&entity);
+                    let mut score = score_hatch_candidate(&entity);
+                    if use_unicode_text && string_mode == HatchStringMode::StringStream {
+                        // The spec-conformant layout for R2007+; inline-string
+                        // candidates only exist as a fallback for odd writers.
+                        score += 5;
+                    }
+                    if debug {
+                        eprintln!(
+                            "[hatch debug] handle={} skip_gradient={skip_gradient} strings={string_is_unicode:?} OK score={score} name={:?} paths={:?} solid={} extrusion={:?}",
+                            header.handle,
+                            entity.name,
+                            entity.paths.iter().map(|p| p.points.len()).collect::<Vec<_>>(),
+                            entity.solid_fill,
+                            entity.extrusion
+                        );
+                    }
                     match &best {
                         Some((best_score, ..)) if score <= *best_score => {}
                         _ => best = Some((score, attempt_reader, entity)),
                     }
                 }
                 Err(err) => {
+                    if debug {
+                        eprintln!(
+                            "[hatch debug] handle={} skip_gradient={skip_gradient} strings={string_is_unicode:?} ERR {err}",
+                            header.handle
+                        );
+                    }
                     if first_err.is_none() {
                         first_err = Some(err);
                     }
@@ -216,6 +279,17 @@ fn decode_hatch_with_header(
         r2007_layer_only,
     ) {
         let score = score_hatch_candidate(&entity);
+        if debug {
+            eprintln!(
+                "[hatch debug] handle={} scan-fallback score={score} paths={:?}",
+                header.handle,
+                entity
+                    .paths
+                    .iter()
+                    .map(|p| p.points.len())
+                    .collect::<Vec<_>>()
+            );
+        }
         match &best {
             Some((best_score, ..)) if score <= *best_score => {}
             _ => best = Some((score, candidate_reader, entity)),
@@ -324,19 +398,16 @@ fn decode_hatch_body(
     allow_handle_decode_failure: bool,
     r2007_layer_only: bool,
     skip_gradient: bool,
-    use_unicode_text: bool,
+    string_mode: HatchStringMode,
+    spline_fit_points: bool,
 ) -> Result<HatchEntity> {
     if skip_gradient {
-        skip_gradient_payload(reader, use_unicode_text)?;
+        skip_gradient_payload(reader, string_mode)?;
     }
 
     let elevation = reader.read_bd()?;
     let extrusion = reader.read_3bd()?;
-    let name = if use_unicode_text {
-        reader.read_tu()?
-    } else {
-        reader.read_tv()?
-    };
+    let name = read_hatch_string(reader, string_mode)?;
     let solid_fill = reader.read_b()? != 0;
     let associative = reader.read_b()? != 0;
 
@@ -388,10 +459,8 @@ fn decode_hatch_body(
                         append_segment_points(&mut path_points, &segment);
                     }
                     4 => {
-                        return Err(DwgError::new(
-                            ErrorKind::NotImplemented,
-                            "HATCH spline edge is not supported yet",
-                        ));
+                        let segment = spline_edge_points(reader, spline_fit_points)?;
+                        append_segment_points(&mut path_points, &segment);
                     }
                     _ => {
                         return Err(DwgError::new(
@@ -572,9 +641,13 @@ fn score_hatch_candidate(entity: &HatchEntity) -> i32 {
         return i32::MIN / 4;
     }
     score += (entity.paths.len().min(32) as i32) * 4;
+    // A boundary needs at least three points; empty/degenerate paths are a strong
+    // sign of a misaligned candidate (they used to outscore real geometry).
     for path in &entity.paths {
         if path.points.len() >= 3 {
             score += 3;
+        } else {
+            score -= 8;
         }
         if path.closed {
             score += 2;
@@ -587,6 +660,15 @@ fn score_hatch_candidate(entity: &HatchEntity) -> i32 {
                 return i32::MIN / 4;
             }
         }
+    }
+    // Extrusion is (0, 0, ±1) for virtually every 2D hatch; a zero vector means
+    // the fields were read from the wrong bit offset.
+    let (ex, ey, ez) = entity.extrusion;
+    let extrusion_len = (ex * ex + ey * ey + ez * ez).sqrt();
+    if !extrusion_len.is_finite() || extrusion_len < 0.5 {
+        score -= 10;
+    } else if (extrusion_len - 1.0).abs() < 1e-6 {
+        score += 6;
     }
     score
 }
@@ -608,7 +690,15 @@ fn is_plausible_hatch_point(point: (f64, f64)) -> bool {
     point.0.is_finite() && point.1.is_finite() && point.0.abs() <= 1.0e8 && point.1.abs() <= 1.0e8
 }
 
-fn skip_gradient_payload(reader: &mut BitReader<'_>, use_unicode_text: bool) -> Result<()> {
+fn read_hatch_string(reader: &mut BitReader<'_>, mode: HatchStringMode) -> Result<String> {
+    match mode {
+        HatchStringMode::InlineTv => reader.read_tv(),
+        HatchStringMode::InlineTu => reader.read_tu(),
+        HatchStringMode::StringStream => Ok(String::new()),
+    }
+}
+
+fn skip_gradient_payload(reader: &mut BitReader<'_>, string_mode: HatchStringMode) -> Result<()> {
     let _is_gradient = reader.read_bl()?;
     let _reserved = reader.read_bl()?;
     let _gradient_angle = reader.read_bd()?;
@@ -622,11 +712,7 @@ fn skip_gradient_payload(reader: &mut BitReader<'_>, use_unicode_text: bool) -> 
         let _rgb_color = reader.read_bl()?;
         let _ignored_color_byte = reader.read_rc()?;
     }
-    let _gradient_name = if use_unicode_text {
-        reader.read_tu()?
-    } else {
-        reader.read_tv()?
-    };
+    let _gradient_name = read_hatch_string(reader, string_mode)?;
     Ok(())
 }
 
@@ -697,6 +783,149 @@ fn close_path_if_needed(points: &mut Vec<(f64, f64)>) {
     let last = *points.last().unwrap();
     if !points_equal_2d(first, last) {
         points.push(first);
+    }
+}
+
+/// Read a HATCH spline boundary edge and sample it as a polyline.
+///
+/// Layout (ODA spec, edge type 4): BL degree, B rational, B periodic,
+/// BL knot count, BL control point count, BD knots, 2RD control points
+/// (each followed by BD weight when rational); R2010+ append BL fit-point
+/// count, 2RD fit points and the 2RD start/end tangents.
+fn spline_edge_points(reader: &mut BitReader<'_>, has_fit_points: bool) -> Result<Vec<(f64, f64)>> {
+    let degree = bounded_count(reader.read_bl()?, "hatch spline degree")?;
+    if degree > 25 {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            format!("hatch spline degree is implausible: {degree}"),
+        ));
+    }
+    let rational = reader.read_b()? != 0;
+    let _periodic = reader.read_b()? != 0;
+    let num_knots = bounded_count(reader.read_bl()?, "hatch spline knots")?;
+    let num_control = bounded_count(reader.read_bl()?, "hatch spline control points")?;
+    let mut knots = Vec::with_capacity(num_knots.min(4096));
+    for _ in 0..num_knots {
+        knots.push(reader.read_bd()?);
+    }
+    let mut control = Vec::with_capacity(num_control.min(4096));
+    let mut weights = Vec::with_capacity(if rational { num_control.min(4096) } else { 0 });
+    for _ in 0..num_control {
+        control.push(read_point2rd(reader)?);
+        if rational {
+            weights.push(reader.read_bd()?);
+        }
+    }
+    let mut fit_points = Vec::new();
+    if has_fit_points {
+        let num_fit = bounded_count(reader.read_bl()?, "hatch spline fit points")?;
+        for _ in 0..num_fit {
+            fit_points.push(read_point2rd(reader)?);
+        }
+        let _start_tangent = read_point2rd(reader)?;
+        let _end_tangent = read_point2rd(reader)?;
+    }
+    if control.len() >= 2 {
+        if let Some(points) = sample_bspline(&control, &weights, &knots, degree) {
+            return Ok(points);
+        }
+    }
+    if fit_points.len() >= 2 {
+        return Ok(fit_points);
+    }
+    Ok(control)
+}
+
+/// Uniform parameter sampling of a (rational) B-spline with Cox-de Boor basis.
+fn sample_bspline(
+    control: &[(f64, f64)],
+    weights: &[f64],
+    knots: &[f64],
+    degree: usize,
+) -> Option<Vec<(f64, f64)>> {
+    let n = control.len();
+    let degree = degree.min(n.saturating_sub(1)).max(1);
+    let owned_knots: Vec<f64>;
+    let knots = if knots.len() == n + degree + 1 && knots.windows(2).all(|w| w[0] <= w[1]) {
+        knots
+    } else {
+        // Clamped uniform knot vector as a fallback for damaged knot data.
+        let mut generated = vec![0.0; degree + 1];
+        let interior = n - degree - 1;
+        for index in 1..=interior {
+            generated.push(index as f64 / (interior + 1) as f64);
+        }
+        generated.extend(std::iter::repeat(1.0).take(degree + 1));
+        owned_knots = generated;
+        &owned_knots
+    };
+    let start = knots[degree];
+    let end = knots[n];
+    if !(end > start) || !start.is_finite() || !end.is_finite() {
+        return None;
+    }
+    let use_weights = weights.len() == n && weights.iter().all(|w| w.is_finite() && *w > 0.0);
+    let samples = (n * 8).clamp(16, 256);
+    let mut basis = vec![0.0f64; n];
+    let mut points = Vec::with_capacity(samples + 1);
+    for sample in 0..=samples {
+        let t = if sample == samples {
+            end
+        } else {
+            start + (end - start) * sample as f64 / samples as f64
+        };
+        bspline_basis(t, degree, knots, n, end, &mut basis);
+        let mut x = 0.0;
+        let mut y = 0.0;
+        let mut denominator = 0.0;
+        for (index, point) in control.iter().enumerate() {
+            let weight = if use_weights { weights[index] } else { 1.0 };
+            let factor = basis[index] * weight;
+            x += factor * point.0;
+            y += factor * point.1;
+            denominator += factor;
+        }
+        if denominator.abs() < 1e-15 || !x.is_finite() || !y.is_finite() {
+            continue;
+        }
+        points.push((x / denominator, y / denominator));
+    }
+    (points.len() >= 2).then_some(points)
+}
+
+fn bspline_basis(t: f64, degree: usize, knots: &[f64], n: usize, end: f64, out: &mut [f64]) {
+    // Degree-0 basis: 1 on the half-open span containing t (closed at the end).
+    let span_count = knots.len() - 1;
+    let mut current = vec![0.0f64; span_count];
+    for index in 0..span_count {
+        let in_span = if t >= end {
+            knots[index] < end && knots[index + 1] >= end
+        } else {
+            knots[index] <= t && t < knots[index + 1]
+        };
+        if in_span {
+            current[index] = 1.0;
+        }
+    }
+    for level in 1..=degree {
+        let width = span_count - level;
+        let mut next = vec![0.0f64; width];
+        for index in 0..width {
+            let left_den = knots[index + level] - knots[index];
+            let right_den = knots[index + level + 1] - knots[index + 1];
+            let mut value = 0.0;
+            if left_den > 0.0 {
+                value += (t - knots[index]) / left_den * current[index];
+            }
+            if right_den > 0.0 {
+                value += (knots[index + level + 1] - t) / right_den * current[index + 1];
+            }
+            next[index] = value;
+        }
+        current = next;
+    }
+    for (index, slot) in out.iter_mut().enumerate().take(n) {
+        *slot = current.get(index).copied().unwrap_or(0.0);
     }
 }
 
@@ -866,4 +1095,69 @@ fn bounded_count(raw: u32, label: &str) -> Result<usize> {
         ));
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bspline_sampler_reproduces_a_polyline_for_degree_one() {
+        let control = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)];
+        let knots = [0.0, 0.0, 0.5, 1.0, 1.0];
+        let points = sample_bspline(&control, &[], &knots, 1).expect("sampled");
+        assert_eq!(points.first().copied(), Some((0.0, 0.0)));
+        let last = points.last().copied().unwrap();
+        assert!((last.0 - 10.0).abs() < 1e-9 && (last.1 - 10.0).abs() < 1e-9);
+        // The midpoint of the parameter range is the corner of the polyline.
+        let mid = points[points.len() / 2];
+        assert!((mid.0 - 10.0).abs() < 1e-6 && mid.1.abs() < 1e-6, "{mid:?}");
+    }
+
+    #[test]
+    fn bspline_sampler_interpolates_clamped_endpoints_and_falls_back_on_bad_knots() {
+        let control = [(0.0, 0.0), (5.0, 10.0), (10.0, 0.0)];
+        // Wrong knot count: a clamped uniform vector is generated instead.
+        let points = sample_bspline(&control, &[], &[0.0, 1.0], 2).expect("sampled");
+        assert_eq!(points.first().copied(), Some((0.0, 0.0)));
+        let last = points.last().copied().unwrap();
+        assert!((last.0 - 10.0).abs() < 1e-9 && last.1.abs() < 1e-9);
+        // A quadratic Bezier peaks at y = 5 in the middle.
+        let peak = points.iter().map(|p| p.1).fold(f64::MIN, f64::max);
+        assert!((peak - 5.0).abs() < 1e-3, "{peak}");
+    }
+
+    #[test]
+    fn hatch_scores_prefer_real_boundaries_over_empty_paths() {
+        let real = HatchEntity {
+            handle: 1,
+            color_index: None,
+            true_color: None,
+            layer_handle: 0,
+            name: String::new(),
+            solid_fill: true,
+            associative: false,
+            elevation: 0.0,
+            extrusion: (0.0, 0.0, 1.0),
+            paths: vec![HatchPath {
+                closed: true,
+                points: vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
+            }],
+        };
+        let garbage = HatchEntity {
+            extrusion: (0.0, 0.0, 0.0),
+            paths: vec![
+                HatchPath {
+                    closed: true,
+                    points: Vec::new(),
+                },
+                HatchPath {
+                    closed: true,
+                    points: Vec::new(),
+                },
+            ],
+            ..real.clone()
+        };
+        assert!(score_hatch_candidate(&real) > score_hatch_candidate(&garbage));
+    }
 }

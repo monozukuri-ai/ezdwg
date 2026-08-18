@@ -64,7 +64,7 @@ pub struct HeaderVariables {
 
 fn rank(version: &DwgVersion) -> Option<u8> {
     match version {
-        DwgVersion::R14 => Some(0),
+        DwgVersion::R13 | DwgVersion::R14 => Some(0),
         DwgVersion::R2000 => Some(1),
         DwgVersion::R2004 => Some(2),
         DwgVersion::R2007 => Some(3),

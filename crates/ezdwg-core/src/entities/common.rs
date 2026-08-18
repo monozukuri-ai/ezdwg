@@ -46,6 +46,12 @@ pub fn parse_common_entity_header(reader: &mut BitReader<'_>) -> Result<CommonEn
 
 pub fn parse_common_entity_header_r14(reader: &mut BitReader<'_>) -> Result<CommonEntityHeader> {
     let start = reader.get_pos();
+    // Spec layout first (ODA "Common Entity Data", R13-R14 columns); the older
+    // guessed layouts stay as fallbacks for files that happened to decode with them.
+    if let Ok(header) = parse_common_entity_header_r13_r14_spec(reader) {
+        return Ok(header);
+    }
+    reader.set_pos(start.0, start.1);
     match parse_common_entity_header_r14_impl(reader, false) {
         Ok(header) => Ok(header),
         Err(err)
@@ -408,6 +414,62 @@ fn parse_common_entity_header_fields_from_entmode(
         has_face_visual_style,
         has_edge_visual_style,
         has_legacy_entity_links,
+    })
+}
+
+/// R13/R14 common entity data exactly as specified:
+/// `H handle; EED; B picture [RL size, data]; RL bitsize; BB entmode; BL numreactors;
+/// B isbylayerlt; B nolinks; BS color (CMC is an index only before R2004);
+/// BD ltscale; BS invisibility`. There is no xdic-missing flag, no plotstyle/ltype
+/// flag pair and no lineweight byte before R2000.
+fn parse_common_entity_header_r13_r14_spec(
+    reader: &mut BitReader<'_>,
+) -> Result<CommonEntityHeader> {
+    let handle = reader.read_h()?.value;
+    skip_eed(reader)?;
+
+    let graphic_present_flag = reader.read_b()?;
+    if graphic_present_flag == 1 {
+        let graphic_size = reader.read_rl(Endian::Little)? as usize;
+        let _ = reader.read_rcs(graphic_size)?;
+    }
+
+    let obj_size = reader.read_rl(Endian::Little)?;
+    let entity_mode = reader.read_bb()?;
+    let num_of_reactors = reader.read_bl()?;
+    if num_of_reactors > MAX_COMMON_ENTITY_REACTORS {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            format!(
+                "common entity reactor count too large: {num_of_reactors} (max {MAX_COMMON_ENTITY_REACTORS})"
+            ),
+        ));
+    }
+    let is_bylayer_ltype = reader.read_b()? != 0;
+    let no_links = reader.read_b()?;
+    let color_index = reader.read_bs()?;
+    let _ltype_scale = reader.read_bd()?;
+    let _invisibility = reader.read_bs()?;
+
+    Ok(CommonEntityHeader {
+        obj_size,
+        handle,
+        color: CommonEntityColor {
+            index: Some(color_index),
+            true_color: None,
+        },
+        entity_mode,
+        num_of_reactors,
+        // R13-R2000 always carry the xdictionary handle.
+        xdic_missing_flag: 0,
+        has_ds_binary_data: false,
+        ltype_flags: if is_bylayer_ltype { 0 } else { 3 },
+        plotstyle_flags: 0,
+        material_flags: 0,
+        has_full_visual_style: false,
+        has_face_visual_style: false,
+        has_edge_visual_style: false,
+        has_legacy_entity_links: no_links == 0,
     })
 }
 

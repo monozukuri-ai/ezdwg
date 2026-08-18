@@ -2026,7 +2026,7 @@ fn decode_lwpolyline_for_version(
     object_handle: u64,
 ) -> crate::core::result::Result<entities::LwPolylineEntity> {
     match version {
-        version::DwgVersion::R14 => {
+        version::DwgVersion::R13 | version::DwgVersion::R14 => {
             entities::decode_lwpolyline_r14(reader, object_handle, header.type_code)
         }
         version::DwgVersion::R2010 => {
@@ -2050,7 +2050,7 @@ fn decode_polyline_2d_for_version(
 ) -> crate::core::result::Result<entities::Polyline2dEntity> {
     let start = reader.get_pos();
     match version {
-        version::DwgVersion::R14 => entities::decode_polyline_2d_r14(reader, object_handle),
+        version::DwgVersion::R13 | version::DwgVersion::R14 => entities::decode_polyline_2d_r14(reader, object_handle),
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             match entities::decode_polyline_2d_r2010(reader, object_data_end_bit, object_handle) {
@@ -2083,7 +2083,7 @@ fn decode_polyline_2d_for_version(
 }
 
 fn is_r14_polyline_2d_speculative_type(version: &version::DwgVersion, type_code: u16) -> bool {
-    matches!(version, version::DwgVersion::R14) && type_code >= 0x01F4
+    matches!(version, version::DwgVersion::R13 | version::DwgVersion::R14) && type_code >= 0x01F4
 }
 
 fn is_plausible_polyline_2d_entity(entity: &entities::Polyline2dEntity) -> bool {

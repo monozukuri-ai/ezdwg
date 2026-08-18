@@ -1,6 +1,6 @@
 [project]
 name = "ezdwg"
-version = "0.12.2"
+version = "0.12.3"
 description = "Minimal read-only DWG parser (Rust core + Python API)"
 readme = "README.md"
 authors = [

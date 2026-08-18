@@ -59,6 +59,15 @@ pub fn decode_dim_linear(reader: &mut BitReader<'_>) -> Result<DimLinearEntity> 
 
 pub fn decode_dim_linear_r2007(reader: &mut BitReader<'_>) -> Result<DimLinearEntity> {
     let header = parse_common_entity_header_r2007(reader)?;
+    let data_pos = reader.get_pos();
+    // R2007 has no dimension version byte and keeps the user text in the string
+    // stream (no bits in the data stream). The R2010+ variant table contains that
+    // exact layout, so try it first; the R2000-style variants (inline TV text)
+    // stay as a fallback for writers that deviate.
+    if let Ok(entity) = decode_dim_linear_r2010_plus_with_header(reader, header.clone(), true) {
+        return Ok(entity);
+    }
+    reader.set_pos(data_pos.0, data_pos.1);
     decode_dim_linear_with_header(reader, header, true)
 }
 

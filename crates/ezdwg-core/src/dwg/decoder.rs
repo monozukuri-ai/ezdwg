@@ -44,7 +44,8 @@ impl<'a> Decoder<'a> {
 
     pub fn ensure_supported(&self) -> Result<()> {
         match self.version {
-            DwgVersion::R14
+            DwgVersion::R13
+            | DwgVersion::R14
             | DwgVersion::R2000
             | DwgVersion::R2004
             | DwgVersion::R2007
@@ -60,7 +61,7 @@ impl<'a> Decoder<'a> {
 
     pub fn section_directory(&self) -> Result<SectionDirectory> {
         match self.version {
-            DwgVersion::R14 | DwgVersion::R2000 => {
+            DwgVersion::R13 | DwgVersion::R14 | DwgVersion::R2000 => {
                 r2000::parse_section_directory(self.bytes, &self.config)
             }
             DwgVersion::R2004 | DwgVersion::R2010 | DwgVersion::R2013 | DwgVersion::R2018 => {
@@ -80,7 +81,7 @@ impl<'a> Decoder<'a> {
         index: usize,
     ) -> Result<SectionSlice<'a>> {
         match self.version {
-            DwgVersion::R14 | DwgVersion::R2000 => {
+            DwgVersion::R13 | DwgVersion::R14 | DwgVersion::R2000 => {
                 r2000::load_section_by_index(self.bytes, directory, index, &self.config)
             }
             DwgVersion::R2004 | DwgVersion::R2010 | DwgVersion::R2013 | DwgVersion::R2018 => {
@@ -101,7 +102,7 @@ impl<'a> Decoder<'a> {
     /// R14 files have no INSUNITS header variable and yield a result with
     /// every field set to `None`.
     pub fn header_variables(&self) -> Result<HeaderVariables> {
-        if matches!(self.version, DwgVersion::R14) {
+        if matches!(self.version, DwgVersion::R13 | DwgVersion::R14) {
             return Ok(HeaderVariables::default());
         }
         let directory = self.section_directory()?;
@@ -116,7 +117,7 @@ impl<'a> Decoder<'a> {
 
     pub fn build_object_index(&self) -> Result<ObjectIndex> {
         match self.version {
-            DwgVersion::R14 | DwgVersion::R2000 => {
+            DwgVersion::R13 | DwgVersion::R14 | DwgVersion::R2000 => {
                 r2000::build_object_index(self.bytes, &self.config)
             }
             DwgVersion::R2004 | DwgVersion::R2010 | DwgVersion::R2013 | DwgVersion::R2018 => {
@@ -132,8 +133,10 @@ impl<'a> Decoder<'a> {
 
     pub fn parse_object_record(&self, offset: u32) -> Result<ObjectRecord<'a>> {
         match self.version {
-            DwgVersion::R14 | DwgVersion::R2000 => r2000::parse_object_record(self.bytes, offset)
-                .map(|record| record.with_codepage(self.codepage)),
+            DwgVersion::R13 | DwgVersion::R14 | DwgVersion::R2000 => {
+                r2000::parse_object_record(self.bytes, offset)
+                    .map(|record| record.with_codepage(self.codepage))
+            }
             DwgVersion::R2004 => {
                 let data = self.load_objects_section_data()?;
                 r2004::parse_object_record_from_section_data(data, offset)
@@ -158,7 +161,7 @@ impl<'a> Decoder<'a> {
 
     pub fn dynamic_type_map(&self) -> Result<HashMap<u16, String>> {
         match self.version {
-            DwgVersion::R14 | DwgVersion::R2000 => {
+            DwgVersion::R13 | DwgVersion::R14 | DwgVersion::R2000 => {
                 match r2000::load_dynamic_type_map(self.bytes, &self.config) {
                     Ok(map) => Ok(map),
                     Err(_err) => Ok(HashMap::new()),
@@ -179,7 +182,7 @@ impl<'a> Decoder<'a> {
 
     pub fn dynamic_type_class_map(&self) -> Result<HashMap<u16, ObjectClass>> {
         match self.version {
-            DwgVersion::R14 | DwgVersion::R2000 => {
+            DwgVersion::R13 | DwgVersion::R14 | DwgVersion::R2000 => {
                 match r2000::load_dynamic_type_class_map(self.bytes, &self.config) {
                     Ok(map) => Ok(map),
                     Err(_err) => Ok(HashMap::new()),
