@@ -19,6 +19,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_proxy_graphic_chunk_infos, module)?)?;
     module.add_function(wrap_pyfunction!(decode_proxy_graphic_text_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_entity_styles, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_entity_placements, module)?)?;
     module.add_function(wrap_pyfunction!(decode_layer_colors, module)?)?;
     module.add_function(wrap_pyfunction!(decode_layer_names, module)?)?;
     module.add_function(wrap_pyfunction!(decode_line_entities, module)?)?;

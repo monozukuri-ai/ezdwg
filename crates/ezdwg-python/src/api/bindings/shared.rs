@@ -27,6 +27,7 @@ type AcisCandidateInfoRow = (u64, u16, u32, String, Vec<u64>, u8);
 type ProxyGraphicTextRow = (u64, u16, u32, String, Point3, Point3, f64, f64, f64);
 type ProxyGraphicChunkInfoRow = (u64, u16, u32, u32, u32);
 type EntityStyleRow = (u64, Option<u16>, Option<u32>, u64);
+type EntityPlacementRow = (u64, u8, u64);
 type ObjectLayerHandleRow = (u64, u64);
 type LayerColorRow = (u64, u16, Option<u32>);
 type LayerNameRow = (u64, String);

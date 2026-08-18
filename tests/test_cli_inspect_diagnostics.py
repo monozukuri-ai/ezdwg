@@ -24,6 +24,9 @@ class _DummyDoc:
     def modelspace(self) -> _DummyLayout:
         return self._layout
 
+    def entities(self) -> _DummyLayout:
+        return self._layout
+
 
 def test_cli_inspect_reports_record_diagnostics(monkeypatch, tmp_path: Path, capsys) -> None:
     dummy_path = tmp_path / "dummy.dwg"

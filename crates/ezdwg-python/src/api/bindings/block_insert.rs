@@ -1675,7 +1675,42 @@ fn collect_block_header_name_entries_in_order(
         }
         entries.push((obj.handle.0, decoded_handle, name));
     }
+    number_anonymous_block_names(&mut entries);
     Ok(entries)
+}
+
+/// DWG files store anonymous block names as the bare prefix ("*D", "*U", "*T",
+/// ...); AutoCAD numbers them when the drawing is loaded (DXF shows "*D3",
+/// "*U18", ...). Give every anonymous header a unique numbered name, in handle
+/// order with one shared counter like AutoCAD, so block references stay
+/// distinguishable and DXF output does not merge unrelated blocks. Names that
+/// already carry a number (or any non-anonymous name) are left untouched and
+/// their numbers are never reused.
+fn number_anonymous_block_names(entries: &mut [(u64, u64, String)]) {
+    let used: HashSet<String> = entries.iter().map(|(_, _, name)| name.clone()).collect();
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by_key(|&index| entries[index].0);
+    let mut counter = 1u32;
+    let mut assigned: HashSet<String> = HashSet::new();
+    for index in order {
+        if !is_bare_anonymous_block_name(&entries[index].2) {
+            continue;
+        }
+        loop {
+            let candidate = format!("{}{}", entries[index].2, counter);
+            counter = counter.saturating_add(1);
+            if !used.contains(&candidate) && !assigned.contains(&candidate) {
+                assigned.insert(candidate.clone());
+                entries[index].2 = candidate;
+                break;
+            }
+        }
+    }
+}
+
+fn is_bare_anonymous_block_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() == 2 && bytes[0] == b'*' && bytes[1].is_ascii_alphabetic()
 }
 
 fn collect_block_header_names_in_order(
@@ -3400,6 +3435,13 @@ fn decode_block_header_name_record(
             }
         }
         best_name.map(|(_, name)| name).unwrap_or_default()
+    } else if matches!(version, version::DwgVersion::R2007) {
+        // R2007 already keeps strings in the string stream; the RL read at the
+        // top of the object is the data end ("endbit") in record-body bits.
+        match read_block_name_from_r2007_string_stream(reader, obj_size_bits) {
+            Some(name) => name,
+            None => reader.read_tv()?,
+        }
     } else {
         reader.read_tv()?
     };
@@ -3422,6 +3464,25 @@ fn read_block_name_from_exact_string_stream(
 ) -> Option<String> {
     let header = api_header?;
     let end_bit = resolve_r2010_object_data_end_bit_exact(header)?;
+    let (start_bit, stream_end_bit) = resolve_r2010_string_stream_range_oda(base_reader, end_bit)?;
+    let mut reader = base_reader.clone();
+    reader.set_bit_pos(start_bit);
+    let name = reader.read_tu().ok()?;
+    if reader.tell_bits() > u64::from(stream_end_bit) {
+        return None;
+    }
+    if !is_acceptable_exact_block_name(&name) {
+        return None;
+    }
+    Some(name)
+}
+
+/// R2007 variant of the exact string-stream read: the object's RL "size in bits"
+/// (read right after the type code) is the end of the pre-handles data.
+fn read_block_name_from_r2007_string_stream(
+    base_reader: &BitReader<'_>,
+    end_bit: u32,
+) -> Option<String> {
     let (start_bit, stream_end_bit) = resolve_r2010_string_stream_range_oda(base_reader, end_bit)?;
     let mut reader = base_reader.clone();
     reader.set_bit_pos(start_bit);

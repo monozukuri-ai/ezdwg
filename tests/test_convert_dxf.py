@@ -3568,7 +3568,8 @@ def test_prune_implausible_entities_from_repeated_large_blocks() -> None:
     assert type_counts.get("LINE", 0) == 2100
     assert type_counts.get("LWPOLYLINE", 0) == 0
     assert type_counts.get("ARC", 0) == 0
-    assert type_counts.get("RAY", 0) == 0
+    # RAY near the origin is ordinary construction geometry and must survive
+    assert type_counts.get("RAY", 0) == 1
     assert type_counts.get("3DFACE", 0) == 0
 
 
@@ -3598,7 +3599,8 @@ def test_drop_implausible_modelspace_primitives_removes_tiny_origin_geometry() -
     assert type_counts.get("LINE", 0) == 1
     assert type_counts.get("LWPOLYLINE", 0) == 1
     assert type_counts.get("ARC", 0) == 0
-    assert type_counts.get("RAY", 0) == 0
+    # RAY near the origin is ordinary construction geometry and must survive
+    assert type_counts.get("RAY", 0) == 1
     assert type_counts.get("3DFACE", 0) == 0
 
 

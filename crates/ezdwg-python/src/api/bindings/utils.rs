@@ -564,15 +564,14 @@ impl PolylineSequenceKind {
     }
 }
 
+/// Whether per-object decode failures are skipped instead of aborting the whole
+/// call. Every supported version is decoded best-effort now: a single object the
+/// decoder cannot read yet (an unusual MTEXT layout, a proxy payload, ...) must
+/// not make the entire drawing unreadable. Strict decoding was previously kept
+/// for R2004/R2007, which mostly surfaced object-index bugs as whole-file
+/// exceptions in the high-level API.
 fn is_best_effort_compat_version(decoder: &decoder::Decoder<'_>) -> bool {
-    matches!(
-        decoder.version(),
-        version::DwgVersion::R14
-            | version::DwgVersion::R2000
-            | version::DwgVersion::R2010
-            | version::DwgVersion::R2013
-            | version::DwgVersion::R2018
-    )
+    !matches!(decoder.version(), version::DwgVersion::Unknown(_))
 }
 
 fn resolve_r2010_object_data_end_bit(header: &ApiObjectHeader) -> crate::core::result::Result<u32> {

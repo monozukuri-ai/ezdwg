@@ -1,6 +1,7 @@
 from functools import lru_cache
 
 from ._core import (
+    decode_entity_placements,
     decode_entity_styles,
     decode_layer_colors,
     decode_layer_names,
@@ -112,6 +113,7 @@ __all__ = [
     "decode_unknown_embedded_text_entities",
     "decode_proxy_graphic_chunk_infos",
     "decode_proxy_graphic_text_entities",
+    "decode_entity_placements",
     "decode_entity_styles",
     "decode_layer_colors",
     "decode_layer_names",

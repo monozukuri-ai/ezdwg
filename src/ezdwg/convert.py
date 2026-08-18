@@ -65,7 +65,6 @@ from ._convert_geometry_filter import (
     _has_origin_anchor_far_lwpolyline_geometry,
     _has_tiny_origin_3dface_geometry,
     _has_tiny_origin_arc_geometry,
-    _has_tiny_origin_ray_geometry,
     _is_implausible_repeated_block_primitive,
     _is_plausible_text_content,
     _is_plausible_text_insert,
@@ -3110,12 +3109,15 @@ def _require_ezdxf():
 
 
 def _resolve_layout(source: str | Document | Layout) -> tuple[str, Layout]:
+    # The exporter rebuilds block definitions from owner handles itself, so it
+    # needs every entity in the file (model space, paper space and block
+    # contents); an explicit Layout is exported as-is.
     if isinstance(source, Layout):
         return source.doc.path, source
     if isinstance(source, Document):
-        return source.path, source.modelspace()
+        return source.path, source.entities()
     doc = read(source)
-    return str(source), doc.modelspace()
+    return str(source), doc.entities()
 
 
 def _populate_block_definitions(

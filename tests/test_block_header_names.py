@@ -52,7 +52,9 @@ def test_decode_insert_entities_r2018_resolves_some_block_names() -> None:
     assert counts["my_block"] == 4
     assert counts["_ArchTick"] == 2
     assert counts["_BoxBlank"] == 2
-    assert counts["*U"] == 3
+    # anonymous representation blocks are numbered uniquely ("*U8", "*U9", ...)
+    anonymous = [name for name in resolved if name.startswith("*U")]
+    assert len(anonymous) == 3 and len(set(anonymous)) == 3
     assert "*Model_Space" not in resolved
 
 
@@ -82,3 +84,36 @@ def test_decode_block_entity_name_maps_r2018_contains_dynamic_names_on_both_side
     endblk_names = {name for _handle, name in endblk_rows}
     assert "my-dynamic-block" in block_names
     assert "my-dynamic-block" in endblk_names
+
+
+def test_decode_block_header_names_r2007_reads_string_stream_names() -> None:
+    # R2007 (AC1021) keeps names in the string stream like R2010+; the RL
+    # "size in bits" at the top of the object is the data end.
+    rows = ezdwg.raw.decode_block_header_names(str(SAMPLES / "acadsharp" / "sample_AC1021.dwg"))
+    names = {name for _handle, name in rows}
+    assert {"*Model_Space", "*Paper_Space", "MyBlock", "my_block_v2", "my_block", "_ArchTick"} <= names
+    assert not any(name.startswith("{") for name in names)
+
+
+def test_decode_insert_entities_r2007_resolves_block_names() -> None:
+    rows = ezdwg.raw.decode_insert_entities(str(SAMPLES / "acadsharp" / "sample_AC1021.dwg"))
+    resolved = [name for *_rest, name in rows if name is not None]
+    assert len(rows) == 14
+    assert len(resolved) == len(rows)
+    counts = {name: resolved.count(name) for name in set(resolved)}
+    assert counts["MyBlock"] == 1
+    assert counts["my_block_v2"] == 2
+    assert counts["my_block"] == 4
+    assert counts["_ArchTick"] == 2
+    assert counts["_BoxBlank"] == 2
+    anonymous = [name for name in resolved if name.startswith("*U")]
+    assert len(anonymous) == 3 and len(set(anonymous)) == 3
+
+
+def test_anonymous_block_names_are_unique_and_numbered() -> None:
+    rows = ezdwg.raw.decode_block_header_names(str(SAMPLES / "acadsharp" / "sample_AC1032.dwg"))
+    names = [name for _handle, name in rows]
+    # the DWG stores bare "*D"/"*U"/"*T"; every header must come out numbered
+    assert not any(len(name) == 2 and name.startswith("*") for name in names)
+    anonymous_headers = {name for name in names if name.startswith("*") and name[1:2].isalpha() and name[2:].isdigit()}
+    assert {"*D1", "*U8"} <= anonymous_headers

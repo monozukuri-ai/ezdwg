@@ -171,7 +171,39 @@ class Document:
             object.__setattr__(self, "decode_version", self.version)
 
     def modelspace(self) -> "Layout":
+        """Entities that live in model space.
+
+        Membership comes from each entity's common header (``entmode``) and stored
+        owner handle: block-definition contents and paper-space entities are
+        excluded. Entities whose placement cannot be read stay included so nothing
+        is silently hidden.
+        """
         return Layout(self, "MODELSPACE")
+
+    def paperspace(self) -> "Layout":
+        """Entities that live in paper space (any layout)."""
+        return Layout(self, "PAPERSPACE")
+
+    def entities(self) -> "Layout":
+        """Every entity in the file: model space, paper space and block definitions.
+
+        Use ``Entity.dxf["owner_handle"]`` / ``Document.entity_placement()`` to
+        partition them (this is what ``ezdwg`` consumers that rebuild block
+        definitions themselves need).
+        """
+        return Layout(self, "ENTITIES")
+
+    def entity_placement(self, handle: int) -> tuple[int, int | None] | None:
+        """``(entmode, owner_handle)`` of an entity, or ``None`` when unknown.
+
+        ``entmode``: 0 = an owner handle is stored (block record or layout block),
+        1 = paper space, 2 = model space, 3 = other.
+        """
+        placement = _entity_placement_map(self.decode_path).get(int(handle))
+        if placement is None:
+            return None
+        mode, owner = placement
+        return mode, (owner or None)
 
     def plot(self, *args, **kwargs):
         from .render import plot
@@ -277,8 +309,9 @@ class Layout:
             entity_style_map = {}
             layer_color_map = {}
             layer_color_overrides = None
+        accepts = self._placement_filter()
         for dxftype in type_set:
-            yield from self._iter_type(
+            entities = self._iter_type(
                 dxftype,
                 bulk_rows=bulk_rows,
                 insert_minsert_rows=insert_minsert_rows,
@@ -288,6 +321,58 @@ class Layout:
                 layer_color_overrides=layer_color_overrides,
                 dimension_rows=dimension_rows,
             )
+            if accepts is None:
+                yield from entities
+                continue
+            for entity in entities:
+                if accepts(entity.handle):
+                    yield entity
+
+    def _placement_filter(self) -> Callable[[int], bool] | None:
+        """Return the membership predicate for this layout (None = accept all)."""
+        space = self.name.upper()
+        if space not in {"MODELSPACE", "PAPERSPACE"}:
+            return None
+        placements = _entity_placement_map(self.doc.decode_path)
+        if not placements:
+            return None
+        header_names = _block_header_name_map(self.doc.decode_path)
+        modelspace_owners = {
+            handle
+            for handle, name in header_names.items()
+            if name.strip().upper() in _MODELSPACE_BLOCK_NAMES
+        }
+        paperspace_owners = {
+            handle
+            for handle, name in header_names.items()
+            if name.strip().upper().startswith("*PAPER_SPACE")
+        }
+        want_model = space == "MODELSPACE"
+
+        def accepts(handle: int) -> bool:
+            placement = placements.get(int(handle))
+            if placement is None:
+                # unknown placement: keep in model space, never claim paper space
+                return want_model
+            mode, owner = placement
+            if mode == 2:
+                return want_model
+            if mode == 1:
+                return not want_model
+            if mode == 0 and owner:
+                if owner in modelspace_owners:
+                    return want_model
+                if owner in paperspace_owners:
+                    return not want_model
+                if owner in header_names:
+                    # owned by a named block record: block definition content
+                    return False
+                # owner is not a block record we know (minimal/writer files):
+                # do not hide it
+                return want_model
+            return want_model
+
+        return accepts
 
     def plot(self, *args, **kwargs):
         from .render import plot
@@ -2476,6 +2561,29 @@ def _infer_adjacent_recovered_text_layer_handle(
     if best is None:
         return None
     return best[2]
+
+
+_MODELSPACE_BLOCK_NAMES = {"*MODEL_SPACE", "*MODEL SPACE", "MODELSPACE"}
+
+
+@lru_cache(maxsize=16)
+def _entity_placement_map(path: str) -> dict[int, tuple[int, int]]:
+    """handle -> (entmode, owner_handle or 0) for every entity, from the common header."""
+    decode = getattr(raw, "decode_entity_placements", None)
+    if not callable(decode):
+        return {}
+    try:
+        rows = decode(path)
+    except Exception:
+        return {}
+    placements: dict[int, tuple[int, int]] = {}
+    for row in rows:
+        try:
+            handle, mode, owner = int(row[0]), int(row[1]), int(row[2])
+        except Exception:
+            continue
+        placements[handle] = (mode, owner)
+    return placements
 
 
 @lru_cache(maxsize=16)

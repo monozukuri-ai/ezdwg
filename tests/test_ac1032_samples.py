@@ -60,10 +60,13 @@ def test_ac1032_small_high_level_query_counts_match_raw_decode() -> None:
     assert SMALL_AC1032.exists(), f"missing sample: {SMALL_AC1032}"
 
     doc = ezdwg.read(str(SMALL_AC1032))
-    modelspace = doc.modelspace()
+    # entities() spans model space, paper space and block definitions, which is
+    # what the raw per-type decoders enumerate (this sample keeps its geometry
+    # inside dynamic block definitions, so modelspace() alone would be empty)
+    everything = doc.entities()
 
-    line_count = sum(1 for _ in modelspace.query("LINE"))
-    circle_count = sum(1 for _ in modelspace.query("CIRCLE"))
+    line_count = sum(1 for _ in everything.query("LINE"))
+    circle_count = sum(1 for _ in everything.query("CIRCLE"))
 
     assert doc.version == "AC1032"
     assert line_count == len(raw.decode_line_entities(str(SMALL_AC1032), limit=1000))

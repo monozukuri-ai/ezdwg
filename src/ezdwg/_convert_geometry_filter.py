@@ -60,21 +60,6 @@ def _has_tiny_origin_3dface_geometry(entity: Any) -> bool:
     return max(finite_values) <= 1.0e-6
 
 
-def _has_tiny_origin_ray_geometry(entity: Any) -> bool:
-    dxf = getattr(entity, "dxf", None)
-    if dxf is None:
-        return False
-    try:
-        start = getattr(dxf, "start")
-        start_x = float(getattr(start, "x", start[0]))
-        start_y = float(getattr(start, "y", start[1]))
-    except Exception:
-        return False
-    if not (math.isfinite(start_x) and math.isfinite(start_y)):
-        return False
-    return max(abs(start_x), abs(start_y)) <= 10.0
-
-
 def _has_origin_anchor_far_lwpolyline_geometry(entity: Any) -> bool:
     if _ezdxf_entity_type(entity) != "LWPOLYLINE":
         return False
@@ -99,11 +84,12 @@ def _has_origin_anchor_far_lwpolyline_geometry(entity: Any) -> bool:
 
 
 def _is_implausible_repeated_block_primitive(entity: Any) -> bool:
+    # RAY entities are not filtered: a construction ray starting near the origin
+    # is ordinary geometry, and the near-origin garbage this once compensated
+    # for came from the object-map handle drift fixed in the object index.
     dxftype = _ezdxf_entity_type(entity)
     if dxftype == "LWPOLYLINE":
         return _has_origin_anchor_far_lwpolyline_geometry(entity)
-    if dxftype == "RAY":
-        return _has_tiny_origin_ray_geometry(entity)
     if dxftype == "ARC":
         return _has_tiny_origin_arc_geometry(entity)
     if dxftype == "3DFACE":

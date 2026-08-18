@@ -207,7 +207,9 @@ def _run_inspect(path: str, *, verbose: bool = False) -> int:
     except Exception as exc:
         print(f"error: failed to read DWG: {exc}", file=sys.stderr)
         return 2
-    modelspace = doc.modelspace()
+    # inspect reports the whole file (model space, paper space and block
+    # definitions); use doc.modelspace() / doc.paperspace() to partition.
+    modelspace = doc.entities()
 
     counts: OrderedDict[str, int] = OrderedDict()
     record_diag_stats: dict[str, dict[str, int]] = {}

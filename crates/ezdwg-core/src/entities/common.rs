@@ -357,8 +357,10 @@ fn parse_common_entity_header_fields_from_entmode(
             let flags = reader.read_rs(Endian::Little)?;
             color.index = Some(flags & 0x01FF);
             if flags & 0x8000 != 0 {
+                // ENC (entity color): the RGB BL is followed by nothing else. Only
+                // the CMC form (used by tables/objects) carries color/book name
+                // strings; reading a TV here misaligned every true-color entity.
                 color.true_color = Some(reader.read_bl()?);
-                let _name = reader.read_tv()?;
             }
             if flags & 0x2000 != 0 {
                 let _transparency = reader.read_bl()?;

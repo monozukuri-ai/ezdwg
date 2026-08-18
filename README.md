@@ -56,6 +56,12 @@ for e in msp.query(
     print(e.dxftype, e.handle, e.dxf)
 ```
 
+`doc.modelspace()` yields only model-space entities (block-definition contents and
+paper-space entities are excluded via each entity's stored placement);
+`doc.paperspace()` yields paper-space entities and `doc.entities()` everything in
+the file, with `e.dxf["owner_handle"]` / `doc.entity_placement(handle)` to
+partition them yourself.
+
 Drawing units and header variables:
 
 ```python

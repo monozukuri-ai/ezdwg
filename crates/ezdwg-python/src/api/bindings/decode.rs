@@ -2037,6 +2037,80 @@ pub fn decode_proxy_graphic_text_entities(
     Ok(result)
 }
 
+/// Where each entity lives: `(handle, entmode, owner_handle)`. `entmode` is the
+/// common-entity-header value (0 = owner handle stored — a block record or a
+/// layout block, 1 = paper space, 2 = model space, 3 = other); `owner_handle` is
+/// the stored owner reference (0 when none is stored or it could not be read).
+/// Only the common entity header is parsed, so this is cheap and covers every
+/// entity type, including ones without a dedicated decoder.
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_entity_placements(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<EntityPlacementRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let dynamic_type_classes = load_dynamic_type_classes(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let version = decoder.version().clone();
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        let type_name = resolved_type_name(header.type_code, &dynamic_types);
+        if resolved_type_class(header.type_code, &type_name, &dynamic_type_classes) != "E" {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if skip_object_type_prefix(&mut reader, &version).is_err() {
+            continue;
+        }
+        let common = match version {
+            version::DwgVersion::R14 => continue,
+            version::DwgVersion::R2000 | version::DwgVersion::R2004 => {
+                entities::common::parse_common_entity_header(&mut reader)
+            }
+            version::DwgVersion::R2007 => {
+                entities::common::parse_common_entity_header_r2007(&mut reader)
+            }
+            version::DwgVersion::R2010 => match resolve_r2010_object_data_end_bit(&header) {
+                Ok(end_bit) => {
+                    entities::common::parse_common_entity_header_r2010(&mut reader, end_bit)
+                }
+                Err(_) => continue,
+            },
+            version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+                match resolve_r2010_object_data_end_bit(&header) {
+                    Ok(end_bit) => {
+                        entities::common::parse_common_entity_header_r2013(&mut reader, end_bit)
+                    }
+                    Err(_) => continue,
+                }
+            }
+            version::DwgVersion::Unknown(_) => continue,
+        };
+        let Ok(common) = common else {
+            continue;
+        };
+        reader.set_bit_pos(common.obj_size);
+        let owner = entities::common::parse_common_entity_handles(&mut reader, &common)
+            .ok()
+            .and_then(|handles| handles.owner_ref)
+            .unwrap_or(0);
+        result.push((obj.handle.0, common.entity_mode, owner));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<EntityStyleRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
