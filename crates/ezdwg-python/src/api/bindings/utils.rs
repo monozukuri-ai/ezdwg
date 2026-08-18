@@ -576,6 +576,9 @@ fn is_best_effort_compat_version(decoder: &decoder::Decoder<'_>) -> bool {
 }
 
 fn resolve_r2010_object_data_end_bit(header: &ApiObjectHeader) -> crate::core::result::Result<u32> {
+    if let Some(exact) = resolve_r2010_object_data_end_bit_exact(header) {
+        return Ok(exact);
+    }
     let total_bits = header
         .data_size
         .checked_mul(8)
@@ -591,16 +594,36 @@ fn resolve_r2010_object_data_end_bit(header: &ApiObjectHeader) -> crate::core::r
     })
 }
 
+/// Exact end of the R2010+ object data (= start of the handle stream) in
+/// record-body bit coordinates. The MC handle-stream-size counts from the end
+/// of its own field, so the data end is `data_start + size * 8 - handle_bits`.
+/// Verified on every BLOCK_HEADER of the R2010/R2013/R2018 samples: the string
+/// stream flag/size read relative to this end yields the block name exactly.
+/// `resolve_r2010_object_data_end_bit` keeps the historical (field-relative)
+/// value that the heuristics and their delta windows were tuned around.
+fn resolve_r2010_object_data_end_bit_exact(header: &ApiObjectHeader) -> Option<u32> {
+    let handle_bits = header.handle_stream_size_bits?;
+    let data_start = header.data_start_bit?;
+    header
+        .data_size
+        .checked_mul(8)?
+        .checked_add(data_start)?
+        .checked_sub(handle_bits)
+}
+
 fn resolve_r2010_object_data_end_bit_candidates(header: &ApiObjectHeader) -> Vec<u32> {
     let total_bits = header.data_size.saturating_mul(8);
     let Some(handle_bits) = header.handle_stream_size_bits else {
         return Vec::new();
     };
 
-    let bases = [
+    let mut bases = vec![
         total_bits.saturating_sub(handle_bits),
         total_bits.saturating_sub(handle_bits.saturating_sub(8)),
     ];
+    if let Some(exact) = resolve_r2010_object_data_end_bit_exact(header) {
+        bases.push(exact);
+    }
     let deltas = [-16i32, -8, 0, 8, 16];
 
     let mut out = Vec::new();
@@ -652,6 +675,10 @@ struct ApiObjectHeader {
     data_size: u32,
     type_code: u16,
     handle_stream_size_bits: Option<u32>,
+    /// R2010+: bit position (in the record body) where the object data starts,
+    /// i.e. right after the MC handle-stream-size field. See
+    /// `resolve_r2010_object_data_end_bit_exact`.
+    data_start_bit: Option<u32>,
 }
 
 fn parse_object_header_for_version(
@@ -665,6 +692,9 @@ fn parse_object_header_for_version(
                 data_size: header.data_size,
                 type_code: header.type_code,
                 handle_stream_size_bits: Some(header.handle_stream_size_bits),
+                data_start_bit: Some(
+                    u32::from(header.body_bit_pos).saturating_add(header.handle_size_field_bits),
+                ),
             })
         }
         _ => {
@@ -673,6 +703,7 @@ fn parse_object_header_for_version(
                 data_size: header.data_size,
                 type_code: header.type_code,
                 handle_stream_size_bits: None,
+                data_start_bit: None,
             })
         }
     }
@@ -751,6 +782,11 @@ fn resolve_r2010_string_stream_ranges(
     }
 
     let mut ranges = Vec::new();
+    // ODA layout first (size RS 16 bits before the present flag; verified on
+    // real files), then the historical variants as fallbacks.
+    if let Some(range) = resolve_r2010_string_stream_range_oda(base_reader, end_bit) {
+        ranges.push(range);
+    }
     if let Some(range) = resolve_r2010_string_stream_range_spec(base_reader, end_bit) {
         ranges.push(range);
     }
@@ -762,6 +798,41 @@ fn resolve_r2010_string_stream_ranges(
     ranges.sort_unstable();
     ranges.dedup();
     ranges
+}
+
+/// R2007+ string stream location per the ODA specification: the last bit of
+/// the object data is the "string stream present" flag; before it a RS holds
+/// the string data size in bits (with a second RS for the high part when bit
+/// 15 is set); the stream ends at the size field and starts `size` bits
+/// earlier. Returns `(start_bit, end_bit_of_strings)`.
+fn resolve_r2010_string_stream_range_oda(
+    base_reader: &BitReader<'_>,
+    end_bit: u32,
+) -> Option<(u32, u32)> {
+    if end_bit < 18 || u64::from(end_bit) > base_reader.total_bits() {
+        return None;
+    }
+    let mut flag_reader = base_reader.clone();
+    flag_reader.set_bit_pos(end_bit - 1);
+    if flag_reader.read_b().ok()? == 0 {
+        return None;
+    }
+    let mut size_field_start = end_bit - 1 - 16;
+    let mut size_reader = base_reader.clone();
+    size_reader.set_bit_pos(size_field_start);
+    let mut size_bits = u32::from(size_reader.read_rs(Endian::Little).ok()?);
+    if size_bits & 0x8000 != 0 {
+        size_field_start = size_field_start.checked_sub(16)?;
+        let mut hi_reader = base_reader.clone();
+        hi_reader.set_bit_pos(size_field_start);
+        let high = u32::from(hi_reader.read_rs(Endian::Little).ok()?);
+        size_bits = (size_bits & 0x7FFF) | (high << 15);
+    }
+    if size_bits == 0 {
+        return None;
+    }
+    let start_bit = size_field_start.checked_sub(size_bits)?;
+    Some((start_bit, size_field_start))
 }
 
 fn resolve_r2010_string_stream_range_spec(

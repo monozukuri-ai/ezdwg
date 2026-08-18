@@ -1,4 +1,4 @@
-use crate::bit::{BitReader, Endian};
+use crate::bit::BitReader;
 use crate::core::error::ErrorKind;
 use crate::core::result::Result;
 use crate::entities::common::{
@@ -55,8 +55,10 @@ fn decode_vertex_2d_with_header(
     allow_handle_decode_failure: bool,
     r2007_layer_only: bool,
 ) -> Result<Vertex2dEntity> {
-    // Flags are NOT bit-pair-coded in the DWG spec for VERTEX(2D).
-    let flags = reader.read_rs(Endian::Little)?;
+    // Flags are an "EC" (raw char, NOT bit-pair-coded) in the DWG spec for
+    // VERTEX(2D), like VERTEX(3D). Reading a raw short here shifted every
+    // following field by 8 bits and produced absurd coordinates.
+    let flags = u16::from(reader.read_rc()?);
     let position = reader.read_3bd()?;
 
     let mut start_width = reader.read_bd()?;

@@ -1,3 +1,14 @@
+
+/// Iterate a `HashMap` in ascending key order. Several recovery passes merge
+/// alias/name maps with `entry().or_insert()`, where two source keys can map
+/// to the same target handle; iterating in hash order made the winner depend
+/// on the process-random hasher seed (block names changed between runs).
+fn sorted_entries<K: Ord, V>(map: HashMap<K, V>) -> Vec<(K, V)> {
+    let mut entries: Vec<(K, V)> = map.into_iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+}
+
 fn prepare_insert_name_resolution_state(
     decoder: &decoder::Decoder<'_>,
     dynamic_types: &HashMap<u16, String>,
@@ -28,7 +39,7 @@ fn prepare_insert_name_resolution_state(
         best_effort,
         &block_header_names,
     )?;
-    for (header_handle, name) in recovered_header_names {
+    for (header_handle, name) in sorted_entries(recovered_header_names) {
         if name.is_empty() {
             continue;
         }
@@ -41,7 +52,7 @@ fn prepare_insert_name_resolution_state(
             block_header_names.entry(decoded_handle).or_insert(name);
         }
     }
-    for (alias_handle, name) in block_name_aliases {
+    for (alias_handle, name) in sorted_entries(block_name_aliases) {
         known_block_handles.insert(alias_handle);
         block_header_names.entry(alias_handle).or_insert(name);
     }
@@ -52,7 +63,7 @@ fn prepare_insert_name_resolution_state(
         best_effort,
         &block_header_names,
     )?;
-    for (alias_handle, name) in block_record_aliases {
+    for (alias_handle, name) in sorted_entries(block_record_aliases) {
         known_block_handles.insert(alias_handle);
         block_header_names.entry(alias_handle).or_insert(name);
     }
@@ -70,7 +81,7 @@ fn prepare_insert_name_resolution_state(
         &object_type_codes,
         &known_layer_handles,
     )?;
-    for (alias_handle, name) in stream_aliases {
+    for (alias_handle, name) in sorted_entries(stream_aliases) {
         known_block_handles.insert(alias_handle);
         block_header_names.entry(alias_handle).or_insert(name);
     }
@@ -228,7 +239,7 @@ fn decode_insert_entities_with_state(
             &state.block_header_names,
             &unresolved_handles,
         )?;
-        for (alias_handle, name) in targeted_aliases {
+        for (alias_handle, name) in sorted_entries(targeted_aliases) {
             state.known_block_handles.insert(alias_handle);
             state.block_header_names.entry(alias_handle).or_insert(name);
         }
@@ -297,7 +308,7 @@ fn decode_insert_entities_with_state(
                 &state.block_header_names,
                 &extra_targets,
             )?;
-            for (alias_handle, name) in targeted_aliases {
+            for (alias_handle, name) in sorted_entries(targeted_aliases) {
                 state.known_block_handles.insert(alias_handle);
                 state.block_header_names.entry(alias_handle).or_insert(name);
             }
@@ -310,11 +321,12 @@ fn decode_insert_entities_with_state(
         .ok()
         .is_some_and(|v| v != "0");
     for (handle, px, py, pz, sx, sy, sz, rotation, block_handle) in decoded_rows {
-        let mut resolved_name = state
-            .insert_block_names
-            .get(&handle)
-            .cloned()
-            .or_else(|| block_handle.and_then(|h| state.block_header_names.get(&h).cloned()));
+        // The block header handle parsed from the entity's own handle stream is
+        // authoritative when it names a known block header; the alias map built
+        // from block-header side heuristics is only a fallback.
+        let mut resolved_name = block_handle
+            .and_then(|h| state.block_header_names.get(&h).cloned())
+            .or_else(|| state.insert_block_names.get(&handle).cloned());
         if resolved_name.is_none() {
             if let Some(candidates) = unresolved_insert_candidates.get(&handle) {
                 resolved_name = candidates
@@ -463,7 +475,7 @@ fn decode_minsert_entities_with_state(
             &state.block_header_names,
             &unresolved_handles,
         )?;
-        for (alias_handle, name) in targeted_aliases {
+        for (alias_handle, name) in sorted_entries(targeted_aliases) {
             state.known_block_handles.insert(alias_handle);
             state.block_header_names.entry(alias_handle).or_insert(name);
         }
@@ -536,7 +548,7 @@ fn decode_minsert_entities_with_state(
                 &state.block_header_names,
                 &extra_targets,
             )?;
-            for (alias_handle, name) in targeted_aliases {
+            for (alias_handle, name) in sorted_entries(targeted_aliases) {
                 state.known_block_handles.insert(alias_handle);
                 state.block_header_names.entry(alias_handle).or_insert(name);
             }
@@ -561,11 +573,12 @@ fn decode_minsert_entities_with_state(
         block_handle,
     ) in decoded_rows
     {
-        let mut resolved_name = state
-            .insert_block_names
-            .get(&handle)
-            .cloned()
-            .or_else(|| block_handle.and_then(|h| state.block_header_names.get(&h).cloned()));
+        // The block header handle parsed from the entity's own handle stream is
+        // authoritative when it names a known block header; the alias map built
+        // from block-header side heuristics is only a fallback.
+        let mut resolved_name = block_handle
+            .and_then(|h| state.block_header_names.get(&h).cloned())
+            .or_else(|| state.insert_block_names.get(&handle).cloned());
         if resolved_name.is_none() {
             if let Some(candidates) = unresolved_minsert_candidates.get(&handle) {
                 resolved_name = candidates
@@ -926,28 +939,28 @@ pub fn decode_block_entity_names(
         let block_targets: HashSet<u64> = block_handles_in_order.iter().copied().collect();
         let endblk_targets: HashSet<u64> = endblk_handles_in_order.iter().copied().collect();
         if !block_targets.is_empty() {
-            for (handle, name) in collect_block_header_targeted_aliases_in_order(
+            for (handle, name) in sorted_entries(collect_block_header_targeted_aliases_in_order(
                 &decoder,
                 &dynamic_types,
                 &index,
                 best_effort,
                 &block_header_names,
                 &block_targets,
-            )? {
+            )?) {
                 if !name.is_empty() {
                     block_aliases.insert(handle, name);
                 }
             }
         }
         if !endblk_targets.is_empty() {
-            for (handle, name) in collect_block_header_targeted_aliases_in_order(
+            for (handle, name) in sorted_entries(collect_block_header_targeted_aliases_in_order(
                 &decoder,
                 &dynamic_types,
                 &index,
                 best_effort,
                 &block_header_names,
                 &endblk_targets,
-            )? {
+            )?) {
                 if !name.is_empty() {
                     endblk_aliases.insert(handle, name);
                 }
@@ -999,10 +1012,10 @@ pub fn decode_block_entity_names(
 
     let mut rows: Vec<BlockEntityNameRow> = Vec::new();
     rows.reserve(block_aliases.len().saturating_add(endblk_aliases.len()));
-    for (handle, name) in block_aliases {
+    for (handle, name) in sorted_entries(block_aliases) {
         rows.push((handle, "BLOCK".to_string(), name));
     }
-    for (handle, name) in endblk_aliases {
+    for (handle, name) in sorted_entries(endblk_aliases) {
         rows.push((handle, "ENDBLK".to_string(), name));
     }
     rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
@@ -1698,7 +1711,7 @@ fn collect_block_header_names_in_order(
         best_effort,
         &block_names,
     )?;
-    for (raw_handle, name) in recovered_header_names {
+    for (raw_handle, name) in sorted_entries(recovered_header_names) {
         if name.is_empty() {
             continue;
         }
@@ -2394,10 +2407,9 @@ fn parse_block_header_insert_handles_r2010_plus(
     let Some(handle_stream_size_bits) = api_header.handle_stream_size_bits else {
         return Vec::new();
     };
-    let Some(handle_start_bit) = total_bits
-        .checked_sub(handle_stream_size_bits as usize)
-        .and_then(|value| value.checked_add(16))
-    else {
+    // The record body now includes the MC handle-stream-size field, so the
+    // handle stream starts exactly `handle_stream_size_bits` before its end.
+    let Some(handle_start_bit) = total_bits.checked_sub(handle_stream_size_bits as usize) else {
         return Vec::new();
     };
     let Ok(handle_start_bit_u32) = u32::try_from(handle_start_bit) else {
@@ -3248,6 +3260,14 @@ fn decode_block_header_name_record(
         version,
         version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
     ) {
+        if let Some(name) = read_block_name_from_exact_string_stream(reader, api_header) {
+            let handle = if record_handle != 0 {
+                record_handle
+            } else {
+                expected_handle
+            };
+            return Ok((handle, name));
+        }
         let start_bit = reader.tell_bits() as u32;
         let total_bits = api_header
             .map(|header| header.data_size.saturating_mul(8))
@@ -3292,6 +3312,9 @@ fn decode_block_header_name_record(
 
         let canonical_end_bit =
             api_header.and_then(|header| resolve_r2010_object_data_end_bit(header).ok());
+        let debug_names = std::env::var("EZDWG_DEBUG_BLOCK_NAMES")
+            .ok()
+            .is_some_and(|v| v != "0");
         let base_reader = reader.clone();
         let mut best_name: Option<(u64, String)> = None;
         for end_bit in end_bit_candidates {
@@ -3302,7 +3325,15 @@ fn decode_block_header_name_record(
             {
                 let mut stream_reader = base_reader.clone();
                 stream_reader.set_bit_pos(stream_start_bit);
-                if let Ok(name) = read_tu(&mut stream_reader) {
+                let first = read_tu(&mut stream_reader);
+                if debug_names {
+                    eprintln!(
+                        "[block-name] handle={expected_handle} end_bit={end_bit} canonical={canonical_end_bit:?} stream=({stream_start_bit},{stream_end_bit}) first_tu={:?} tell={}",
+                        first.as_ref().ok(),
+                        stream_reader.tell_bits()
+                    );
+                }
+                if let Ok(name) = first {
                     if stream_reader.tell_bits() <= stream_end_bit as u64
                         && is_plausible_block_name(&name)
                     {
@@ -3319,6 +3350,9 @@ fn decode_block_header_name_record(
                     stream_end_bit,
                 ) {
                     let score = score_block_name_candidate(&name);
+                    if debug_names {
+                        eprintln!("[block-name]   scan={name:?} score={score}");
+                    }
                     match &stream_best {
                         Some((best_score, _)) if score >= *best_score => {}
                         _ => stream_best = Some((score, name)),
@@ -3355,6 +3389,11 @@ fn decode_block_header_name_record(
             if let Some(canonical_end) = canonical_end_bit {
                 score = score.saturating_add(canonical_end.abs_diff(end_bit) as u64);
             }
+            if debug_names {
+                eprintln!(
+                    "[block-name] handle={expected_handle} end_bit={end_bit} candidate={candidate_name:?} score={score}"
+                );
+            }
             match &best_name {
                 Some((best_score, _)) if score >= *best_score => {}
                 _ => best_name = Some((score, candidate_name)),
@@ -3371,6 +3410,38 @@ fn decode_block_header_name_record(
         expected_handle
     };
     Ok((handle, entry_name))
+}
+
+/// Spec path for R2010+ block names: the object data end comes from the header
+/// (`resolve_r2010_object_data_end_bit_exact`), the string stream flag/size sit
+/// right before it, and the block name is the first TU of the string stream.
+/// Falls back to the scanning heuristics when the layout does not check out.
+fn read_block_name_from_exact_string_stream(
+    base_reader: &BitReader<'_>,
+    api_header: Option<&ApiObjectHeader>,
+) -> Option<String> {
+    let header = api_header?;
+    let end_bit = resolve_r2010_object_data_end_bit_exact(header)?;
+    let (start_bit, stream_end_bit) = resolve_r2010_string_stream_range_oda(base_reader, end_bit)?;
+    let mut reader = base_reader.clone();
+    reader.set_bit_pos(start_bit);
+    let name = reader.read_tu().ok()?;
+    if reader.tell_bits() > u64::from(stream_end_bit) {
+        return None;
+    }
+    if !is_acceptable_exact_block_name(&name) {
+        return None;
+    }
+    Some(name)
+}
+
+/// Names read from the exact string-stream position only need to be sane
+/// (non-empty, no control characters, DXF length limit); unlike the scan
+/// candidates they may contain non-ASCII characters (Japanese block names).
+fn is_acceptable_exact_block_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= 255
+        && !name.chars().any(|ch| ch.is_control() || ch == '\u{FFFD}')
 }
 
 fn parse_block_header_nonstring_data_r2010_plus(

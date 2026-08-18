@@ -134,9 +134,14 @@ impl<'a> Decoder<'a> {
         match self.version {
             DwgVersion::R14 | DwgVersion::R2000 => r2000::parse_object_record(self.bytes, offset)
                 .map(|record| record.with_codepage(self.codepage)),
-            DwgVersion::R2004 | DwgVersion::R2010 | DwgVersion::R2013 | DwgVersion::R2018 => {
+            DwgVersion::R2004 => {
                 let data = self.load_objects_section_data()?;
                 r2004::parse_object_record_from_section_data(data, offset)
+                    .map(|record| record.with_codepage(self.codepage))
+            }
+            DwgVersion::R2010 | DwgVersion::R2013 | DwgVersion::R2018 => {
+                let data = self.load_objects_section_data()?;
+                r2004::parse_object_record_from_section_data_r2010(data, offset)
                     .map(|record| record.with_codepage(self.codepage))
             }
             DwgVersion::R2007 => {

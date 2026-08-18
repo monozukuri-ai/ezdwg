@@ -111,7 +111,7 @@ fn parse_object_map(bytes: &[u8], _config: &ParseConfig) -> Result<ObjectIndex> 
         }
 
         while (reader.tell() - start) < (section_size as u64 - 2) {
-            let delta_handle = read_modular_char(&mut reader)?;
+            let delta_handle = read_unsigned_modular_char(&mut reader)?;
             let delta_offset = read_modular_char(&mut reader)?;
             last_handle = last_handle.checked_add(delta_handle).ok_or_else(|| {
                 DwgError::new(ErrorKind::Format, "object map handle overflow")
@@ -155,6 +155,27 @@ fn read_u16_be(reader: &mut ByteReader<'_>) -> Result<u16> {
     let hi = reader.read_u8()? as u16;
     let lo = reader.read_u8()? as u16;
     Ok((hi << 8) | lo)
+}
+
+/// Object-map handle offsets are unsigned modular chars: the ODA specification
+/// notes that "there is no negation used; handles in the object map are always
+/// in increasing order". Decoding them with the signed reader turned every
+/// terminating byte with bit 0x40 set into a negative delta, which shifted the
+/// handles of all following entries in that section (and dropped entries as
+/// "negative"), so objects were indexed under the wrong handles.
+fn read_unsigned_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
+    let mut value: i64 = 0;
+    let mut shift = 0;
+
+    for _ in 0..5 {
+        let byte = reader.read_u8()?;
+        value |= ((byte & 0x7F) as i64) << shift;
+        if (byte & 0x80) == 0 {
+            return Ok(value);
+        }
+        shift += 7;
+    }
+    Ok(value)
 }
 
 fn read_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {

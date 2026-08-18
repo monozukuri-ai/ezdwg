@@ -9,7 +9,7 @@ use crate::core::result::Result;
 use crate::dwg::version::{detect_version, DwgVersion};
 use crate::entities;
 use crate::io::ByteReader;
-use crate::objects::object_record::parse_object_record_owned;
+use crate::objects::object_record::{parse_object_record_owned, parse_object_record_owned_r2010};
 use crate::objects::{Handle, ObjectClass, ObjectIndex, ObjectRecord, ObjectRef};
 
 const HEADER_OFFSET: usize = 0x80;
@@ -558,6 +558,16 @@ pub fn parse_object_record_from_section_data(
     offset: u32,
 ) -> Result<ObjectRecord<'static>> {
     parse_object_record_owned(data, offset)
+}
+
+/// R2010+ objects: the MS size excludes the MC handle-stream-size field, so the
+/// record body must be extended by that field's width (see
+/// `objects::object_record::parse_object_record_r2010`).
+pub fn parse_object_record_from_section_data_r2010(
+    data: &[u8],
+    offset: u32,
+) -> Result<ObjectRecord<'static>> {
+    parse_object_record_owned_r2010(data, offset)
 }
 
 pub fn parse_object_record<'a>(
@@ -1508,7 +1518,7 @@ fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<Object
         while (reader.tell() - start) < (section_size as u64 - 2) {
             let prev_handle = last_handle;
             let prev_offset = last_offset;
-            last_handle += read_modular_char(&mut reader)?;
+            last_handle += read_unsigned_modular_char(&mut reader)?;
             last_offset += read_modular_char(&mut reader)?;
 
             if last_handle < 0 || last_offset < 0 {
@@ -1564,6 +1574,27 @@ fn read_u16_be(reader: &mut ByteReader<'_>) -> Result<u16> {
     let hi = reader.read_u8()? as u16;
     let lo = reader.read_u8()? as u16;
     Ok((hi << 8) | lo)
+}
+
+/// Object-map handle offsets are unsigned modular chars: the ODA specification
+/// notes that "there is no negation used; handles in the object map are always
+/// in increasing order". Decoding them with the signed reader turned every
+/// terminating byte with bit 0x40 set into a negative delta, which shifted the
+/// handles of all following entries in that section (and dropped entries as
+/// "negative"), so objects were indexed under the wrong handles.
+fn read_unsigned_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
+    let mut value: i64 = 0;
+    let mut shift = 0;
+
+    for _ in 0..5 {
+        let byte = reader.read_u8()?;
+        value |= ((byte & 0x7F) as i64) << shift;
+        if (byte & 0x80) == 0 {
+            return Ok(value);
+        }
+        shift += 7;
+    }
+    Ok(value)
 }
 
 fn read_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
@@ -2166,15 +2197,35 @@ mod tests {
     }
 
     #[test]
-    fn parse_object_map_handles_skips_negative_deltas_in_permissive_mode() {
-        // One handles block with three entries:
-        // 1) (+5, +10) -> valid
-        // 2) (-20, +1) -> cumulative handle becomes negative (skip in permissive mode)
-        // 3) (+30, +5) -> cumulative values become valid again
+    fn parse_object_map_handles_reads_handle_deltas_as_unsigned() {
+        // Handle offsets are unsigned modular chars (ODA: "no negation used;
+        // handles in the object map are always in increasing order"), so a
+        // terminating byte with bit 0x40 set is a plain value, not a sign.
         let bytes = vec![
             0x00, 0x08, // section_size = 8 (2 bytes header + 6 bytes payload)
             0x05, 0x0A, // +5, +10
-            0x54, 0x01, // -20, +1  (0x40 sign bit on final byte)
+            0x54, 0x01, // +84 (0x54 unsigned), +1
+            0x1E, 0x05, // +30, +5
+            0x00, 0x00, // crc
+            0x00, 0x02, // terminator section
+        ];
+        let index = parse_object_map_handles(&bytes, &ParseConfig::default()).expect("index");
+        let refs: Vec<(u64, u32)> = index
+            .objects
+            .iter()
+            .map(|obj| (obj.handle.0, obj.offset))
+            .collect();
+        assert_eq!(refs, vec![(5, 10), (89, 11), (119, 16)]);
+    }
+
+    #[test]
+    fn parse_object_map_handles_skips_negative_offsets_in_permissive_mode() {
+        // Location offsets stay signed; a cumulative negative offset is skipped
+        // in permissive mode and the running values are kept.
+        let bytes = vec![
+            0x00, 0x08, // section_size = 8 (2 bytes header + 6 bytes payload)
+            0x05, 0x0A, // +5, +10
+            0x01, 0x54, // +1, -20 -> cumulative offset negative (skip)
             0x1E, 0x05, // +30, +5
             0x00, 0x00, // crc
             0x00, 0x02, // terminator section
@@ -2188,11 +2239,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_object_map_handles_rejects_negative_deltas_in_strict_mode() {
+    fn parse_object_map_handles_rejects_negative_offsets_in_strict_mode() {
         let bytes = vec![
             0x00, 0x06, // section_size = 6 (2 bytes header + 4 bytes payload)
             0x05, 0x0A, // +5, +10
-            0x54, 0x01, // -20, +1 -> cumulative handle negative
+            0x01, 0x54, // +1, -20 -> cumulative offset negative
             0x00, 0x00, // crc
             0x00, 0x02, // terminator section
         ];

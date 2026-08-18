@@ -36,12 +36,24 @@ def test_decode_block_header_names_r2018_contains_model_space() -> None:
 
 
 def test_decode_insert_entities_r2018_resolves_some_block_names() -> None:
+    # Ground truth from the ACadSharp DXF twin (acad-ts/samples/sample_AC1032_ascii.dxf):
+    # 14 INSERTs referencing MyBlock, my_block_v2 (x2), my_block (x4), _ArchTick (x2),
+    # _BoxBlank (x2) and the anonymous representation blocks of the dynamic block
+    # ("*U..." in DXF; the DWG stores the bare "*U" and AutoCAD numbers them on load).
+    # Dynamic-block instances reference those representation blocks, not
+    # "my-dynamic-block" itself (that link lives in AcDbBlockRepBTag xdata).
     rows = ezdwg.raw.decode_insert_entities(str(SAMPLES / "acadsharp" / "sample_AC1032.dwg"))
     resolved = [name for *_rest, name in rows if name is not None]
+    assert len(rows) == 14
     assert len(resolved) == len(rows)
-    assert "my-dynamic-block" in resolved
-    assert "my_block_v2" in resolved
-    assert "*Model_Space" in resolved
+    counts = {name: resolved.count(name) for name in set(resolved)}
+    assert counts["MyBlock"] == 1
+    assert counts["my_block_v2"] == 2
+    assert counts["my_block"] == 4
+    assert counts["_ArchTick"] == 2
+    assert counts["_BoxBlank"] == 2
+    assert counts["*U"] == 3
+    assert "*Model_Space" not in resolved
 
 
 def test_decode_block_entity_names_r18_contains_block_and_endblk_names() -> None:
