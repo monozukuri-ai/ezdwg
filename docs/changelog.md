@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- Added `ezdwg.clear_decode_caches()` so long-running batch converters can
+  release per-file decoded tables and entity metadata after finishing a DWG.
 - Header-variables decoding across `AC1015`-`AC1032`: `Document.header_variables()`
   ($INSUNITS, $LUNITS/$LUPREC, $AUNITS/$AUPREC, $LTSCALE, $TEXTSIZE, model-space
   $EXTMIN/$EXTMAX/$LIMMIN/$LIMMAX) plus the `Document.units` / `Document.insunits`

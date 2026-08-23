@@ -157,6 +157,23 @@ def read(path: str) -> "Document":
     return Document(path=path, version=version)
 
 
+def clear_decode_caches() -> None:
+    """Release module-level decode caches retained for previously read files.
+
+    ``ezdwg`` caches decoded DWG tables and entity metadata because many
+    ``Document`` methods reuse the same native decoder results. Long-running
+    batch converters can call this after finishing a document so those cached
+    collections do not keep the complete source model alive.
+    """
+    seen: set[int] = set()
+    for value in tuple(globals().values()):
+        cache_clear = getattr(value, "cache_clear", None)
+        value_id = id(value)
+        if callable(cache_clear) and value_id not in seen:
+            cache_clear()
+            seen.add(value_id)
+
+
 @dataclass(frozen=True)
 class Document:
     path: str

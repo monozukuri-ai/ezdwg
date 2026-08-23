@@ -27,6 +27,26 @@ print(doc.version)
 
 ---
 
+## ezdwg.clear_decode_caches
+
+```python
+ezdwg.clear_decode_caches() -> None
+```
+
+Release module-level DWG decode caches. A long-running batch converter can call
+this after it has finished using a `Document` so decoded tables and entity
+metadata from earlier files are not retained.
+
+```python
+for path in drawing_paths:
+    try:
+        process(ezdwg.read(path))
+    finally:
+        ezdwg.clear_decode_caches()
+```
+
+---
+
 ## ezdwg.plot
 
 ```python
