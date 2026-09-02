@@ -412,8 +412,9 @@ fn decode_hatch_body(
     let associative = reader.read_b()? != 0;
 
     let num_paths = bounded_count(reader.read_bl()?, "hatch paths")?;
-    let mut paths = Vec::with_capacity(num_paths);
+    let mut paths = Vec::with_capacity(num_paths.min(4096));
     let mut any_path_uses_pixel_size = false;
+    let mut tessellated_points: usize = 0;
 
     for _ in 0..num_paths {
         let path_flag = reader.read_bl()?;
@@ -428,7 +429,10 @@ fn decode_hatch_body(
                     1 => {
                         let start = read_point2rd(reader)?;
                         let end = read_point2rd(reader)?;
+                        require_plausible_hatch_point(start, "line edge start")?;
+                        require_plausible_hatch_point(end, "line edge end")?;
                         append_segment_points(&mut path_points, &[start, end]);
+                        charge_hatch_points(&mut tessellated_points, 2)?;
                     }
                     2 => {
                         let center = read_point2rd(reader)?;
@@ -436,8 +440,13 @@ fn decode_hatch_body(
                         let start_angle = reader.read_bd()?;
                         let end_angle = reader.read_bd()?;
                         let is_ccw = reader.read_b()? != 0;
+                        require_plausible_hatch_point(center, "arc edge center")?;
+                        require_plausible_hatch_scalar(radius, "arc edge radius")?;
+                        require_plausible_hatch_scalar(start_angle, "arc edge start angle")?;
+                        require_plausible_hatch_scalar(end_angle, "arc edge end angle")?;
                         let segment =
                             circular_arc_points(center, radius, start_angle, end_angle, is_ccw, 64);
+                        charge_hatch_points(&mut tessellated_points, segment.len())?;
                         append_segment_points(&mut path_points, &segment);
                     }
                     3 => {
@@ -447,6 +456,11 @@ fn decode_hatch_body(
                         let start_angle = reader.read_bd()?;
                         let end_angle = reader.read_bd()?;
                         let is_ccw = reader.read_b()? != 0;
+                        require_plausible_hatch_point(center, "ellipse edge center")?;
+                        require_plausible_hatch_point(major_endpoint, "ellipse edge major endpoint")?;
+                        require_plausible_hatch_scalar(ratio, "ellipse edge ratio")?;
+                        require_plausible_hatch_scalar(start_angle, "ellipse edge start angle")?;
+                        require_plausible_hatch_scalar(end_angle, "ellipse edge end angle")?;
                         let segment = elliptical_arc_points(
                             center,
                             major_endpoint,
@@ -456,10 +470,12 @@ fn decode_hatch_body(
                             is_ccw,
                             96,
                         );
+                        charge_hatch_points(&mut tessellated_points, segment.len())?;
                         append_segment_points(&mut path_points, &segment);
                     }
                     4 => {
                         let segment = spline_edge_points(reader, spline_fit_points)?;
+                        charge_hatch_points(&mut tessellated_points, segment.len())?;
                         append_segment_points(&mut path_points, &segment);
                     }
                     _ => {
@@ -482,12 +498,29 @@ fn decode_hatch_body(
         let bulges_present = reader.read_b()? != 0;
         let closed = reader.read_b()? != 0;
         let num_vertices = bounded_count(reader.read_bl()?, "hatch polyline vertices")?;
-        let mut vertices: Vec<(f64, f64)> = Vec::with_capacity(num_vertices);
-        let mut bulges: Vec<f64> = Vec::with_capacity(num_vertices);
+        charge_hatch_points(&mut tessellated_points, num_vertices)?;
+        // バルジは頂点ごとに最大64点へ増幅される。中間バッファの瞬間確保も
+        // 抑えるため、バルジ付きは頂点数自体を実務上十分な範囲に制限する
+        if bulges_present && num_vertices > 65_536 {
+            return Err(DwgError::new(
+                ErrorKind::Format,
+                format!("hatch bulge polyline vertex count is too large: {num_vertices}"),
+            ));
+        }
+        let mut vertices: Vec<(f64, f64)> = Vec::with_capacity(num_vertices.min(65_536));
+        let mut bulges: Vec<f64> = Vec::with_capacity(if bulges_present {
+            num_vertices.min(65_536)
+        } else {
+            0
+        });
         for _ in 0..num_vertices {
-            vertices.push(read_point2rd(reader)?);
+            let point = read_point2rd(reader)?;
+            require_plausible_hatch_point(point, "polyline vertex")?;
+            vertices.push(point);
             if bulges_present {
-                bulges.push(reader.read_bd()?);
+                let bulge = reader.read_bd()?;
+                require_plausible_hatch_scalar(bulge, "polyline bulge")?;
+                bulges.push(bulge);
             }
         }
         let _num_boundary_obj_handles = reader.read_bl()?;
@@ -497,6 +530,11 @@ fn decode_hatch_body(
         } else {
             vertices
         };
+        // 増幅後の実点数で課金(読み取り時に頂点数分は課金済み)
+        charge_hatch_points(
+            &mut tessellated_points,
+            points.len().saturating_sub(num_vertices),
+        )?;
         if closed {
             close_path_if_needed(&mut points);
         }
@@ -684,6 +722,26 @@ fn hatch_flag_bit_before(base_reader: &BitReader<'_>, start_bit: u32, offset: u3
     let mut reader = base_reader.clone();
     reader.set_bit_pos(bit_pos);
     reader.read_b().ok().map(|bit| bit != 0)
+}
+
+fn require_plausible_hatch_point(point: (f64, f64), context: &str) -> Result<()> {
+    if is_plausible_hatch_point(point) {
+        return Ok(());
+    }
+    Err(DwgError::new(
+        ErrorKind::Format,
+        format!("implausible HATCH {context}: ({}, {})", point.0, point.1),
+    ))
+}
+
+fn require_plausible_hatch_scalar(value: f64, context: &str) -> Result<()> {
+    if value.is_finite() && value.abs() <= 1.0e8 {
+        return Ok(());
+    }
+    Err(DwgError::new(
+        ErrorKind::Format,
+        format!("implausible HATCH {context}: {value}"),
+    ))
 }
 
 fn is_plausible_hatch_point(point: (f64, f64)) -> bool {
@@ -1084,6 +1142,24 @@ fn normalized_sweep(start_angle: f64, end_angle: f64, is_ccw: bool) -> f64 {
 
 fn points_equal_2d(a: (f64, f64), b: (f64, f64)) -> bool {
     (a.0 - b.0).abs() <= 1.0e-9 && (a.1 - b.1).abs() <= 1.0e-9
+}
+
+/// 1つのHATCHが展開してよいテッセレーション点数の上限。実務図面のハッチは
+/// 数千点で足りる。壊れた境界データは円弧セグメント1個あたり64点(楕円96点)に
+/// 増幅されるため、カウント上限(bounded_count)だけでは数GBに膨らみうる。
+const MAX_HATCH_TESSELLATION_POINTS: usize = 262_144;
+
+fn charge_hatch_points(total: &mut usize, additional: usize) -> Result<()> {
+    *total = total.saturating_add(additional);
+    if *total > MAX_HATCH_TESSELLATION_POINTS {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            format!(
+                "hatch tessellation exceeds {MAX_HATCH_TESSELLATION_POINTS} points"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn bounded_count(raw: u32, label: &str) -> Result<usize> {
