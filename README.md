@@ -86,10 +86,18 @@ doc.plot()
 uvx ezdwg --version
 uvx ezdwg inspect examples/data/line_2000.dwg
 uvx ezdwg inspect examples/data/line_2000.dwg --verbose
+uvx --from "ezdwg[plot]" ezdwg plot examples/data/line_2000.dwg
+uvx --from "ezdwg[plot]" ezdwg plot examples/data/line_2000.dwg -o /tmp/line_2000.png --dpi 200
 uvx --from "ezdwg[dxf]" ezdwg convert examples/data/line_2000.dwg /tmp/line_2000_out.dxf
 uvx --from "ezdwg[dxf]" ezdwg convert examples/data/arc_2000.dwg /tmp/arc_2000_out.dxf --types "ARC" --dxf-version R2010
 uvx ezdwg write examples/data/line_2000.dwg /tmp/line_2000_out.dwg --types "LINE" --dwg-version AC1015
 ```
+
+`plot` displays model-space entities in a matplotlib window, or opens an SVG
+preview in your browser when no interactive backend is available. Use `-o` / `--output`
+to save a PNG, SVG, or PDF without opening a viewer; `--types` and `--title`
+filter entities and set the title. For local development, run
+`uv run --extra plot ezdwg plot path/to/file.dwg`.
 
 ## DWG to DXF
 `ezdxf` is used as the DXF writing backend.

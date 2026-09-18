@@ -255,13 +255,13 @@ def test_plot_layout_attrib_uses_text_drawer(monkeypatch) -> None:
     assert captured == ["TAGVAL"]
 
 
-def test_plot_layout_minsert_uses_point_drawer(monkeypatch) -> None:
+def test_plot_layout_minsert_uses_reference_marker(monkeypatch) -> None:
     captured: list[tuple[float, float, float]] = []
     monkeypatch.setattr(render_module, "_require_matplotlib", lambda: object())
     monkeypatch.setattr(
         render_module,
-        "_draw_point",
-        lambda _ax, location, _line_width, color=None: captured.append(location),
+        "_draw_reference_point",
+        lambda _ax, location, color=None: captured.append(location),
     )
 
     layout = _FakeLayout([SimpleNamespace(dxftype="MINSERT", dxf={"insert": (3.0, 4.0, 0.0)})])
@@ -272,13 +272,13 @@ def test_plot_layout_minsert_uses_point_drawer(monkeypatch) -> None:
     assert captured == [(3.0, 4.0, 0.0)]
 
 
-def test_plot_layout_insert_uses_point_drawer(monkeypatch) -> None:
+def test_plot_layout_insert_uses_reference_marker(monkeypatch) -> None:
     captured: list[tuple[float, float, float]] = []
     monkeypatch.setattr(render_module, "_require_matplotlib", lambda: object())
     monkeypatch.setattr(
         render_module,
-        "_draw_point",
-        lambda _ax, location, _line_width, color=None: captured.append(location),
+        "_draw_reference_point",
+        lambda _ax, location, color=None: captured.append(location),
     )
 
     layout = _FakeLayout([SimpleNamespace(dxftype="INSERT", dxf={"insert": (5.0, 6.0, 0.0)})])

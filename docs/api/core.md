@@ -57,7 +57,7 @@ ezdwg.plot(
     show: bool = True,
     equal: bool = True,
     title: str | None = None,
-    line_width: float = 1.0,
+    line_width: float = 0.5,
     arc_segments: int = 64,
     auto_fit: bool = True,
     fit_margin: float = 0.04,
@@ -77,7 +77,7 @@ Plot DWG entities using matplotlib.
 | `show` | `bool` | `True` | Call `plt.show()` |
 | `equal` | `bool` | `True` | Equal aspect ratio |
 | `title` | `str \| None` | `None` | Plot title |
-| `line_width` | `float` | `1.0` | Line width |
+| `line_width` | `float` | `0.5` | Geometry stroke width in points; dimensions use thinner strokes |
 | `arc_segments` | `int` | `64` | Segments for arcs |
 | `auto_fit` | `bool` | `True` | Auto-fit view bounds |
 | `fit_margin` | `float` | `0.04` | Margin fraction |

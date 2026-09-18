@@ -51,7 +51,7 @@ jobs:
         shell: bash
         run: |
           "${VENV_PY}" -m pip install --upgrade pip
-          "${VENV_PY}" -m pip install maturin pytest ezdxf
+          "${VENV_PY}" -m pip install maturin pytest ezdxf matplotlib
 
       - name: Rust tests
         run: cargo test --all --quiet

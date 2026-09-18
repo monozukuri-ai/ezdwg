@@ -93,8 +93,20 @@ def _package_version() -> str:
         return "0.0.0"
 
 
+def _positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a positive integer") from None
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ezdwg", description="Inspect, convert, and write DWG files.")
+    parser = argparse.ArgumentParser(
+        prog="ezdwg", description="Inspect, plot, convert, and write DWG files."
+    )
     parser.add_argument(
         "--version",
         action="version",
@@ -109,6 +121,28 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show expanded diagnostics (e.g. more unknown handle/type-code entries).",
     )
+
+    plot_parser = subparsers.add_parser(
+        "plot", help="Display a DWG drawing in a window or browser, or save it to an image."
+    )
+    plot_parser.add_argument("path", help="Path to DWG file.")
+    plot_parser.add_argument(
+        "-o",
+        "--output",
+        help="Save to a file instead of displaying the drawing (e.g. PNG, SVG, PDF).",
+    )
+    plot_parser.add_argument(
+        "--types",
+        default=None,
+        help='Entity filter passed to query(), e.g. "LINE ARC LWPOLYLINE".',
+    )
+    plot_parser.add_argument(
+        "--dpi",
+        type=_positive_int,
+        default=150,
+        help="Resolution for saved images (positive integer; default: 150).",
+    )
+    plot_parser.add_argument("--title", default=None, help="Drawing title.")
 
     convert_parser = subparsers.add_parser(
         "convert",
@@ -358,6 +392,94 @@ def _run_inspect(path: str, *, verbose: bool = False) -> int:
     return 0
 
 
+def _show_plot(figure) -> None:
+    from matplotlib.backend_bases import FigureManagerBase
+
+    # Non-interactive backends inherit the base show() implementation, which
+    # only warns (or silently returns on headless Linux) instead of displaying.
+    if type(figure.canvas.manager).show is not FigureManagerBase.show:
+        import matplotlib.pyplot as plt
+
+        plt.show()
+        return
+
+    import tempfile
+    import webbrowser
+
+    # Keep the SVG after this process exits so the browser can finish loading it.
+    # The OS temporary directory owns its lifetime; no HTTP server is needed.
+    with tempfile.NamedTemporaryFile(prefix="ezdwg-plot-", suffix=".svg", delete=False) as stream:
+        preview_path = Path(stream.name)
+        try:
+            figure.savefig(stream, format="svg", bbox_inches="tight")
+        except Exception:
+            stream.close()
+            preview_path.unlink(missing_ok=True)
+            raise
+
+    preview_uri = preview_path.as_uri()
+    print(f"preview: {preview_uri}")
+    message = f"could not open a browser automatically; open {preview_uri} manually"
+    try:
+        opened = webbrowser.open(preview_uri)
+    except (webbrowser.Error, OSError) as exc:
+        raise RuntimeError(message) from exc
+    if not opened:
+        raise RuntimeError(message)
+
+
+def _run_plot(
+    path: str,
+    *,
+    output_path: str | None = None,
+    types: str | None = None,
+    dpi: int = 150,
+    title: str | None = None,
+) -> int:
+    file_path = Path(path)
+    if not file_path.is_file():
+        print(f"error: file not found: {file_path}", file=sys.stderr)
+        return 2
+
+    try:
+        import matplotlib
+    except ImportError:
+        print(
+            'error: plotting requires matplotlib; install it with '
+            '`pip install "ezdwg[plot]"` '
+            '(in this repository: `uv run --extra plot ezdwg plot ...`).',
+            file=sys.stderr,
+        )
+        return 2
+
+    figure = None
+    try:
+        if output_path is not None:
+            # Saving must also work on machines without a display or GUI toolkit.
+            matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        doc = read(str(file_path))
+        figure, ax = plt.subplots(figsize=(12, 8))
+        ax.set_axis_off()
+        doc.plot(types=types, ax=ax, show=False, title=title, dimension_color="#606060")
+        if output_path is not None:
+            figure.savefig(output_path, dpi=dpi, bbox_inches="tight")
+        else:
+            _show_plot(figure)
+    except Exception as exc:
+        print(f"error: failed to plot DWG: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        if figure is not None:
+            plt.close(figure)
+
+    if output_path is not None:
+        print(f"input: {file_path}")
+        print(f"output: {output_path}")
+    return 0
+
+
 def _run_convert(
     input_path: str,
     output_path: str,
@@ -447,6 +569,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "inspect":
         return _run_inspect(args.path, verbose=bool(args.verbose))
+    if args.command == "plot":
+        return _run_plot(
+            args.path,
+            output_path=args.output,
+            types=args.types,
+            dpi=args.dpi,
+            title=args.title,
+        )
     if args.command == "convert":
         explode_dimensions = bool(args.explode_dimensions)
         if bool(args.native_dimensions):

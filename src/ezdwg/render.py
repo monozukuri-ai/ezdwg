@@ -10,7 +10,7 @@ def plot(
     show: bool = True,
     equal: bool = True,
     title: str | None = None,
-    line_width: float = 1.0,
+    line_width: float = 0.5,
     arc_segments: int = 64,
     auto_fit: bool = True,
     fit_margin: float = 0.04,
@@ -39,7 +39,7 @@ def plot_layout(
     show: bool = True,
     equal: bool = True,
     title: str | None = None,
-    line_width: float = 1.0,
+    line_width: float = 0.5,
     arc_segments: int = 64,
     auto_fit: bool = True,
     fit_margin: float = 0.04,
@@ -53,6 +53,7 @@ def plot_layout(
         color = _resolve_dwg_color(entity.dxf)
         if color is None:
             color = "#000000"
+        color = _readable_color(ax, color)
         dxftype = entity.dxftype
         if dxftype == "LINE":
             _draw_line(ax, entity.dxf["start"], entity.dxf["end"], line_width, color=color)
@@ -265,12 +266,12 @@ def plot_layout(
                 arc_segments=arc_segments,
             )
         elif dxftype == "INSERT":
-            _draw_point(ax, entity.dxf.get("insert", (0.0, 0.0, 0.0)), line_width, color=color)
+            _draw_reference_point(ax, entity.dxf.get("insert", (0.0, 0.0, 0.0)), color=color)
         elif dxftype == "MINSERT":
-            _draw_point(ax, entity.dxf.get("insert", (0.0, 0.0, 0.0)), line_width, color=color)
+            _draw_reference_point(ax, entity.dxf.get("insert", (0.0, 0.0, 0.0)), color=color)
         elif dxftype == "DIMENSION":
-            dim_color = color if dimension_color is None else dimension_color
-            _draw_dimension(ax, entity.dxf, line_width, color=dim_color)
+            dim_color = color if dimension_color is None else _readable_color(ax, dimension_color)
+            _draw_dimension(ax, entity.dxf, line_width * 0.65, color=dim_color)
 
     if title:
         ax.set_title(title)
@@ -331,6 +332,23 @@ def _resolve_dwg_color(dxf):
                 return mapped
 
     return None
+
+
+def _readable_color(ax, color):
+    """Keep bright CAD colors legible on a light canvas, preserving their hue."""
+    if not hasattr(ax, "get_facecolor"):
+        return color
+    from matplotlib.colors import to_rgba
+
+    background = ax.get_facecolor()
+    if min(background[:3]) < 0.85:
+        return color
+    red, green, blue, alpha = to_rgba(color)
+    brightness = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    if brightness <= 0.45:
+        return color
+    scale = 0.45 / brightness
+    return (red * scale, green * scale, blue * scale, alpha)
 
 
 def _true_color_to_hex(value):
@@ -420,8 +438,16 @@ def _normalize_vector_2d(vector):
 
 
 def _draw_point(ax, location, line_width: float, color=None):
-    size = max(2.0, line_width * 4.0)
+    size = max(0.6, min(1.5, line_width * 1.5))
     ax.plot([location[0]], [location[1]], marker="o", markersize=size, linewidth=0, color=color)
+
+
+def _draw_reference_point(ax, location, color=None):
+    # This is a placement placeholder, not a circular feature in the drawing.
+    ax.plot(
+        [location[0]], [location[1]], marker="+", markersize=2.0,
+        markeredgewidth=0.35, linewidth=0, color=color, alpha=0.5,
+    )
 
 
 def _draw_polyline(
@@ -725,23 +751,64 @@ def _draw_text(
     rotation_deg: float,
     color=None,
     background=None,
+    attachment=None,
 ):
     if not text:
         return
+    import math
+
+    from matplotlib import rc_context
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.patches import FancyBboxPatch, PathPatch
+    from matplotlib.path import Path
+    from matplotlib.textpath import TextPath
+    from matplotlib.transforms import Affine2D
+
+    height = float(height)
+    if not math.isfinite(height) or height <= 0:
+        return
     text = text.replace("\\P", "\n")
-    size = max(6.0, abs(height) * 3.0)
-    kwargs = {}
-    if background is not None:
-        kwargs["bbox"] = background
-    ax.text(
-        insert[0],
-        insert[1],
-        text,
-        fontsize=size,
-        rotation=rotation_deg,
-        color=color,
-        **kwargs,
+    font = FontProperties()
+    # DWG heights describe capitals in drawing units, not typographic points.
+    # Paths follow the same transform as geometry at every zoom level and DPI,
+    # including sub-point sizes that matplotlib's Text would clamp to 1 pt.
+    cap_height = TextPath((0, 0), "H", size=1, prop=font).get_extents().height
+    lines = text.split("\n")
+    with rc_context({"text.parse_math": False}):
+        paths = [
+            TextPath((0, (len(lines) - 1 - i) * 1.2), line, size=1, prop=font, usetex=False)
+            for i, line in enumerate(lines)
+            if line.strip()
+        ]
+    if not paths:
+        return
+    path = Path.make_compound_path(*paths)
+    anchor_x = anchor_y = 0.0
+    if attachment in range(1, 10):
+        bounds = path.get_extents()
+        column = (attachment - 1) % 3
+        row = (attachment - 1) // 3
+        anchor_x = (bounds.x0, (bounds.x0 + bounds.x1) / 2, bounds.x1)[column]
+        anchor_y = (bounds.y1, (bounds.y0 + bounds.y1) / 2, bounds.y0)[row]
+    transform = (
+        Affine2D().translate(-anchor_x, -anchor_y).scale(height / cap_height)
+        .rotate_deg(rotation_deg).translate(insert[0], insert[1])
     )
+    if background is not None:
+        bounds = path.get_extents()
+        style = dict(background)
+        boxstyle = style.pop("boxstyle", "square,pad=0.15")
+        box = FancyBboxPatch(
+            (bounds.x0, bounds.y0), bounds.width, bounds.height, boxstyle=boxstyle
+        )
+        ax.add_patch(PathPatch(
+            transform.transform_path(box.get_path()),
+            zorder=3, clip_on=False, **style,
+        ))
+    ax.add_patch(PathPatch(
+        transform.transform_path(path),
+        facecolor=color or "black", edgecolor="none", zorder=3, clip_on=False,
+    ))
 
 
 def _resolve_mtext_background_bbox(ax, dxf):
@@ -788,6 +855,21 @@ def _resolve_mtext_background_alpha(value):
     if alpha_code >= 255:
         return 0.0
     return max(0.0, min(1.0, 1.0 - (alpha_code / 255.0)))
+
+
+def _dimension_text_height(dxf):
+    import math
+
+    for key in ("char_height", "height"):
+        value = _dimension_value(dxf, key)
+        try:
+            height = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(height) and height > 0:
+            return height
+    # Missing style/block data must not make text grow with dimension length.
+    return 1.0
 
 
 def _draw_dimension(ax, dxf, line_width: float, color=None):
@@ -849,22 +931,22 @@ def _draw_dimension(ax, dxf, line_width: float, color=None):
     if i13 is None or i14 is None:
         return
 
-    dim_len = _distance2(i13, i14)
-    ext_over = max(0.2, dim_len * 0.03)
-    ext_w = max(0.5, line_width * 0.8)
+    text_height = _dimension_text_height(dxf)
+    ext_over = text_height * 0.5
+    ext_w = line_width * 0.8
 
     e13 = _extension_endpoint((p13[0], p13[1]), i13, ext_over, ext_dir)
     e14 = _extension_endpoint((p14[0], p14[1]), i14, ext_over, ext_dir)
     ax.plot([p13[0], e13[0]], [p13[1], e13[1]], linewidth=ext_w, color=color)
     ax.plot([p14[0], e14[0]], [p14[1], e14[1]], linewidth=ext_w, color=color)
     ax.plot([i13[0], i14[0]], [i13[1], i14[1]], linewidth=line_width, color=color)
-    _draw_dim_ticks(ax, i13, i14, dim_dir, normal, dim_len, line_width, color=color)
+    _draw_dim_ticks(ax, i13, i14, dim_dir, normal, text_height, line_width, color=color)
 
     text = _resolve_dimension_text(dxf, text)
 
     text_pos = text_mid
     if _is_origin_point(text_pos) and _is_origin_point(insert):
-        offset = max(0.5, dim_len * 0.05)
+        offset = text_height
         text_pos = (
             (i13[0] + i14[0]) * 0.5 + normal[0] * offset,
             (i13[1] + i14[1]) * 0.5 + normal[1] * offset,
@@ -872,13 +954,14 @@ def _draw_dimension(ax, dxf, line_width: float, color=None):
         )
 
     if text and text_pos is not None:
-        height = _dimension_value(dxf, "char_height") or _dimension_value(
-            dxf, "height"
-        ) or max(0.8, dim_len * 0.06)
+        height = _dimension_text_height(dxf)
         rotation = _dimension_value(dxf, "text_rotation")
         if rotation is None:
             rotation = _dimension_value(dxf, "angle", 0.0)
-        _draw_text(ax, text_pos, text, height, rotation, color=color)
+        _draw_text(
+            ax, text_pos, text, height, rotation, color=color,
+            attachment=_dimension_value(dxf, "attachment_point") or 5,
+        )
 
 
 def _draw_dimension_diameter(ax, dxf, p13, p14, text_mid, line_width: float, color=None):
@@ -897,7 +980,7 @@ def _draw_dimension_diameter(ax, dxf, p13, p14, text_mid, line_width: float, col
         (p14[0], p14[1]),
         axis,
         normal,
-        dim_len,
+        _dimension_text_height(dxf),
         line_width,
         color=color,
     )
@@ -907,7 +990,7 @@ def _draw_dimension_diameter(ax, dxf, p13, p14, text_mid, line_width: float, col
         return
 
     if _is_origin_point(text_mid):
-        offset = max(0.5, dim_len * 0.06)
+        offset = _dimension_text_height(dxf)
         text_mid = (
             (p13[0] + p14[0]) * 0.5 + normal[0] * offset,
             (p13[1] + p14[1]) * 0.5 + normal[1] * offset,
@@ -916,13 +999,14 @@ def _draw_dimension_diameter(ax, dxf, p13, p14, text_mid, line_width: float, col
     if text_mid is None:
         return
 
-    height = _dimension_value(dxf, "char_height") or _dimension_value(dxf, "height") or max(
-        0.8, dim_len * 0.06
-    )
+    height = _dimension_text_height(dxf)
     rotation = _dimension_value(dxf, "text_rotation")
     if rotation is None:
         rotation = _dimension_value(dxf, "angle", 0.0)
-    _draw_text(ax, text_mid, text, height, rotation, color=color)
+    _draw_text(
+        ax, text_mid, text, height, rotation, color=color,
+        attachment=_dimension_value(dxf, "attachment_point") or 5,
+    )
 
 
 def _draw_dimension_radius(ax, dxf, p13, p14, text_mid, line_width: float, color=None):
@@ -935,14 +1019,16 @@ def _draw_dimension_radius(ax, dxf, p13, p14, text_mid, line_width: float, color
         return
 
     ax.plot([p13[0], p14[0]], [p13[1], p14[1]], linewidth=line_width, color=color)
-    _draw_dim_single_tick(ax, (p14[0], p14[1]), axis, normal, dim_len, line_width, color=color)
+    _draw_dim_single_tick(
+        ax, (p14[0], p14[1]), axis, normal, _dimension_text_height(dxf), line_width, color=color
+    )
 
     text = _resolve_dimension_text(dxf, _dimension_value(dxf, "text", ""))
     if not text:
         return
 
     if _is_origin_point(text_mid):
-        offset = max(0.5, dim_len * 0.06)
+        offset = _dimension_text_height(dxf)
         text_mid = (
             (p13[0] + p14[0]) * 0.5 + normal[0] * offset,
             (p13[1] + p14[1]) * 0.5 + normal[1] * offset,
@@ -951,13 +1037,14 @@ def _draw_dimension_radius(ax, dxf, p13, p14, text_mid, line_width: float, color
     if text_mid is None:
         return
 
-    height = _dimension_value(dxf, "char_height") or _dimension_value(dxf, "height") or max(
-        0.8, dim_len * 0.06
-    )
+    height = _dimension_text_height(dxf)
     rotation = _dimension_value(dxf, "text_rotation")
     if rotation is None:
         rotation = _dimension_value(dxf, "angle", 0.0)
-    _draw_text(ax, text_mid, text, height, rotation, color=color)
+    _draw_text(
+        ax, text_mid, text, height, rotation, color=color,
+        attachment=_dimension_value(dxf, "attachment_point") or 5,
+    )
 
 
 def _apply_equal_limits(ax):
@@ -997,7 +1084,6 @@ def _apply_auto_limits(ax, equal: bool, margin: float):
 
     x0, x1, y0, y1 = _expand_bounds(chosen, margin=margin)
     if equal:
-        x0, x1, y0, y1 = _square_bounds(x0, x1, y0, y1)
         ax.set_aspect("equal", adjustable="box")
     ax.set_xlim(x0, x1)
     ax.set_ylim(y0, y1)
@@ -1027,6 +1113,13 @@ def _collect_axes_points(ax):
             continue
         if math.isfinite(xf) and math.isfinite(yf):
             points.append((xf, yf))
+    # Text outlines and their background boxes have geometry in data space.
+    # Include their full bounds so text-only drawings also fit the viewport.
+    for patch in getattr(ax, "patches", ()):
+        path = patch.get_path().transformed(patch.get_transform() - ax.transData)
+        bounds = path.get_extents()
+        if all(math.isfinite(v) for v in bounds.extents):
+            points.extend([(bounds.x0, bounds.y0), (bounds.x1, bounds.y1)])
     return points
 
 
@@ -1240,8 +1333,8 @@ def _dimension_value(dxf, key, default=None):
     return default
 
 
-def _draw_dim_ticks(ax, p1, p2, dim_dir, normal, dim_len, line_width, color=None):
-    tick_len = max(0.25, dim_len * 0.03)
+def _draw_dim_ticks(ax, p1, p2, dim_dir, normal, text_height, line_width, color=None):
+    tick_len = text_height * 0.8
     dir1 = _normalize2((dim_dir[0] + normal[0], dim_dir[1] + normal[1]))
     dir2 = _normalize2((dim_dir[0] - normal[0], dim_dir[1] - normal[1]))
     tick_dir = dir1 or dir2
@@ -1252,13 +1345,13 @@ def _draw_dim_ticks(ax, p1, p2, dim_dir, normal, dim_len, line_width, color=None
         ax.plot(
             [p[0] - tick_dir[0] * hw, p[0] + tick_dir[0] * hw],
             [p[1] - tick_dir[1] * hw, p[1] + tick_dir[1] * hw],
-            linewidth=max(0.5, line_width * 0.9),
+            linewidth=line_width * 0.9,
             color=color,
         )
 
 
-def _draw_dim_single_tick(ax, p, dim_dir, normal, dim_len, line_width, color=None):
-    tick_len = max(0.25, dim_len * 0.03)
+def _draw_dim_single_tick(ax, p, dim_dir, normal, text_height, line_width, color=None):
+    tick_len = text_height * 0.8
     dir1 = _normalize2((dim_dir[0] + normal[0], dim_dir[1] + normal[1]))
     dir2 = _normalize2((dim_dir[0] - normal[0], dim_dir[1] - normal[1]))
     tick_dir = dir1 or dir2
@@ -1268,6 +1361,6 @@ def _draw_dim_single_tick(ax, p, dim_dir, normal, dim_len, line_width, color=Non
     ax.plot(
         [p[0] - tick_dir[0] * hw, p[0] + tick_dir[0] * hw],
         [p[1] - tick_dir[1] * hw, p[1] + tick_dir[1] * hw],
-        linewidth=max(0.5, line_width * 0.9),
+        linewidth=line_width * 0.9,
         color=color,
     )

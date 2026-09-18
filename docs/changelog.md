@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Added
+- Added `ezdwg plot` to display model-space drawings or save PNG, SVG, and PDF
+  files, with entity filtering, image resolution, and title options. Requires
+  the optional `plot` extra; file output works without a display. Falls back to
+  an SVG preview in the browser when no interactive matplotlib backend is available.
 - Added `ezdwg.clear_decode_caches()` so long-running batch converters can
   release per-file decoded tables and entity metadata after finishing a DWG.
 - Header-variables decoding across `AC1015`-`AC1032`: `Document.header_variables()`
@@ -51,6 +55,17 @@
   to account for `material flags`, `shadow flags`, R2010 visual-style bits, and the R2013+ ds-binary-data flag.
 
 ### Fixed
+- Improve plot readability with smaller point markers, faint crosses for block
+  references, thinner geometry and dimension strokes, light-background color
+  contrast, and rectangular view bounds. The CLI hides coordinate axes and
+  uses a larger canvas. Dimension ticks/overshoot use text height rather than
+  measured length, and labels honor their attachment point.
+- Plot text in drawing units instead of treating DWG text heights as matplotlib
+  point sizes. Text now scales with geometry across zoom levels, figure sizes,
+  and output DPI; automatic view bounds include the text outlines.
+- Use saved anonymous-block text heights for dimensions where available, instead
+  of sizing dimension labels as a percentage of their measured length. The
+  high-level DIMENSION entity exposes resolved `char_height` and its source.
 - R2007 (`AC1021`) data pages: the Reed-Solomon block count is now derived from the
   compressed size padded to the 8-byte CRC block (ODA 5.4). A bare
   `ceil(compressed / 251)` was one block short whenever that padding crossed a

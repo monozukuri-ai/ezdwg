@@ -1832,6 +1832,7 @@ class Layout:
             # Merge subtype-specific decoders by handle to avoid silently
             # dropping DIM_* entities.
             anonymous_block_name_map = _block_header_name_map(decode_path)
+            block_text_heights = _block_text_height_map(decode_path)
             rows_by_handle: dict[int, tuple[str, tuple]] = {}
 
             def _put_row(dimtype: str, row: tuple) -> None:
@@ -1959,13 +1960,19 @@ class Layout:
                 dim_dxf.update(common_dxf)
                 if anonymous_block_handle is not None:
                     try:
+                        block_handle = int(anonymous_block_handle)
                         anonymous_block_name = anonymous_block_name_map.get(
-                            int(anonymous_block_handle)
+                            block_handle
                         )
+                        block_text_height = block_text_heights.get(block_handle)
                     except Exception:
                         anonymous_block_name = None
+                        block_text_height = None
                     if isinstance(anonymous_block_name, str) and anonymous_block_name:
                         dim_dxf["anonymous_block_name"] = anonymous_block_name
+                    if block_text_height is not None:
+                        dim_dxf["char_height"] = block_text_height
+                        dim_dxf["char_height_source"] = "anonymous_block"
                 dim_dxf["common"] = dict(common_dxf)
                 yield Entity(
                     dxftype="DIMENSION",
@@ -3456,6 +3463,42 @@ def _block_header_name_map(path: str) -> dict[int, str]:
             continue
         mapping[handle] = name
     return mapping
+
+
+@lru_cache(maxsize=16)
+def _block_text_height_map(path: str) -> dict[int, float]:
+    """Resolve unambiguous saved TEXT/MTEXT heights by their owner block.
+
+    A dimension's anonymous block contains its saved display, including style
+    overrides. Do not choose an arbitrary height for blocks with mixed sizes.
+    """
+    heights: dict[int, float] = {}
+    ambiguous: set[int] = set()
+    for decode, height_from_row, owner_index in (
+        (raw.decode_text_entities, lambda row: row[5][2], 8),
+        (raw.decode_mtext_entities, lambda row: row[6], 10),
+    ):
+        try:
+            rows = decode(path)
+        except Exception:
+            continue
+        for row in rows:
+            try:
+                if not row[1].strip():
+                    continue
+                owner = int(row[owner_index])
+                height = float(height_from_row(row))
+            except (IndexError, TypeError, ValueError, AttributeError):
+                continue
+            if owner <= 0:
+                continue
+            if not math.isfinite(height) or height <= 0:
+                ambiguous.add(owner)
+            elif owner in heights and not math.isclose(heights[owner], height, rel_tol=1e-9):
+                ambiguous.add(owner)
+            else:
+                heights[owner] = height
+    return {owner: height for owner, height in heights.items() if owner not in ambiguous}
 
 
 @lru_cache(maxsize=16)

@@ -198,6 +198,8 @@ The `dxf` dictionary for DIMENSION entities includes:
 | `text` | `str` | Override text |
 | `angle` | `float` | Rotation angle in degrees |
 | `actual_measurement` | `float` | Computed measurement value |
+| `char_height` | `float` | Optional saved text height from the referenced anonymous block; omitted when unavailable or ambiguous |
+| `char_height_source` | `str` | `"anonymous_block"` when `char_height` was resolved from saved block text |
 
 !!! note "ARC Angles"
     The high-level API returns ARC angles in **degrees**. The raw API (`ezdwg.raw`) returns angles in **radians**.
