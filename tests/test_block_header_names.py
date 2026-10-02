@@ -111,9 +111,22 @@ def test_decode_insert_entities_r2007_resolves_block_names() -> None:
 
 
 def test_anonymous_block_names_are_unique_and_numbered() -> None:
-    rows = ezdwg.raw.decode_block_header_names(str(SAMPLES / "acadsharp" / "sample_AC1032.dwg"))
+    path = str(SAMPLES / "acadsharp" / "sample_AC1032.dwg")
+    rows = ezdwg.raw.decode_block_header_names(path)
     names = [name for _handle, name in rows]
     # the DWG stores bare "*D"/"*U"/"*T"; every header must come out numbered
     assert not any(len(name) == 2 and name.startswith("*") for name in names)
     anonymous_headers = {name for name in names if name.startswith("*") and name[1:2].isalpha() and name[2:].isdigit()}
-    assert {"*D1", "*U8"} <= anonymous_headers
+    assert {"*D1", "*U12"} <= anonymous_headers
+
+    # One shared counter in handle order: no two block headers get the same name.
+    types = {row[0]: row[4] for row in ezdwg.raw.list_object_headers_with_type(path)}
+    header_names = [
+        name
+        for handle, name in rows
+        if types.get(handle) == "BLOCK_HEADER" and not name.startswith("*Paper_Space")
+    ]
+    assert len(header_names) == 24
+    assert len(set(header_names)) == len(header_names)
+    numbered = [name for name in header_names if name in anonymous_headers]
+    assert [int(name[2:]) for name in numbered] == sorted(int(name[2:]) for name in numbered)

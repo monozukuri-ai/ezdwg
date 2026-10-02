@@ -521,11 +521,62 @@ fn layer_handle_candidate_score(
     score
 }
 
+/// LAYER record of R13/R14/R2000 exactly as specified (ODA 20.4.54): these versions
+/// have no "XDic Missing Flag", keep the entry name inline and store the color as a
+/// plain index. R13/R14 carry four state bits where R2000 has the "Values" BS.
+fn decode_layer_color_record_pre_r2004(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    expected_handle: u64,
+) -> crate::core::result::Result<(u64, u16, Option<u32>)> {
+    let r13_r14 = matches!(version, version::DwgVersion::R13 | version::DwgVersion::R14);
+    if !r13_r14 {
+        let _obj_size = reader.read_rl(Endian::Little)?;
+    }
+    let record_handle = reader.read_h()?.value;
+    skip_eed(reader)?;
+    if r13_r14 {
+        let _obj_size = reader.read_rl(Endian::Little)?;
+    }
+    let _num_reactors = reader.read_bl()?;
+    let _entry_name = reader.read_tv()?;
+    let _flag_64 = reader.read_b()?;
+    let _xref_index_plus_one = reader.read_bs()?;
+    let _xdep = reader.read_b()?;
+    if r13_r14 {
+        let _frozen = reader.read_b()?;
+        let _on = reader.read_b()?;
+        let _frozen_new = reader.read_b()?;
+        let _locked = reader.read_b()?;
+    } else {
+        let _values = reader.read_bs()?;
+    }
+    let color_index = reader.read_bs()?;
+    if color_index > 257 {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            format!("layer color index {color_index} is out of range"),
+        ));
+    }
+    let handle = if record_handle != 0 {
+        record_handle
+    } else {
+        expected_handle
+    };
+    Ok((handle, color_index, None))
+}
+
 fn decode_layer_color_record(
     reader: &mut BitReader<'_>,
     version: &version::DwgVersion,
     expected_handle: u64,
 ) -> crate::core::result::Result<(u64, u16, Option<u32>)> {
+    if matches!(
+        version,
+        version::DwgVersion::R13 | version::DwgVersion::R14 | version::DwgVersion::R2000
+    ) {
+        return decode_layer_color_record_pre_r2004(reader, version, expected_handle);
+    }
     // R2010+/R2013 objects start with handle directly after OT prefix.
     // Older versions keep ObjSize (RL) before handle.
     if !matches!(
@@ -640,29 +691,28 @@ fn decode_layer_name_record(
 ) -> crate::core::result::Result<(u64, String)> {
     let mut reader = record.bit_reader();
     skip_object_type_prefix(&mut reader, version)?;
-    if !matches!(
-        version,
-        version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
-    ) {
-        let _obj_size = reader.read_rl(Endian::Little)?;
-    }
-    let record_handle = reader.read_h()?.value;
-    skip_eed(&mut reader)?;
-
-    let _num_reactors = reader.read_bl()?;
-    let _xdic_missing_flag = reader.read_b()?;
-    if matches!(
-        version,
-        version::DwgVersion::R2013 | version::DwgVersion::R2018
-    ) {
-        let _has_ds_binary_data = reader.read_b()?;
-    }
+    let preamble = read_table_record_preamble(&mut reader, version, api_header)?;
+    let record_handle = preamble.handle;
 
     let name = if matches!(
         version,
         version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
     ) {
         decode_layer_name_from_string_stream(record, api_header, version)?
+    } else if matches!(version, version::DwgVersion::R2007) {
+        // R2007 already keeps the entry name in the string stream; the data
+        // stream continues with the flags, so there is no inline text to read.
+        let name = read_table_record_stream_strings(&reader, preamble.data_end_bit, 1)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        if name.is_empty() || !is_plausible_table_text(&name) {
+            return Err(DwgError::new(
+                ErrorKind::Format,
+                "failed to decode layer name from the R2007 string stream",
+            ));
+        }
+        name
     } else {
         reader.read_tv()?
     };

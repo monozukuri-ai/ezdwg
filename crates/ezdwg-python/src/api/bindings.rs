@@ -4,6 +4,7 @@ include!("bindings/shared.rs");
 include!("bindings/write.rs");
 include!("bindings/decode.rs");
 include!("bindings/layer.rs");
+include!("bindings/linetype.rs");
 include!("bindings/dimension.rs");
 include!("bindings/polyline.rs");
 include!("bindings/block_insert.rs");

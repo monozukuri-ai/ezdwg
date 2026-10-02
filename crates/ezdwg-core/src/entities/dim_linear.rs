@@ -6,7 +6,9 @@ use crate::entities::common::{
     parse_common_entity_header_r2010, parse_common_entity_header_r2013,
     parse_common_entity_layer_handle, read_handle_reference, CommonEntityHeader,
 };
-use crate::entities::dim_common::{plausibility_score, R2010PlusVariant, R2010_PLUS_VARIANTS};
+use crate::entities::dim_common::{
+    plausibility_score, read_dimension_handles, R2010PlusVariant, R2010_PLUS_VARIANTS,
+};
 
 #[derive(Debug, Clone)]
 pub struct DimensionCommonData {
@@ -346,27 +348,22 @@ fn decode_r2010_plus_variant(
 
     reader.set_bit_pos(header.obj_size);
     let handles_pos = reader.get_pos();
-    let (dimstyle_handle, anonymous_block_handle, layer_handle) = match (
-        read_handle_reference(reader, header.handle),
-        read_handle_reference(reader, header.handle),
-        parse_common_entity_handles(reader, header),
-    ) {
-        (Ok(dimstyle), Ok(block), Ok(common_handles)) => {
-            (Some(dimstyle), Some(block), common_handles.layer)
-        }
-        _ if allow_handle_decode_failure => {
-            reader.set_pos(handles_pos.0, handles_pos.1);
-            let layer = parse_common_entity_layer_handle(reader, header).unwrap_or(0);
-            (None, None, layer)
-        }
-        _ => {
-            reader.set_pos(handles_pos.0, handles_pos.1);
-            return Err(DwgError::new(
-                ErrorKind::Decode,
-                "failed to decode DIM_LINEAR handles",
-            ));
-        }
-    };
+    let (dimstyle_handle, anonymous_block_handle, layer_handle) =
+        match read_dimension_handles(reader, header) {
+            Ok((dimstyle, block, layer)) => (Some(dimstyle), Some(block), layer),
+            Err(_) if allow_handle_decode_failure => {
+                reader.set_pos(handles_pos.0, handles_pos.1);
+                let layer = parse_common_entity_layer_handle(reader, header).unwrap_or(0);
+                (None, None, layer)
+            }
+            Err(_) => {
+                reader.set_pos(handles_pos.0, handles_pos.1);
+                return Err(DwgError::new(
+                    ErrorKind::Decode,
+                    "failed to decode DIM_LINEAR handles",
+                ));
+            }
+        };
 
     let common = DimensionCommonData {
         handle: header.handle,
@@ -414,20 +411,23 @@ fn decode_dim_linear_with_header(
     // The R2000-R2004 layout per spec (attachment block present, no R2007+
     // unknown/flip-arrow flags, 12-pt present) goes first: candidates are only
     // replaced by a strictly better score, so on ties the spec layout wins
-    // instead of a coincidentally plausible mis-alignment.
+    // instead of a coincidentally plausible mis-alignment. The handle order
+    // does not change the score, so within a layout the spec order (common
+    // entity handles, then DIMSTYLE and anonymous BLOCK) goes first as well;
+    // the reversed order only remains as a fallback.
     let variants = [
-        variant(true, false, false, false, true, true),
         variant(true, false, false, false, true, false),
-        variant(true, true, true, true, true, true),
-        variant(true, true, true, false, true, true),
-        variant(true, true, false, false, true, true),
-        variant(true, false, false, false, false, true),
-        variant(false, false, false, false, false, true),
+        variant(true, false, false, false, true, true),
         variant(true, true, true, true, true, false),
         variant(true, true, true, false, true, false),
         variant(true, true, false, false, true, false),
         variant(true, false, false, false, false, false),
         variant(false, false, false, false, false, false),
+        variant(true, true, true, true, true, true),
+        variant(true, true, true, false, true, true),
+        variant(true, true, false, false, true, true),
+        variant(true, false, false, false, false, true),
+        variant(false, false, false, false, false, true),
     ];
 
     let mut best: Option<(u64, DimLinearEntity)> = None;

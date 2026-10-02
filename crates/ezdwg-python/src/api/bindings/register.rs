@@ -22,6 +22,9 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_entity_placements, module)?)?;
     module.add_function(wrap_pyfunction!(decode_layer_colors, module)?)?;
     module.add_function(wrap_pyfunction!(decode_layer_names, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_linetypes, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_layer_linetypes, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_entity_linetypes, module)?)?;
     module.add_function(wrap_pyfunction!(decode_line_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_line_owner_handles, module)?)?;
     module.add_function(wrap_pyfunction!(decode_point_entities, module)?)?;
@@ -40,6 +43,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_mtext_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_leader_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_hatch_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_hatch_patterns, module)?)?;
     module.add_function(wrap_pyfunction!(decode_tolerance_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_mline_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_dimension_entities, module)?)?;

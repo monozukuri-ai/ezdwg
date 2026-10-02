@@ -3,6 +3,18 @@
 ## Unreleased
 
 ### Added
+- Linetypes. `Document.linetypes()` returns the linetype table (name,
+  description and dash pattern), `Document.layers()` the layer table with each
+  layer's linetype, and every entity carries `linetype`, `linetype_handle` and
+  `linetype_scale` in `Entity.dxf`. The raw functions are `decode_linetypes`,
+  `decode_layer_linetypes` and `decode_entity_linetypes`. All versions from R13
+  to R2018 are covered; checked against DXF exports of the same drawings
+  (linetype patterns, layer linetypes and entity linetypes of every standard
+  entity type agree).
+- HATCH pattern definitions: `pattern_angle`, `pattern_scale`, `pattern_double`
+  and `pattern_lines` (angle, base point, offset and dashes of each family of
+  pattern lines) in `Entity.dxf` of pattern-filled hatches, and the
+  `decode_hatch_patterns` raw function.
 - Added `ezdwg plot` to display model-space drawings or save PNG, SVG, and PDF
   files, with entity filtering, image resolution, and title options. Requires
   the optional `plot` extra; file output works without a display. Falls back to
@@ -55,6 +67,45 @@
   to account for `material flags`, `shadow flags`, R2010 visual-style bits, and the R2013+ ds-binary-data flag.
 
 ### Fixed
+- R2000 (`AC1015`) entities lost their layer: the common entity data was read
+  with the R2004 meaning of one flag bit ("XDic Missing Flag", which R2000 does
+  not have; the bit is "Nolinks" there), so the xdictionary handle was taken for
+  the layer handle and about 95% of the entities reported layer handle 0. The
+  layer, linetype and plotstyle handles of R2000 entities are now read from
+  their real position, including entities that store previous/next links.
+- Layer names were empty for R13, R14, R2000 and R2007 files, and layer colors
+  and block names were unreadable for R2000: the table records of these versions
+  are now read with their own layout (no "XDic Missing Flag" before R2004, the
+  object size after the EED in R13/R14, names in the string stream in R2007).
+- The layer handle of every entity now comes from the common entity data. The
+  type-specific decoders reported a wrong layer for some `INSERT`, `POLYLINE`,
+  `DIMENSION` and `POINT` entities (about 4% of the entities in drawings
+  compared against their DXF export).
+- `DIMENSION` entities lost their saved graphics in R2000, R2004 and R2007
+  files: the dimension style and the anonymous block were read before the common
+  entity handles instead of after them, so `anonymous_block_handle`,
+  `anonymous_block_name` and the block-derived `char_height` never resolved.
+  R2010+ files relied on a scan of the handle stream that missed some
+  dimensions and could pick an arrowhead block for a dimension that has no
+  block. Both handles are now read from their place in the handle stream (the
+  block lines of all 485 dimensions compared against DXF exports of the same
+  drawings agree); the scan only remains as a fallback. R13/R14 dimensions are
+  still unresolved.
+- Block names of R2010+ files: the name is now read from the string stream
+  before the record data in front of it. That data was read with a layout these
+  versions do not have, and when the read failed the name was left to a scan
+  that only accepts ASCII names. Block headers named with Japanese characters
+  only could come out unnamed (3 to 18 per drawing in the R2018 drawings
+  compared against their DXF export), and two anonymous blocks could get the
+  same number (`*D3` twice). Every block header of those drawings is named now,
+  and anonymous blocks are numbered once, in handle order.
+- Entities with a color book color (ENC flag `0x4000`) were misread: no RGB
+  value follows the flags for them, and the color handle precedes the layer
+  handle in the handle stream.
+- R13/R14 entities with previous/next links: the links follow the layer and
+  linetype handles in these versions.
+- The R2000 writer stores the xdictionary handle that the format requires, so
+  other readers find the layer handle where they expect it.
 - Improve plot readability with smaller point markers, faint crosses for block
   references, thinner geometry and dimension strokes, light-background color
   contrast, and rectangular view bounds. The CLI hides coordinate axes and

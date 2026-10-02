@@ -12,6 +12,7 @@ pub struct ObjectRecord<'a> {
     pub body: Cow<'a, [u8]>,
     pub raw: Cow<'a, [u8]>,
     codepage: Option<u16>,
+    pre_r2004_layout: bool,
 }
 
 impl<'a> ObjectRecord<'a> {
@@ -29,6 +30,7 @@ impl<'a> ObjectRecord<'a> {
 
     pub fn bit_reader(&self) -> BitReader<'_> {
         let mut reader = BitReader::new_with_codepage(self.body.as_ref(), self.codepage);
+        reader.set_pre_r2004_layout(self.pre_r2004_layout);
         reader.set_pos(0, self.body_bit_pos);
         reader
     }
@@ -36,6 +38,17 @@ impl<'a> ObjectRecord<'a> {
     pub fn with_codepage(mut self, codepage: Option<u16>) -> Self {
         self.codepage = codepage;
         self
+    }
+
+    /// Marks the record as an R2000 (AC1015) object; see
+    /// [`BitReader::set_pre_r2004_layout`].
+    pub fn with_pre_r2004_layout(mut self, value: bool) -> Self {
+        self.pre_r2004_layout = value;
+        self
+    }
+
+    pub fn pre_r2004_layout(&self) -> bool {
+        self.pre_r2004_layout
     }
 }
 
@@ -112,6 +125,7 @@ fn parse_object_record_impl<'a>(
         body: Cow::Borrowed(body),
         raw: Cow::Borrowed(raw),
         codepage: None,
+        pre_r2004_layout: false,
     })
 }
 
@@ -135,5 +149,6 @@ fn owned_copy(record: &ObjectRecord<'_>) -> ObjectRecord<'static> {
         body: Cow::Owned(record.body.as_ref().to_vec()),
         raw: Cow::Owned(record.raw.as_ref().to_vec()),
         codepage: record.codepage,
+        pre_r2004_layout: record.pre_r2004_layout,
     }
 }

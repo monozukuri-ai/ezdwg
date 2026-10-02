@@ -3279,23 +3279,45 @@ fn decode_block_header_name_record(
     expected_handle: u64,
     api_header: Option<&ApiObjectHeader>,
 ) -> crate::core::result::Result<(u64, String)> {
-    let obj_size_bits = reader.read_rl(Endian::Little)?;
-    let record_handle = reader.read_h()?.value;
-    skip_eed(reader)?;
-    let _num_reactors = reader.read_bl()?;
-    let _xdic_missing_flag = reader.read_b()?;
-    if matches!(
-        version,
-        version::DwgVersion::R2013 | version::DwgVersion::R2018
-    ) {
-        let _has_ds_binary_data = reader.read_b()?;
-    }
-
-    let entry_name = if matches!(
+    let r2010_plus = matches!(
         version,
         version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
-    ) {
-        if let Some(name) = read_block_name_from_exact_string_stream(reader, api_header) {
+    );
+    // R2010+: where the name sits depends on the object header alone, so it is
+    // read before the data in front of it. Those objects have no leading size
+    // field, and reading one below can run past the record, which used to
+    // drop the name (seen with names that the scan fallback does not accept,
+    // such as Japanese ones).
+    let exact_name = if r2010_plus {
+        read_block_name_from_exact_string_stream(reader, api_header)
+    } else {
+        None
+    };
+    let preamble = (|| -> crate::core::result::Result<(u32, u64)> {
+        let obj_size_bits = reader.read_rl(Endian::Little)?;
+        let record_handle = reader.read_h()?.value;
+        skip_eed(reader)?;
+        let _num_reactors = reader.read_bl()?;
+        // The "XDic Missing Flag" exists from R2004 on; R2000 goes straight to the name.
+        if !reader.pre_r2004_layout() {
+            let _xdic_missing_flag = reader.read_b()?;
+        }
+        if matches!(
+            version,
+            version::DwgVersion::R2013 | version::DwgVersion::R2018
+        ) {
+            let _has_ds_binary_data = reader.read_b()?;
+        }
+        Ok((obj_size_bits, record_handle))
+    })();
+    let (obj_size_bits, record_handle) = match preamble {
+        Ok(values) => values,
+        Err(_) if exact_name.is_some() => (0, 0),
+        Err(err) => return Err(err),
+    };
+
+    let entry_name = if r2010_plus {
+        if let Some(name) = exact_name {
             let handle = if record_handle != 0 {
                 record_handle
             } else {

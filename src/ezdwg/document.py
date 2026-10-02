@@ -257,6 +257,54 @@ class Document:
         row = raw.decode_header_variables(self.decode_path or self.path)
         return dict(zip(_HEADER_VARIABLE_KEYS, row))
 
+    def linetypes(self) -> dict[str, dict[str, Any]]:
+        """Linetype table by name.
+
+        Each entry holds ``handle``, ``description``, ``pattern_length`` and
+        ``dashes``: the dash pattern in drawing units at linetype scale 1, with
+        the DXF sign convention (positive = dash, negative = gap, 0 = dot).
+        The table includes the built-in ``ByBlock``, ``ByLayer`` and
+        ``Continuous`` entries, whose pattern is empty.
+        """
+        table: dict[str, dict[str, Any]] = {}
+        for handle, name, description, pattern_length, dashes in _linetype_rows(
+            self.decode_path or self.path
+        ):
+            table.setdefault(
+                name,
+                {
+                    "handle": handle,
+                    "description": description,
+                    "pattern_length": pattern_length,
+                    "dashes": list(dashes),
+                },
+            )
+        return table
+
+    def layers(self) -> dict[str, dict[str, Any]]:
+        """Layer table by name.
+
+        Each entry holds ``handle``, ``color_index``, ``true_color`` and
+        ``linetype`` (the linetype name, ``None`` when it cannot be read).
+        A layer whose name cannot be read is listed as ``LAYER_<handle>``.
+        """
+        path = self.decode_path or self.path
+        colors = _layer_color_map(path)
+        linetype_names, layer_linetypes = _linetype_tables(path)
+        table: dict[str, dict[str, Any]] = {}
+        for handle, name in _layer_names_by_handle(path).items():
+            index, true_color = colors.get(handle, (None, None))
+            table.setdefault(
+                name or f"LAYER_{handle:X}",
+                {
+                    "handle": handle,
+                    "color_index": index,
+                    "true_color": true_color,
+                    "linetype": linetype_names.get(layer_linetypes.get(handle)),
+                },
+            )
+        return table
+
     @property
     def insunits(self) -> int | None:
         """Raw ``$INSUNITS`` drawing-units code, or ``None`` when unavailable."""
@@ -1610,6 +1658,7 @@ class Layout:
             return
 
         if dxftype == "HATCH":
+            hatch_patterns = _hatch_pattern_map(decode_path)
             for (
                 handle,
                 name,
@@ -1630,19 +1679,23 @@ class Layout:
                             "points": path_points,
                         }
                     )
+                hatch_dxf = {
+                    "pattern_name": name,
+                    "solid_fill": bool(solid_fill),
+                    "associative": bool(associative),
+                    "elevation": elevation,
+                    "extrusion": extrusion,
+                    "paths": paths,
+                }
+                pattern = hatch_patterns.get(handle)
+                if pattern is not None:
+                    hatch_dxf.update(pattern)
                 yield Entity(
                     dxftype="HATCH",
                     handle=handle,
                     dxf=_attach_entity_color(
                         handle,
-                        {
-                            "pattern_name": name,
-                            "solid_fill": bool(solid_fill),
-                            "associative": bool(associative),
-                            "elevation": elevation,
-                            "extrusion": extrusion,
-                            "paths": paths,
-                        },
+                        hatch_dxf,
                         entity_style_map,
                         layer_color_map,
                         layer_color_overrides,
@@ -3619,15 +3672,128 @@ def _lwpolyline_owner_handle_map(path: str) -> dict[int, int | None]:
     return _decode_owner_handle_map(path, getattr(raw, "decode_lwpolyline_owner_handles", None))
 
 
+class _EntityStyleMap(dict):
+    """``handle -> (color index, true color, layer handle)``.
+
+    Two more maps ride along so that every entity gets them where it gets its color:
+
+    - ``linetypes``: ``handle -> (linetype name, linetype handle, linetype scale)``
+    - ``common_layers``: ``handle -> layer handle`` read from the common entity data,
+      which holds for every entity type. It takes precedence over the layer handle
+      of the type-specific decoders.
+    """
+
+    linetypes: dict[int, tuple[str | None, int | None, float]]
+    common_layers: dict[int, int]
+
+
 @lru_cache(maxsize=16)
 def _entity_style_map(path: str) -> dict[int, tuple[int | None, int | None, int]]:
+    styles = _EntityStyleMap()
+    styles.linetypes = _entity_linetype_map(path)
+    styles.common_layers = _entity_common_layer_map(path)
     try:
-        return {
-            handle: (index, true_color, layer_handle)
+        styles.update(
+            (handle, (index, true_color, layer_handle))
             for handle, index, true_color, layer_handle in raw.decode_entity_styles(path)
+        )
+    except Exception:
+        pass
+    return styles
+
+
+@lru_cache(maxsize=16)
+def _linetype_rows(path: str) -> tuple[tuple[int, str, str, float, tuple[float, ...]], ...]:
+    try:
+        return tuple(
+            (int(handle), str(name), str(description), float(length), tuple(dashes))
+            for handle, name, description, length, dashes in raw.decode_linetypes(path)
+        )
+    except Exception:
+        return ()
+
+
+@lru_cache(maxsize=16)
+def _linetype_tables(path: str) -> tuple[dict[int, str], dict[int, int]]:
+    """``(linetype name by handle, linetype handle by layer handle)``."""
+    names = {handle: name for handle, name, *_ in _linetype_rows(path)}
+    try:
+        layer_linetypes = {
+            int(layer): int(linetype) for layer, linetype in raw.decode_layer_linetypes(path)
         }
     except Exception:
+        layer_linetypes = {}
+    return names, layer_linetypes
+
+
+_LINETYPE_FLAG_NAMES = {0: "BYLAYER", 1: "BYBLOCK", 2: "CONTINUOUS"}
+
+
+@lru_cache(maxsize=16)
+def _entity_linetype_map(path: str) -> dict[int, tuple[str | None, int | None, float]]:
+    """Linetype of every entity as DXF group 6 would name it, with its scale (group 48).
+
+    ``BYLAYER``, ``BYBLOCK`` and ``CONTINUOUS`` are reported in upper case whether the
+    entity stores them as a flag or as a handle to the built-in table entry. The
+    name is ``None`` when the entity points to a linetype that cannot be read.
+    """
+    names, _layer_linetypes = _linetype_tables(path)
+    try:
+        rows = raw.decode_entity_linetypes(path)
+    except Exception:
         return {}
+    result: dict[int, tuple[str | None, int | None, float]] = {}
+    for handle, _layer_handle, flags, linetype_handle, scale in rows:
+        name = _LINETYPE_FLAG_NAMES.get(flags)
+        if name is None:
+            name = names.get(linetype_handle)
+            if name is not None and name.upper() in ("BYLAYER", "BYBLOCK", "CONTINUOUS"):
+                name = name.upper()
+        result[handle] = (name, linetype_handle, scale)
+    return result
+
+
+@lru_cache(maxsize=16)
+def _entity_common_layer_map(path: str) -> dict[int, int]:
+    """Layer handle of every entity whose common entity data names a known layer."""
+    layer_handles = set(_layer_names_by_handle(path))
+    if not layer_handles:
+        return {}
+    try:
+        rows = raw.decode_entity_linetypes(path)
+    except Exception:
+        return {}
+    return {
+        handle: layer_handle
+        for handle, layer_handle, *_rest in rows
+        if layer_handle in layer_handles
+    }
+
+
+@lru_cache(maxsize=16)
+def _hatch_pattern_map(path: str) -> dict[int, dict[str, Any]]:
+    """Pattern definition of every pattern-filled hatch (angles in degrees)."""
+    try:
+        rows = raw.decode_hatch_patterns(path)
+    except Exception:
+        return {}
+    return {
+        handle: {
+            "pattern_angle": math.degrees(angle),
+            "pattern_scale": scale,
+            "pattern_double": bool(double),
+            "pattern_lines": [
+                {
+                    "angle": math.degrees(line_angle),
+                    "base": tuple(base),
+                    "offset": tuple(offset),
+                    "dashes": list(dashes),
+                }
+                for line_angle, base, offset, dashes in lines
+            ],
+        }
+        for handle, angle, scale, double, lines in rows
+    }
 
 
 @lru_cache(maxsize=16)
@@ -3710,6 +3876,9 @@ def _attach_entity_color(
         index, true_color, layer_handle = style
         resolved_index = index
         resolved_true_color = true_color
+    common_layer = getattr(entity_style_map, "common_layers", {}).get(handle)
+    if common_layer is not None:
+        layer_handle = common_layer
     if index in (None, 0, 256, 257) and true_color is None and layer_handle is not None:
         layer_style = None
         if layer_color_overrides is not None:
@@ -3742,6 +3911,10 @@ def _attach_entity_color(
     dxf["layer_handle"] = layer_handle
     dxf["resolved_color_index"] = resolved_index
     dxf["resolved_true_color"] = resolved_true_color
+
+    linetype = getattr(entity_style_map, "linetypes", {}).get(handle)
+    if linetype is not None:
+        dxf["linetype"], dxf["linetype_handle"], dxf["linetype_scale"] = linetype
     return dxf
 
 

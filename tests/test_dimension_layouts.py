@@ -167,3 +167,72 @@ def test_raw_dimension_rows_carry_extra_points(version: str) -> None:
     point15, point16 = rows[0x51F][11]
     _assert_point(point15, EXPECTED[0x51F][4], "radius point15")
     assert point16 is None
+
+
+@pytest.mark.parametrize("version", sorted(SAMPLES))
+def test_dimensions_reference_their_style_and_anonymous_block(version: str) -> None:
+    # The handle stream holds the common entity handles first, then the DIMSTYLE
+    # and the anonymous BLOCK with the saved graphics (ODA spec 20.4.22).
+    path = str(SAMPLES[version])
+    types = {row[0]: row[4] for row in raw.list_object_headers_with_type(path)}
+    text_position = {row[10]: row[2] for row in raw.decode_mtext_entities(path)}
+    doc = ezdwg.read(path)
+    by_handle = {int(e.handle): e.dxf for e in doc.modelspace().query("DIMENSION")}
+    assert set(EXPECTED) <= set(by_handle)
+
+    blocks = set()
+    for handle, dxf in by_handle.items():
+        label = f"{version} {handle:#x} {dxf['dimtype']}"
+        assert types[dxf["dimstyle_handle"]] == "DIMSTYLE", label
+        block = dxf["anonymous_block_handle"]
+        assert types[block] == "BLOCK_HEADER", label
+        assert dxf["anonymous_block_name"].startswith("*D"), label
+        assert dxf["char_height_source"] == "anonymous_block", label
+        # The block is this dimension's own: its text sits at the text midpoint
+        # (at most a text gap away), while the dimensions are far apart.
+        position = text_position[block]
+        midpoint = dxf["text_midpoint"]
+        offset = ((position[0] - midpoint[0]) ** 2 + (position[1] - midpoint[1]) ** 2) ** 0.5
+        assert offset < 2.0 * dxf["char_height"], label
+        blocks.add(block)
+    assert len(blocks) == len(by_handle)
+
+
+@pytest.mark.parametrize("version", sorted(SAMPLES))
+def test_raw_dimension_rows_agree_on_style_and_block_handles(version: str) -> None:
+    path = str(SAMPLES[version])
+    bulk = {row[0]: row[10] for _dimtype, row in raw.decode_dimension_entities(path)}
+    assert set(EXPECTED) <= set(bulk)
+    assert all(block is not None for _dimstyle, block in bulk.values())
+    for decode in (
+        raw.decode_dim_linear_entities,
+        raw.decode_dim_ordinate_entities,
+        raw.decode_dim_aligned_entities,
+        raw.decode_dim_ang3pt_entities,
+        raw.decode_dim_ang2ln_entities,
+        raw.decode_dim_radius_entities,
+        raw.decode_dim_diameter_entities,
+    ):
+        rows = decode(path)
+        assert rows, decode.__name__
+        for row in rows:
+            assert row[10] == bulk[row[0]], f"{version} {decode.__name__} {row[0]:#x}"
+
+
+def test_dimension_without_anonymous_block_has_no_block_handle() -> None:
+    # This drawing has no "*D" blocks at all: the block handle of its dimensions
+    # is null and must not be replaced by another block (e.g. an arrowhead).
+    path = str(ROOT / "examples/data/mechanical_example-imperial.dwg")
+    types = {row[0]: row[4] for row in raw.list_object_headers_with_type(path)}
+    rows = raw.decode_dimension_entities(path)
+    assert len(rows) == 17
+    rows = [row for _dimtype, row in rows]
+    rows += raw.decode_dim_linear_entities(path) + raw.decode_dim_diameter_entities(path)
+    assert len(rows) == 34
+    for row in rows:
+        dimstyle, block = row[10]
+        assert types[dimstyle] == "DIMSTYLE"
+        assert block is None
+    doc = ezdwg.read(path)
+    for entity in doc.modelspace().query("DIMENSION"):
+        assert "anonymous_block_name" not in entity.dxf

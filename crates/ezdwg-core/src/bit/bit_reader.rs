@@ -21,6 +21,7 @@ pub struct BitReader<'a> {
     byte_pos: usize,
     bit_pos: u8,
     codepage: Option<u16>,
+    pre_r2004_layout: bool,
 }
 
 impl<'a> BitReader<'a> {
@@ -36,7 +37,22 @@ impl<'a> BitReader<'a> {
             byte_pos: 0,
             bit_pos: 0,
             codepage,
+            pre_r2004_layout: false,
         }
+    }
+
+    /// Marks the data as an R2000 (AC1015) object.
+    ///
+    /// R2000 and R2004 share their object decoders, but one flag bit of the common
+    /// object data means something else: R2004+ stores "XDic Missing Flag" where
+    /// R2000 stores "Nolinks" (and always has the xdictionary handle). The decoders
+    /// ask the reader which of the two they are looking at.
+    pub fn set_pre_r2004_layout(&mut self, value: bool) {
+        self.pre_r2004_layout = value;
+    }
+
+    pub fn pre_r2004_layout(&self) -> bool {
+        self.pre_r2004_layout
     }
 
     pub fn tell_bits(&self) -> u64 {

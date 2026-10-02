@@ -33,6 +33,9 @@ where
 
     let mut handle_stream = BitWriter::new();
     handle_stream.write_h(0x02, common.owner_handle)?;
+    // R2000 always stores the xdictionary handle (null here); the "XDic Missing
+    // Flag" that lets later versions omit it does not exist yet.
+    handle_stream.write_h(0x03, 0)?;
     handle_stream.write_h(0x02, common.layer_handle)?;
 
     let obj_size_bits = type_prefix
@@ -80,9 +83,9 @@ fn write_common_header_no_obj_size(
     writer.write_b(0)?; // graphic_present_flag
     writer.write_bb(0)?; // entity_mode
     writer.write_bl(0)?; // num_of_reactors
-    writer.write_b(1)?; // xdic_missing_flag
-    writer.write_b(0)?; // no_links == 0 => CMC follows
-    writer.write_b(1)?; // CMC mode 1 => ACI byte
+    writer.write_b(1)?; // nolinks: no previous/next entity handles
+    writer.write_b(0)?; // color index as a bitshort: code 01 => one byte follows
+    writer.write_b(1)?;
     writer.write_rc((color_index & 0xFF) as u8)?;
     writer.write_bd(1.0)?; // ltype scale
     writer.write_bb(0)?; // ltype_flags

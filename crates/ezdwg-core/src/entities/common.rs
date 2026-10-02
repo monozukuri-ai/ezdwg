@@ -26,7 +26,17 @@ pub struct CommonEntityHeader {
     pub has_full_visual_style: bool,
     pub has_face_visual_style: bool,
     pub has_edge_visual_style: bool,
+    /// R13-R2000 with Nolinks = 0: the handle stream carries the previous and
+    /// next entity handles.
     pub has_legacy_entity_links: bool,
+    /// R13/R14 store those links after the layer and linetype handles;
+    /// R2000 stores them before the layer handle.
+    pub legacy_links_after_layer: bool,
+    /// Linetype scale of the entity (DXF group 48).
+    pub ltype_scale: f64,
+    /// R2004+: the color refers to a DBCOLOR object (color book color), whose
+    /// handle sits in the handle stream right before the layer handle.
+    pub has_color_handle: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -346,7 +356,15 @@ fn parse_common_entity_header_fields_from_entmode(
             ),
         ));
     }
-    let xdic_missing_flag = reader.read_b()?;
+    // R2004+ store "XDic Missing Flag" here. R2000 stores "Nolinks" in the same
+    // place and always has the xdictionary handle; with Nolinks = 0 the handle
+    // stream also carries the previous/next entity handles before the layer.
+    let first_flag = reader.read_b()?;
+    let (xdic_missing_flag, has_legacy_entity_links) = if reader.pre_r2004_layout() {
+        (0, has_legacy_entity_links || first_flag == 0)
+    } else {
+        (first_flag, has_legacy_entity_links)
+    };
     let has_ds_binary_data = if r2013_plus {
         reader.read_b()? != 0
     } else {
@@ -354,6 +372,7 @@ fn parse_common_entity_header_fields_from_entmode(
     };
 
     let mut color = CommonEntityColor::default();
+    let mut has_color_handle = false;
     let no_links = reader.read_b()?;
     if no_links == 0 {
         let color_mode = reader.read_b()?;
@@ -362,10 +381,14 @@ fn parse_common_entity_header_fields_from_entmode(
         } else {
             let flags = reader.read_rs(Endian::Little)?;
             color.index = Some(flags & 0x01FF);
-            if flags & 0x8000 != 0 {
+            has_color_handle = flags & 0x4000 != 0 && !reader.pre_r2004_layout();
+            if flags & 0x8000 != 0 && !has_color_handle {
                 // ENC (entity color): the RGB BL is followed by nothing else. Only
                 // the CMC form (used by tables/objects) carries color/book name
                 // strings; reading a TV here misaligned every true-color entity.
+                // A color book color (0x4000) keeps its value in the DBCOLOR object
+                // named in the handle stream and stores no RGB here, even with the
+                // complex color bit set.
                 color.true_color = Some(reader.read_bl()?);
             }
             if flags & 0x2000 != 0 {
@@ -376,7 +399,7 @@ fn parse_common_entity_header_fields_from_entmode(
         let _color_unknown = reader.read_b()?;
     }
 
-    let _ltype_scale = reader.read_bd()?;
+    let ltype_scale = reader.read_bd()?;
     let ltype_flags = reader.read_bb()?;
     let plotstyle_flags = reader.read_bb()?;
     let material_flags = if with_material_and_shadow {
@@ -414,6 +437,9 @@ fn parse_common_entity_header_fields_from_entmode(
         has_face_visual_style,
         has_edge_visual_style,
         has_legacy_entity_links,
+        legacy_links_after_layer: false,
+        ltype_scale,
+        has_color_handle,
     })
 }
 
@@ -448,7 +474,7 @@ fn parse_common_entity_header_r13_r14_spec(
     let is_bylayer_ltype = reader.read_b()? != 0;
     let no_links = reader.read_b()?;
     let color_index = reader.read_bs()?;
-    let _ltype_scale = reader.read_bd()?;
+    let ltype_scale = reader.read_bd()?;
     let _invisibility = reader.read_bs()?;
 
     Ok(CommonEntityHeader {
@@ -470,6 +496,9 @@ fn parse_common_entity_header_r13_r14_spec(
         has_face_visual_style: false,
         has_edge_visual_style: false,
         has_legacy_entity_links: no_links == 0,
+        legacy_links_after_layer: true,
+        ltype_scale,
+        has_color_handle: false,
     })
 }
 
@@ -507,7 +536,7 @@ fn parse_common_entity_header_r14_impl(
     let is_bylayer_ltype = reader.read_b()? != 0;
     let no_links = reader.read_b()?;
     let color = read_common_entity_color_cmc(reader)?;
-    let _ltype_scale = reader.read_bd()?;
+    let ltype_scale = reader.read_bd()?;
     let _invisibility = reader.read_bs()?;
     let _line_weight = reader.read_rc()?;
 
@@ -528,6 +557,9 @@ fn parse_common_entity_header_r14_impl(
         has_face_visual_style: false,
         has_edge_visual_style: false,
         has_legacy_entity_links: no_links == 0,
+        legacy_links_after_layer: true,
+        ltype_scale,
+        has_color_handle: false,
     })
 }
 
@@ -562,10 +594,108 @@ fn read_common_entity_color_cmc(reader: &mut BitReader<'_>) -> Result<CommonEnti
 #[cfg(test)]
 mod tests {
     use super::{
-        checked_handle_count, parse_common_entity_header_r2010, parse_common_entity_header_r2013,
+        checked_handle_count, parse_common_entity_handles, parse_common_entity_header,
+        parse_common_entity_header_r2010, parse_common_entity_header_r2013,
     };
-    use crate::bit::{BitReader, BitWriter};
+    use crate::bit::{BitReader, BitWriter, Endian};
     use crate::core::error::ErrorKind;
+
+    /// Common entity data of a R2000/R2004 entity followed by its handle stream.
+    /// `first_flag` is "Nolinks" in R2000 and "XDic Missing Flag" in R2004.
+    fn build_entity_with_handles(first_flag: u8, color: u16, handles: &[(u8, u64)]) -> Vec<u8> {
+        let mut data = BitWriter::new();
+        data.write_h(0, 0x50).expect("write handle");
+        data.write_bs(0).expect("write ext size");
+        data.write_b(0).expect("write graphic flag");
+        data.write_bb(2).expect("write entity mode"); // model space: no owner handle
+        data.write_bl(0).expect("write reactors");
+        data.write_b(first_flag)
+            .expect("write nolinks / xdic missing");
+        data.write_bs(color).expect("write color");
+        data.write_bd(2.5).expect("write ltype scale");
+        data.write_bb(3).expect("write ltype flags");
+        data.write_bb(0).expect("write plotstyle flags");
+        data.write_bs(0).expect("write invisibility");
+        data.write_rc(0).expect("write line weight");
+
+        let mut handle_stream = BitWriter::new();
+        for (code, value) in handles {
+            handle_stream
+                .write_h(*code, *value)
+                .expect("write handle ref");
+        }
+
+        let obj_size = 32 + data.len_bits();
+        let mut out = BitWriter::new();
+        out.write_rl(Endian::Little, obj_size as u32)
+            .expect("write obj size");
+        out.write_bits_from_bytes(&data.to_bytes(), data.len_bits())
+            .expect("write data");
+        out.write_bits_from_bytes(&handle_stream.to_bytes(), handle_stream.len_bits())
+            .expect("write handles");
+        out.into_bytes()
+    }
+
+    #[test]
+    fn r2000_reads_nolinks_where_r2004_reads_the_xdic_missing_flag() {
+        // Nolinks = 1: xdictionary (null), layer, linetype.
+        let bytes = build_entity_with_handles(1, 7, &[(3, 0), (5, 0x10), (5, 0x16)]);
+        let mut reader = BitReader::new(&bytes);
+        reader.set_pre_r2004_layout(true);
+        let header = parse_common_entity_header(&mut reader).expect("header");
+        assert_eq!(header.xdic_missing_flag, 0);
+        assert!(!header.has_legacy_entity_links);
+        assert_eq!(header.ltype_flags, 3);
+        assert_eq!(header.ltype_scale, 2.5);
+        reader.set_bit_pos(header.obj_size);
+        let handles = parse_common_entity_handles(&mut reader, &header).expect("handles");
+        assert_eq!(handles.xdic_obj, Some(0));
+        assert_eq!(handles.layer, 0x10);
+        assert_eq!(handles.ltype, Some(0x16));
+
+        // Nolinks = 0: the previous and next entity come before the layer.
+        let bytes =
+            build_entity_with_handles(0, 7, &[(3, 0), (8, 0), (6, 0), (5, 0x10), (5, 0x16)]);
+        let mut reader = BitReader::new(&bytes);
+        reader.set_pre_r2004_layout(true);
+        let header = parse_common_entity_header(&mut reader).expect("header");
+        assert_eq!(header.xdic_missing_flag, 0);
+        assert!(header.has_legacy_entity_links);
+        reader.set_bit_pos(header.obj_size);
+        let handles = parse_common_entity_handles(&mut reader, &header).expect("handles");
+        assert_eq!(handles.layer, 0x10);
+        assert_eq!(handles.ltype, Some(0x16));
+
+        // The same bits in a R2004 object: the flag says there is no xdictionary handle.
+        let bytes = build_entity_with_handles(1, 7, &[(5, 0x10), (5, 0x16)]);
+        let mut reader = BitReader::new(&bytes);
+        let header = parse_common_entity_header(&mut reader).expect("header");
+        assert_eq!(header.xdic_missing_flag, 1);
+        assert!(!header.has_legacy_entity_links);
+        reader.set_bit_pos(header.obj_size);
+        let handles = parse_common_entity_handles(&mut reader, &header).expect("handles");
+        assert_eq!(handles.xdic_obj, None);
+        assert_eq!(handles.layer, 0x10);
+        assert_eq!(handles.ltype, Some(0x16));
+    }
+
+    #[test]
+    fn color_book_color_stores_its_handle_before_the_layer_and_no_rgb() {
+        // 0x8000 complex color + 0x4000 color book handle + index 0x2A. No RGB
+        // value follows in the data; the DBCOLOR handle precedes the layer handle.
+        let bytes = build_entity_with_handles(1, 0xC02A, &[(5, 0x996), (5, 0x10), (5, 0x16)]);
+        let mut reader = BitReader::new(&bytes);
+        let header = parse_common_entity_header(&mut reader).expect("header");
+        assert!(header.has_color_handle);
+        assert_eq!(header.color.index, Some(0x2A));
+        assert_eq!(header.color.true_color, None);
+        assert_eq!(header.ltype_scale, 2.5);
+        assert_eq!(header.ltype_flags, 3);
+        reader.set_bit_pos(header.obj_size);
+        let handles = parse_common_entity_handles(&mut reader, &header).expect("handles");
+        assert_eq!(handles.layer, 0x10);
+        assert_eq!(handles.ltype, Some(0x16));
+    }
 
     #[test]
     fn checked_handle_count_rejects_counts_the_stream_cannot_hold() {
@@ -733,9 +863,14 @@ pub fn parse_common_entity_handles(
         None
     };
 
-    if header.has_legacy_entity_links {
+    let links_before_layer = header.has_legacy_entity_links && !header.legacy_links_after_layer;
+    if links_before_layer {
         let _previous = read_handle_reference(reader, header.handle)?;
         let _next = read_handle_reference(reader, header.handle)?;
+    }
+
+    if header.has_color_handle {
+        let _color_book_color = read_handle_reference(reader, header.handle)?;
     }
 
     let layer = read_handle_reference(reader, header.handle)?;
@@ -745,6 +880,11 @@ pub fn parse_common_entity_handles(
     } else {
         None
     };
+
+    if header.has_legacy_entity_links && header.legacy_links_after_layer {
+        let _previous = read_handle_reference(reader, header.handle)?;
+        let _next = read_handle_reference(reader, header.handle)?;
+    }
 
     let plotstyle = if header.plotstyle_flags == 3 {
         Some(read_handle_reference(reader, header.handle)?)
@@ -795,9 +935,13 @@ pub fn parse_common_entity_layer_handle(
         let _xdic_obj = read_handle_reference(reader, header.handle)?;
     }
 
-    if header.has_legacy_entity_links {
+    if header.has_legacy_entity_links && !header.legacy_links_after_layer {
         let _previous = read_handle_reference(reader, header.handle)?;
         let _next = read_handle_reference(reader, header.handle)?;
+    }
+
+    if header.has_color_handle {
+        let _color_book_color = read_handle_reference(reader, header.handle)?;
     }
 
     read_handle_reference(reader, header.handle)

@@ -4,6 +4,11 @@
 //! identical across `dim_linear`, `dim_diameter`, and `dim_radius`, so they
 //! live here to avoid drift between copies.
 
+use crate::bit::BitReader;
+use crate::core::result::Result;
+use crate::entities::common::{
+    parse_common_entity_handles, read_handle_reference, CommonEntityHeader,
+};
 use crate::entities::dim_linear::DimLinearEntity;
 
 #[derive(Clone, Copy, Debug)]
@@ -82,6 +87,20 @@ pub(crate) const R2010_PLUS_VARIANTS: [R2010PlusVariant; 8] = [
         has_r2007_flags: true,
     },
 ];
+
+/// Handle stream of a dimension: the common entity handles come first, then
+/// the DIMSTYLE and the anonymous BLOCK (ODA spec 20.4.22).
+///
+/// Returns `(dimstyle, anonymous_block, layer)`.
+pub(crate) fn read_dimension_handles(
+    reader: &mut BitReader<'_>,
+    header: &CommonEntityHeader,
+) -> Result<(u64, u64, u64)> {
+    let common_handles = parse_common_entity_handles(reader, header)?;
+    let dimstyle = read_handle_reference(reader, header.handle)?;
+    let block = read_handle_reference(reader, header.handle)?;
+    Ok((dimstyle, block, common_handles.layer))
+}
 
 pub(crate) fn plausibility_score(entity: &DimLinearEntity) -> u64 {
     let mut score = 0u64;
@@ -232,5 +251,56 @@ pub(crate) fn value_score(value: f64) -> u64 {
         10_000
     } else {
         1_000_000
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_dimension_handles;
+    use crate::bit::{BitReader, BitWriter, Endian};
+    use crate::entities::common::parse_common_entity_header;
+
+    #[test]
+    fn dimension_handles_follow_the_common_entity_handles() {
+        // R2004 common entity data: model space (no owner handle), no reactors,
+        // no xdictionary, linetype by handle.
+        let mut data = BitWriter::new();
+        data.write_h(0, 0x514).expect("write handle");
+        data.write_bs(0).expect("write ext size");
+        data.write_b(0).expect("write graphic flag");
+        data.write_bb(2).expect("write entity mode");
+        data.write_bl(0).expect("write reactors");
+        data.write_b(1).expect("write xdic missing");
+        data.write_bs(256).expect("write color");
+        data.write_bd(1.0).expect("write ltype scale");
+        data.write_bb(3).expect("write ltype flags");
+        data.write_bb(0).expect("write plotstyle flags");
+        data.write_bs(0).expect("write invisibility");
+        data.write_rc(0).expect("write line weight");
+
+        // Handle stream: layer, linetype, then DIMSTYLE and the anonymous BLOCK.
+        let mut handle_stream = BitWriter::new();
+        for (code, value) in [(5, 0x10), (5, 0x16), (5, 0x39A), (5, 0x529)] {
+            handle_stream
+                .write_h(code, value)
+                .expect("write handle ref");
+        }
+
+        let obj_size = 32 + data.len_bits();
+        let mut out = BitWriter::new();
+        out.write_rl(Endian::Little, obj_size as u32)
+            .expect("write obj size");
+        out.write_bits_from_bytes(&data.to_bytes(), data.len_bits())
+            .expect("write data");
+        out.write_bits_from_bytes(&handle_stream.to_bytes(), handle_stream.len_bits())
+            .expect("write handles");
+        let bytes = out.into_bytes();
+
+        let mut reader = BitReader::new(&bytes);
+        let header = parse_common_entity_header(&mut reader).expect("header");
+        reader.set_bit_pos(header.obj_size);
+        let (dimstyle, block, layer) =
+            read_dimension_handles(&mut reader, &header).expect("handles");
+        assert_eq!((dimstyle, block, layer), (0x39A, 0x529, 0x10));
     }
 }

@@ -65,6 +65,17 @@ Supported types for `to_points()`:
 | RAY | `[start, start + unit_vector]` |
 | XLINE | `[start - unit_vector, start + unit_vector]` |
 
+## Linetype
+
+Every entity carries its linetype next to its color and layer:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `linetype` | `str \| None` | `"BYLAYER"`, `"BYBLOCK"`, `"CONTINUOUS"` or the name of an entry of `Document.linetypes()`. `None` when the entity names a linetype that cannot be read |
+| `linetype_handle` | `int \| None` | Handle of the linetype record when the entity names one |
+| `linetype_scale` | `float` | The entity's own linetype scale (DXF group 48) |
+| `layer_handle` | `int` | Handle of the entity's layer; `Document.layers()` gives the layer's linetype for `BYLAYER` |
+
 ## Entity Type Reference
 
 ### LINE
@@ -162,9 +173,20 @@ Supported types for `to_points()`:
 | `elevation` | `float` | Boundary elevation |
 | `extrusion` | `(float, float, float)` | Extrusion vector |
 | `paths` | `list[dict]` | Boundary paths with `closed` and 3D `points` fields |
+| `pattern_angle` | `float` | Pattern angle in degrees (pattern fills only) |
+| `pattern_scale` | `float` | Pattern scale or spacing (pattern fills only) |
+| `pattern_double` | `bool` | Double hatch flag (pattern fills only) |
+| `pattern_lines` | `list[dict]` | Pattern definition (pattern fills only), see below |
 
 For closed paths, the high-level API repeats the first point at the end of the
 path. `to_points()` concatenates every path in source order.
+
+Each item of `pattern_lines` is one family of parallel lines with `angle`
+(degrees), `base`, `offset` and `dashes`. The values are stored already rotated
+and scaled: line `k` of the family runs through `base + k * offset` at `angle`,
+and `dashes` is its dash pattern (positive = dash, negative = gap, empty =
+continuous). The pattern keys are absent for solid fills and for hatches whose
+definition cannot be read.
 
 ### SPLINE
 
@@ -198,6 +220,9 @@ The `dxf` dictionary for DIMENSION entities includes:
 | `text` | `str` | Override text |
 | `angle` | `float` | Rotation angle in degrees |
 | `actual_measurement` | `float` | Computed measurement value |
+| `dimstyle_handle` | `int \| None` | Handle of the dimension style (`DIMSTYLE`) |
+| `anonymous_block_handle` | `int \| None` | Handle of the anonymous block (`BLOCK_HEADER`) that holds the saved graphics of the dimension; `None` when the dimension has no block |
+| `anonymous_block_name` | `str` | Name of that block (`*D...`); omitted when there is no block or its name is unknown |
 | `char_height` | `float` | Optional saved text height from the referenced anonymous block; omitted when unavailable or ambiguous |
 | `char_height_source` | `str` | `"anonymous_block"` when `char_height` was resolved from saved block text |
 

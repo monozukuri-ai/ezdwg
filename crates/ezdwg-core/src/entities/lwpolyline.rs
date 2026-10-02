@@ -555,7 +555,7 @@ fn parse_r14_lwpolyline_compact_header(
     }
 
     let _color_unknown = reader.read_b()?;
-    let _ltype_scale = reader.read_bd()?;
+    let ltype_scale = reader.read_bd()?;
     let _invisibility = reader.read_bs()?;
 
     Ok(CommonEntityHeader {
@@ -573,6 +573,9 @@ fn parse_r14_lwpolyline_compact_header(
         has_face_visual_style: false,
         has_edge_visual_style: false,
         has_legacy_entity_links: false,
+        legacy_links_after_layer: true,
+        ltype_scale,
+        has_color_handle: false,
     })
 }
 

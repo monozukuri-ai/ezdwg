@@ -181,16 +181,34 @@ fn decode_dimension_typed_row(
             Err(err) if best_effort => return Ok(None),
             Err(err) => return Err(to_py_err(err)),
         };
-        entity.common.anonymous_block_handle = recover_dimension_anonymous_block_handle_r2010_plus(
-            record,
-            version,
-            header,
-            object_handle,
-            entity.common.anonymous_block_handle,
-            &insert_name_state.known_block_handles,
-            &insert_name_state.named_block_handles,
-            &insert_name_state.block_header_names,
-        );
+        match decode_dimension_style_and_block_handles(record, version, header) {
+            // A null handle: the dimension has no anonymous block to recover.
+            Some((dimstyle_handle, 0)) => {
+                entity.common.dimstyle_handle = Some(dimstyle_handle);
+                entity.common.anonymous_block_handle = None;
+            }
+            Some((dimstyle_handle, block_handle))
+                if insert_name_state
+                    .known_block_handles
+                    .contains(&block_handle) =>
+            {
+                entity.common.dimstyle_handle = Some(dimstyle_handle);
+                entity.common.anonymous_block_handle = Some(block_handle);
+            }
+            _ => {
+                entity.common.anonymous_block_handle =
+                    recover_dimension_anonymous_block_handle_r2010_plus(
+                        record,
+                        version,
+                        header,
+                        object_handle,
+                        entity.common.anonymous_block_handle,
+                        &insert_name_state.known_block_handles,
+                        &insert_name_state.named_block_handles,
+                        &insert_name_state.block_header_names,
+                    );
+            }
+        }
         return Ok(Some((
             spec.dimtype,
             dim_entity_row_from_linear_like(&entity),
@@ -198,6 +216,21 @@ fn decode_dimension_typed_row(
     }
 
     Ok(None)
+}
+
+/// DIMSTYLE and anonymous BLOCK handles of a dimension record. They follow the
+/// common entity handles in the handle stream (ODA spec 20.4.22), so they can
+/// be read without decoding the dimension data itself.
+fn decode_dimension_style_and_block_handles(
+    record: &objects::ObjectRecord<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+) -> Option<(u64, u64)> {
+    let (mut reader, common, _handles) =
+        read_common_entity_header_and_handles(record, version, header)?;
+    let dimstyle = entities::common::read_handle_reference(&mut reader, common.handle).ok()?;
+    let block = entities::common::read_handle_reference(&mut reader, common.handle).ok()?;
+    Some((dimstyle, block))
 }
 
 fn build_ultra_minimal_dim_linear_entity(object_handle: u64) -> entities::DimLinearEntity {
@@ -293,21 +326,18 @@ fn decode_dim_linear_like_entity_minimal_for_version(
         common_header.handle = object_handle;
     }
 
+    // Handle stream: the common entity handles, then DIMSTYLE and the
+    // anonymous BLOCK (ODA spec 20.4.22).
     reader.set_bit_pos(common_header.obj_size);
-    let read_optional_handle = |reader: &mut BitReader<'_>| -> Option<u64> {
-        let pos = reader.get_pos();
-        match entities::common::read_handle_reference(reader, common_header.handle) {
-            Ok(handle) => Some(handle),
-            Err(_) => {
-                reader.set_pos(pos.0, pos.1);
-                None
-            }
-        }
-    };
-    let dimstyle_handle = read_optional_handle(reader);
-    let anonymous_block_handle = read_optional_handle(reader);
-    let layer_handle =
-        entities::common::parse_common_entity_layer_handle(reader, &common_header).unwrap_or(0);
+    let (layer_handle, dimstyle_handle, anonymous_block_handle) =
+        match entities::common::parse_common_entity_handles(reader, &common_header) {
+            Ok(common_handles) => (
+                common_handles.layer,
+                entities::common::read_handle_reference(reader, common_header.handle).ok(),
+                entities::common::read_handle_reference(reader, common_header.handle).ok(),
+            ),
+            Err(_) => (0, None, None),
+        };
 
     let common = entities::DimensionCommonData {
         handle: common_header.handle,
@@ -516,7 +546,11 @@ fn dim_entity_row_from_linear_like(entity: &entities::DimLinearEntity) -> DimEnt
             common.line_spacing_factor,
             common.insert_rotation,
         ),
-        (common.dimstyle_handle, common.anonymous_block_handle),
+        (
+            common.dimstyle_handle,
+            // A null handle: the dimension has no anonymous block.
+            common.anonymous_block_handle.filter(|handle| *handle != 0),
+        ),
         (entity.point15, entity.point16),
     )
 }
@@ -610,6 +644,11 @@ fn recover_dimension_anonymous_block_handle_r2010_plus(
     }
 
     let parsed_block_handle = parsed_block_handle.filter(|handle| *handle != 0);
+    // The handle read at its place in the handle stream is authoritative when
+    // it names a block; the scan below only recovers records where it does not.
+    if parsed_block_handle.is_some_and(|handle| known_block_handles.contains(&handle)) {
+        return parsed_block_handle;
+    }
 
     let mut base_handles = vec![object_handle];
     if object_handle > 1 {

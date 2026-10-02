@@ -134,8 +134,12 @@ impl<'a> Decoder<'a> {
     pub fn parse_object_record(&self, offset: u32) -> Result<ObjectRecord<'a>> {
         match self.version {
             DwgVersion::R13 | DwgVersion::R14 | DwgVersion::R2000 => {
-                r2000::parse_object_record(self.bytes, offset)
-                    .map(|record| record.with_codepage(self.codepage))
+                let pre_r2004_layout = matches!(self.version, DwgVersion::R2000);
+                r2000::parse_object_record(self.bytes, offset).map(|record| {
+                    record
+                        .with_codepage(self.codepage)
+                        .with_pre_r2004_layout(pre_r2004_layout)
+                })
             }
             DwgVersion::R2004 => {
                 let data = self.load_objects_section_data()?;

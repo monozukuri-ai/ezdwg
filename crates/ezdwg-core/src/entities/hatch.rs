@@ -25,6 +25,31 @@ pub struct HatchPath {
     pub points: Vec<(f64, f64)>,
 }
 
+/// One family of parallel pattern lines of a pattern-filled hatch.
+///
+/// The line `k` of the family runs through `base + k * offset` at `angle`
+/// (radians); `dashes` is its dash pattern (positive = dash, negative = gap,
+/// empty = continuous). The values are stored already rotated and scaled.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HatchPatternLine {
+    pub angle: f64,
+    pub base: (f64, f64),
+    pub offset: (f64, f64),
+    pub dashes: Vec<f64>,
+}
+
+/// Pattern definition of a pattern-filled hatch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HatchPattern {
+    /// Pattern angle in radians (DXF group 52).
+    pub angle: f64,
+    /// Pattern scale or spacing (DXF group 41).
+    pub scale: f64,
+    /// Double hatch flag (DXF group 77).
+    pub double: bool,
+    pub lines: Vec<HatchPatternLine>,
+}
+
 #[derive(Debug, Clone)]
 pub struct HatchEntity {
     pub handle: u64,
@@ -37,6 +62,8 @@ pub struct HatchEntity {
     pub elevation: f64,
     pub extrusion: (f64, f64, f64),
     pub paths: Vec<HatchPath>,
+    /// Only for pattern fills whose definition could be read.
+    pub pattern: Option<HatchPattern>,
 }
 
 pub fn decode_hatch(reader: &mut BitReader<'_>) -> Result<HatchEntity> {
@@ -372,6 +399,7 @@ fn decode_hatch_with_polyline_path_scan<'a>(
             elevation: 0.0,
             extrusion: (0.0, 0.0, 1.0),
             paths,
+            pattern: None,
         };
 
         let start_penalty =
@@ -544,14 +572,19 @@ fn decode_hatch_body(
         paths.push(HatchPath { closed, points });
     }
 
-    if let Err(err) = skip_hatch_definition_payload(reader, solid_fill, any_path_uses_pixel_size) {
-        if !matches!(
-            err.kind,
-            ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
-        ) {
-            return Err(err);
+    let pattern = match read_hatch_definition_payload(reader, solid_fill, any_path_uses_pixel_size)
+    {
+        Ok(pattern) => pattern,
+        Err(err)
+            if matches!(
+                err.kind,
+                ErrorKind::Format | ErrorKind::Decode | ErrorKind::Io
+            ) =>
+        {
+            None
         }
-    }
+        Err(err) => return Err(err),
+    };
 
     // Handles are stored in the handle stream at obj_size bit offset.
     reader.set_bit_pos(header.obj_size);
@@ -584,6 +617,7 @@ fn decode_hatch_body(
         elevation,
         extrusion,
         paths,
+        pattern,
     })
 }
 
@@ -777,28 +811,58 @@ fn skip_gradient_payload(reader: &mut BitReader<'_>, string_mode: HatchStringMod
     Ok(())
 }
 
-fn skip_hatch_definition_payload(
+/// Reads the hatch style, the pattern definition of a pattern fill and the seed points.
+///
+/// Returns the pattern definition when the fill is not solid and its values are usable.
+fn read_hatch_definition_payload(
     reader: &mut BitReader<'_>,
     solid_fill: bool,
     any_path_uses_pixel_size: bool,
-) -> Result<()> {
+) -> Result<Option<HatchPattern>> {
     let _style = reader.read_bs()?;
     let _pattern_type = reader.read_bs()?;
 
+    let mut pattern = None;
     if !solid_fill {
-        let _pattern_angle = reader.read_bd()?;
-        let _pattern_scale = reader.read_bd()?;
-        let _double_hatch = reader.read_b()?;
+        let angle = reader.read_bd()?;
+        let scale = reader.read_bd()?;
+        let double = reader.read_b()? != 0;
         let num_def_lines =
             bounded_count(reader.read_bs()? as u32, "hatch pattern definition lines")?;
+        let mut lines = Vec::with_capacity(num_def_lines.min(64));
         for _ in 0..num_def_lines {
-            let _line_angle = reader.read_bd()?;
-            let _line_origin = (reader.read_bd()?, reader.read_bd()?);
-            let _line_offset = (reader.read_bd()?, reader.read_bd()?);
+            let line_angle = reader.read_bd()?;
+            let base = (reader.read_bd()?, reader.read_bd()?);
+            let offset = (reader.read_bd()?, reader.read_bd()?);
             let num_dashes = bounded_count(reader.read_bs()? as u32, "hatch pattern dashes")?;
+            let mut dashes = Vec::with_capacity(num_dashes.min(64));
             for _ in 0..num_dashes {
-                let _dash_length = reader.read_bd()?;
+                dashes.push(reader.read_bd()?);
             }
+            lines.push(HatchPatternLine {
+                angle: line_angle,
+                base,
+                offset,
+                dashes,
+            });
+        }
+        let usable = angle.is_finite()
+            && scale.is_finite()
+            && lines.iter().all(|line| {
+                line.angle.is_finite()
+                    && line.base.0.is_finite()
+                    && line.base.1.is_finite()
+                    && line.offset.0.is_finite()
+                    && line.offset.1.is_finite()
+                    && line.dashes.iter().all(|dash| dash.is_finite())
+            });
+        if usable {
+            pattern = Some(HatchPattern {
+                angle,
+                scale,
+                double,
+                lines,
+            });
         }
     }
 
@@ -811,7 +875,7 @@ fn skip_hatch_definition_payload(
     for _ in 0..num_seed_points {
         let _seed = read_point2rd(reader)?;
     }
-    Ok(())
+    Ok(pattern)
 }
 
 fn read_point2rd(reader: &mut BitReader<'_>) -> Result<(f64, f64)> {
@@ -1220,6 +1284,7 @@ mod tests {
                 closed: true,
                 points: vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
             }],
+            pattern: None,
         };
         let garbage = HatchEntity {
             extrusion: (0.0, 0.0, 0.0),

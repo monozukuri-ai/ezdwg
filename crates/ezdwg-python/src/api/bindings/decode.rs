@@ -421,38 +421,7 @@ fn decode_graph_common_entity_handles_from_record(
     header: &ApiObjectHeader,
     object_handle: u64,
 ) -> Option<GraphCommonEntityHandles> {
-    let mut reader = record.bit_reader();
-    skip_object_type_prefix(&mut reader, version).ok()?;
-    let common = match version {
-        version::DwgVersion::R13 | version::DwgVersion::R14 => {
-            entities::common::parse_common_entity_header_r14(&mut reader).ok()?
-        }
-        version::DwgVersion::R2000
-        | version::DwgVersion::R2004
-        | version::DwgVersion::R2007 => {
-            entities::common::parse_common_entity_header_r2007(&mut reader).ok()?
-        }
-        version::DwgVersion::R2010 => parse_dim_common_header_r2010_plus_with_candidates(
-            &mut reader,
-            header,
-            |candidate_reader, end_bit| {
-                entities::common::parse_common_entity_header_r2010(candidate_reader, end_bit)
-            },
-        )?,
-        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-            parse_dim_common_header_r2010_plus_with_candidates(
-                &mut reader,
-                header,
-                |candidate_reader, end_bit| {
-                    entities::common::parse_common_entity_header_r2013(candidate_reader, end_bit)
-                },
-            )?
-        }
-        _ => return None,
-    };
-
-    reader.set_bit_pos(common.obj_size);
-    let handles = entities::common::parse_common_entity_handles(&mut reader, &common).ok()?;
+    let (_common, handles) = decode_common_entity_header_and_handles(record, version, header)?;
     let owner_handle = handles.owner_ref.filter(|handle| *handle != object_handle);
     Some(GraphCommonEntityHandles {
         owner_handle,
@@ -4006,6 +3975,66 @@ pub fn decode_hatch_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<H
             entity.elevation,
             entity.extrusion,
             paths,
+        ));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Pattern definitions of pattern-filled hatches:
+/// `(handle, pattern_angle, pattern_scale, double, lines)` with one
+/// `(angle, base, offset, dashes)` per family of parallel pattern lines.
+///
+/// Angles are in radians. The lines are stored already rotated and scaled: line `k`
+/// of a family runs through `base + k * offset`. Solid fills and hatches whose
+/// definition cannot be read have no row.
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_hatch_patterns(path: &str, limit: Option<usize>) -> PyResult<Vec<HatchPatternRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x4E, "HATCH", &dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity =
+            match decode_hatch_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
+                Ok(entity) => entity,
+                Err(_err) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+        let Some(pattern) = entity.pattern else {
+            continue;
+        };
+        let lines: Vec<HatchPatternLineRow> = pattern
+            .lines
+            .into_iter()
+            .map(|line| (line.angle, line.base, line.offset, line.dashes))
+            .collect();
+        result.push((
+            entity.handle,
+            pattern.angle,
+            pattern.scale,
+            pattern.double,
+            lines,
         ));
         if let Some(limit) = limit {
             if result.len() >= limit {

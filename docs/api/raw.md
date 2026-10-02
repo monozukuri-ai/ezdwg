@@ -141,6 +141,58 @@ raw.decode_layer_colors(path: str, limit: int | None = None) -> list[tuple[int, 
 
 Decode layer color information. Each tuple: `(handle, color_index, true_color)`.
 
+### decode_layer_names
+
+```python
+raw.decode_layer_names(path: str, limit: int | None = None) -> list[tuple[int, str]]
+```
+
+Decode the layer table. Each tuple: `(handle, name)`.
+
+## Linetype Data
+
+### decode_linetypes
+
+```python
+raw.decode_linetypes(path: str, limit: int | None = None) -> list[tuple[int, str, str, float, list[float]]]
+```
+
+Decode the linetype table. Each tuple: `(handle, name, description, pattern_length, dashes)`.
+`dashes` is the dash pattern in drawing units at linetype scale 1, with the DXF
+sign convention: positive = dash, negative = gap, 0 = dot. The table includes
+the built-in `ByBlock`, `ByLayer` and `Continuous` entries, whose pattern is empty.
+
+### decode_layer_linetypes
+
+```python
+raw.decode_layer_linetypes(path: str, limit: int | None = None) -> list[tuple[int, int]]
+```
+
+Linetype of every layer. Each tuple: `(layer_handle, linetype_handle)`.
+
+### decode_entity_linetypes
+
+```python
+raw.decode_entity_linetypes(path: str, limit: int | None = None) -> list[tuple[int, int, int, int | None, float]]
+```
+
+Linetype of every entity. Each tuple:
+`(handle, layer_handle, linetype_flags, linetype_handle, linetype_scale)`.
+
+| `linetype_flags` | Meaning |
+|------------------|---------|
+| 0 | BYLAYER: the linetype of `layer_handle` |
+| 1 | BYBLOCK |
+| 2 | CONTINUOUS |
+| 3 | The linetype named by `linetype_handle` |
+
+`linetype_scale` is the entity's own linetype scale (DXF group 48). The rows come
+from the common entity data, so they cover every entity type, including the ones
+without a geometry decoder, and `layer_handle` is the layer stored there.
+
+A dash of an entity is `dash * $LTSCALE * linetype_scale` drawing units long
+(`$LTSCALE` is `Document.header_variables()["ltscale"]`).
+
 ## Geometry Decode Functions
 
 All geometry decode functions take a `path` and optional `limit` parameter.
@@ -227,6 +279,9 @@ line_spacing_style, line_spacing_factor, insert_rotation), (dimstyle_handle,
 anonymous_block_handle), (point15 | None, point16 | None))`. The last element carries
 the type-specific extra points: DXF code 15 for `ANG3PT`/`ANG2LN`/`RADIUS`/`DIAMETER`
 and code 16 (`(x, y)`) for `ANG2LN`; other types yield `(None, None)`.
+`anonymous_block_handle` is the `BLOCK_HEADER` that holds the saved graphics of the
+dimension (`None` when the dimension has no block); the entities of that block have it
+as their owner handle.
 
 ### decode_insert_entities
 
@@ -265,3 +320,17 @@ for handle, cx, cy, cz, r, sa, ea in raw.decode_arc_entities("drawing.dwg"):
     print(f"Arc {handle}: center=({cx},{cy},{cz}) r={r} "
           f"angles={math.degrees(sa):.1f}°-{math.degrees(ea):.1f}°")
 ```
+
+### decode_hatch_patterns
+
+```python
+raw.decode_hatch_patterns(path: str, limit: int | None = None) -> list[tuple[int, float, float, bool, list[tuple[float, tuple[float, float], tuple[float, float], list[float]]]]]
+```
+
+Pattern definition of every pattern-filled hatch. Each tuple:
+`(handle, pattern_angle, pattern_scale, double, lines)`, with one
+`(angle, base, offset, dashes)` per family of parallel pattern lines. Angles are
+in radians. The lines are stored already rotated and scaled: line `k` of a
+family runs through `base + k * offset` at `angle`, dashed by `dashes`
+(empty = continuous). Solid fills and hatches whose definition cannot be read
+have no row.

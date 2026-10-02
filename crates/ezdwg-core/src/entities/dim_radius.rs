@@ -2,12 +2,12 @@ use crate::bit::{BitReader, Endian};
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
 use crate::entities::common::{
-    parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r2007,
-    parse_common_entity_header_r2010, parse_common_entity_header_r2013,
-    parse_common_entity_layer_handle, read_handle_reference, CommonEntityHeader,
+    parse_common_entity_header, parse_common_entity_header_r2007, parse_common_entity_header_r2010,
+    parse_common_entity_header_r2013, parse_common_entity_layer_handle, CommonEntityHeader,
 };
 use crate::entities::dim_common::{
-    plausibility_score, R2010PlusVariant, R2000_VARIANTS, R2010_PLUS_VARIANTS,
+    plausibility_score, read_dimension_handles, R2010PlusVariant, R2000_VARIANTS,
+    R2010_PLUS_VARIANTS,
 };
 use crate::entities::dim_linear::{
     decode_dim_linear, decode_dim_linear_r2007, DimLinearEntity, DimensionCommonData,
@@ -163,27 +163,22 @@ fn decode_r2010_plus_variant(
 
     reader.set_bit_pos(header.obj_size);
     let handles_pos = reader.get_pos();
-    let (dimstyle_handle, anonymous_block_handle, layer_handle) = match (
-        read_handle_reference(reader, header.handle),
-        read_handle_reference(reader, header.handle),
-        parse_common_entity_handles(reader, header),
-    ) {
-        (Ok(dimstyle), Ok(block), Ok(common_handles)) => {
-            (Some(dimstyle), Some(block), common_handles.layer)
-        }
-        _ if allow_handle_decode_failure => {
-            reader.set_pos(handles_pos.0, handles_pos.1);
-            let layer = parse_common_entity_layer_handle(reader, header).unwrap_or(0);
-            (None, None, layer)
-        }
-        _ => {
-            reader.set_pos(handles_pos.0, handles_pos.1);
-            return Err(DwgError::new(
-                ErrorKind::Decode,
-                "failed to decode DIM_RADIUS handles",
-            ));
-        }
-    };
+    let (dimstyle_handle, anonymous_block_handle, layer_handle) =
+        match read_dimension_handles(reader, header) {
+            Ok((dimstyle, block, layer)) => (Some(dimstyle), Some(block), layer),
+            Err(_) if allow_handle_decode_failure => {
+                reader.set_pos(handles_pos.0, handles_pos.1);
+                let layer = parse_common_entity_layer_handle(reader, header).unwrap_or(0);
+                (None, None, layer)
+            }
+            Err(_) => {
+                reader.set_pos(handles_pos.0, handles_pos.1);
+                return Err(DwgError::new(
+                    ErrorKind::Decode,
+                    "failed to decode DIM_RADIUS handles",
+                ));
+            }
+        };
 
     let common = DimensionCommonData {
         handle: header.handle,

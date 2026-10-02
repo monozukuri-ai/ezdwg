@@ -66,6 +66,45 @@ variables["insunits"]  # 4
 variables["extmin"]    # (0.0, 0.0, 0.0)
 ```
 
+#### linetypes
+
+```python
+Document.linetypes() -> dict[str, dict[str, Any]]
+```
+
+Linetype table by name. Each entry holds `handle`, `description`,
+`pattern_length` and `dashes`: the dash pattern in drawing units at linetype
+scale 1, with the DXF sign convention (positive = dash, negative = gap,
+0 = dot). The built-in `ByBlock`, `ByLayer` and `Continuous` entries have an
+empty pattern.
+
+```python
+doc = ezdwg.read("drawing.dwg")
+doc.linetypes()["CENTER"]["dashes"]  # [1.25, -0.25, 0.25, -0.25]
+```
+
+#### layers
+
+```python
+Document.layers() -> dict[str, dict[str, Any]]
+```
+
+Layer table by name. Each entry holds `handle`, `color_index`, `true_color` and
+`linetype` (the name of the layer's linetype, `None` when it cannot be read).
+
+```python
+layers = doc.layers()
+layers["Center"]["linetype"]  # "CENTER"
+
+ltscale = doc.header_variables()["ltscale"] or 1.0
+for entity in doc.modelspace().query("LINE"):
+    name = entity.dxf["linetype"]
+    if name == "BYLAYER":
+        layer = next(v for v in layers.values() if v["handle"] == entity.dxf["layer_handle"])
+        name = layer["linetype"]
+    scale = ltscale * entity.dxf["linetype_scale"]
+```
+
 #### units
 
 ```python
