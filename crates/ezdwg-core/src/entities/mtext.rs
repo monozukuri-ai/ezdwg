@@ -1,6 +1,10 @@
 use crate::bit::BitReader;
-use crate::core::error::ErrorKind;
+use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
+use crate::entities::common::parse_common_entity_header_r14_with_handle;
+use crate::entities::common::{
+    first_stream_string, parse_common_entity_header_for_format, StringStreamFormat,
+};
 use crate::entities::common::{
     parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r2007,
     parse_common_entity_header_r2010, parse_common_entity_header_r2013,
@@ -65,6 +69,160 @@ struct ParsedMTextBody {
 pub fn decode_mtext(reader: &mut BitReader<'_>) -> Result<MTextEntity> {
     let header = parse_common_entity_header(reader)?;
     decode_mtext_with_header(reader, header, false, false, false, false)
+}
+
+/// R13/R14 (ODA specification 20.4.46): the record ends with the text. Line
+/// spacing came with R2000 and the background fill with R2004.
+pub fn decode_mtext_r14(reader: &mut BitReader<'_>, object_handle: u64) -> Result<MTextEntity> {
+    let header = parse_common_entity_header_r14_with_handle(reader, object_handle)?;
+    let insertion = reader.read_3bd()?;
+    let extrusion = reader.read_3bd()?;
+    let x_axis_dir = reader.read_3bd()?;
+    let rect_width = reader.read_bd()?;
+    let text_height = reader.read_bd()?;
+    let attachment = reader.read_bs()?;
+    let drawing_dir = reader.read_bs()?;
+    let _extents_height = reader.read_bd()?;
+    let _extents_width = reader.read_bd()?;
+    let text = reader.read_tv()?;
+
+    reader.set_bit_pos(header.obj_size);
+    let common_handles = parse_common_entity_handles(reader, &header)?;
+
+    Ok(MTextEntity {
+        handle: header.handle,
+        color_index: header.color.index,
+        true_color: header.color.true_color,
+        owner_handle: common_handles.owner_ref,
+        layer_handle: common_handles.layer,
+        text,
+        insertion,
+        extrusion,
+        x_axis_dir,
+        rect_width,
+        text_height,
+        attachment,
+        drawing_dir,
+        background_flags: 0,
+        background_scale_factor: None,
+        background_color_index: None,
+        background_true_color: None,
+        background_transparency: None,
+    })
+}
+
+/// Background fill of an MTEXT: scale factor, color index, RGB value and
+/// transparency.
+type BackgroundFill = (f64, u16, u32, u32);
+
+/// MTEXT of R2007 and later, read as the specification lays it out (ODA
+/// specification 20.4.46).
+///
+/// These versions keep the text in the string stream of the object, where it
+/// is the first string; the data stream holds the other fields without it.
+/// The older decoders read the text from the data stream, where it is not,
+/// and found it through a search that can settle on a neighbouring position.
+/// A record that fails the checks here is left to them.
+pub fn decode_mtext_exact(
+    reader: &mut BitReader<'_>,
+    format: StringStreamFormat,
+    object_data_end_bit: u32,
+    object_handle: u64,
+) -> Result<MTextEntity> {
+    let header =
+        parse_common_entity_header_for_format(reader, format, object_data_end_bit, object_handle)?;
+    let insertion = reader.read_3bd()?;
+    let extrusion = reader.read_3bd()?;
+    let x_axis_dir = reader.read_3bd()?;
+    let rect_width = reader.read_bd()?;
+    let _rect_height = reader.read_bd()?;
+    let text_height = reader.read_bd()?;
+    let attachment = reader.read_bs()?;
+    let drawing_dir = reader.read_bs()?;
+    let _extents_height = reader.read_bd()?;
+    let _extents_width = reader.read_bd()?;
+
+    let not_exact = |what: &str| DwgError::new(ErrorKind::Format, format!("mtext {what}"));
+    let text = first_stream_string(reader, header.obj_size)
+        .ok_or_else(|| not_exact("has no text in its string stream"))?;
+    if !(1..=9).contains(&attachment)
+        || !text_height.is_finite()
+        || text_height <= 0.0
+        || ![insertion.0, insertion.1, insertion.2, rect_width]
+            .iter()
+            .all(|value| value.is_finite())
+    {
+        return Err(not_exact("has unusable placement data"));
+    }
+
+    // Line spacing, then the background fill. The names of a color book color
+    // are in the string stream as well, so the color takes no string bits.
+    let mut background_flags = 0u32;
+    let mut background_scale_factor = None;
+    let mut background_color_index = None;
+    let mut background_true_color = None;
+    let mut background_transparency = None;
+    let background = (|| -> Result<(u32, Option<BackgroundFill>)> {
+        let _linespacing_style = reader.read_bs()?;
+        let _linespacing_factor = reader.read_bd()?;
+        let _unknown_bit = reader.read_b()?;
+        let flags = reader.read_bl()?;
+        if (flags & 0x01) == 0 && (flags & 0x10) == 0 {
+            return Ok((flags, None));
+        }
+        let scale_factor = reader.read_bd()?;
+        let color_index = reader.read_bs()?;
+        let color_rgb = reader.read_bl()?;
+        let _color_byte = reader.read_rc()?;
+        let transparency = reader.read_bl()?;
+        Ok((
+            flags,
+            Some((scale_factor, color_index, color_rgb, transparency)),
+        ))
+    })();
+    if let Ok((flags, fill)) = background {
+        background_flags = flags;
+        if let Some((scale_factor, color_index, color_rgb, transparency)) = fill {
+            background_scale_factor = Some(scale_factor);
+            background_color_index = Some(color_index);
+            background_true_color = decode_mtext_background_true_color(color_rgb);
+            background_transparency = Some(transparency);
+        }
+    }
+
+    reader.set_bit_pos(header.obj_size);
+    let handles_pos = reader.get_pos();
+    let (owner_handle, layer_handle) = match parse_common_entity_handles(reader, &header) {
+        Ok(common_handles) => (common_handles.owner_ref, common_handles.layer),
+        Err(_) => {
+            reader.set_pos(handles_pos.0, handles_pos.1);
+            (
+                None,
+                parse_common_entity_layer_handle(reader, &header).unwrap_or(0),
+            )
+        }
+    };
+
+    Ok(MTextEntity {
+        handle: header.handle,
+        color_index: header.color.index,
+        true_color: header.color.true_color,
+        owner_handle,
+        layer_handle,
+        text,
+        insertion,
+        extrusion,
+        x_axis_dir,
+        rect_width,
+        text_height,
+        attachment,
+        drawing_dir,
+        background_flags,
+        background_scale_factor,
+        background_color_index,
+        background_true_color,
+        background_transparency,
+    })
 }
 
 pub fn decode_mtext_r2004(reader: &mut BitReader<'_>) -> Result<MTextEntity> {

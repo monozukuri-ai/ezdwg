@@ -1,6 +1,7 @@
 use crate::bit::BitReader;
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
+use crate::entities::common::parse_common_entity_header_r14_with_handle;
 use crate::entities::common::{
     parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r2007,
     parse_common_entity_header_r2010, parse_common_entity_header_r2013,
@@ -21,6 +22,12 @@ pub struct LeaderEntity {
 pub fn decode_leader(reader: &mut BitReader<'_>) -> Result<LeaderEntity> {
     let header = parse_common_entity_header(reader)?;
     decode_leader_with_header(reader, header, false, false)
+}
+
+/// R13/R14: the body is the one of R2000; only the common entity data differs.
+pub fn decode_leader_r14(reader: &mut BitReader<'_>, object_handle: u64) -> Result<LeaderEntity> {
+    let header = parse_common_entity_header_r14_with_handle(reader, object_handle)?;
+    decode_leader_with_header(reader, header, true, false)
 }
 
 pub fn decode_leader_r2007(reader: &mut BitReader<'_>) -> Result<LeaderEntity> {

@@ -2,7 +2,8 @@ use crate::bit::{BitReader, Endian};
 use crate::core::error::ErrorKind;
 use crate::core::result::Result;
 use crate::entities::common::{
-    parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r2007,
+    parse_common_entity_handles, parse_common_entity_header,
+    parse_common_entity_header_r14_with_handle, parse_common_entity_header_r2007,
     parse_common_entity_header_r2010, parse_common_entity_header_r2013,
     parse_common_entity_layer_handle, read_handle_reference, CommonEntityHeader,
 };
@@ -23,6 +24,37 @@ pub struct MInsertEntity {
 pub fn decode_minsert(reader: &mut BitReader<'_>) -> Result<MInsertEntity> {
     let header = parse_common_entity_header(reader)?;
     decode_minsert_with_header(reader, header, false, false)
+}
+
+/// R13/R14: as INSERT (three plain scale doubles, no owned object count),
+/// followed by the array counts and spacings.
+pub fn decode_minsert_r14(reader: &mut BitReader<'_>, object_handle: u64) -> Result<MInsertEntity> {
+    let header = parse_common_entity_header_r14_with_handle(reader, object_handle)?;
+    let position = reader.read_3bd()?;
+    let scale = reader.read_3bd()?;
+    let rotation = reader.read_bd()?;
+    let _extrusion = reader.read_3bd()?;
+    let _has_attribs = reader.read_b()?;
+    let num_columns = reader.read_bs()?;
+    let num_rows = reader.read_bs()?;
+    let column_spacing = reader.read_bd()?;
+    let row_spacing = reader.read_bd()?;
+
+    reader.set_bit_pos(header.obj_size);
+    parse_common_entity_handles(reader, &header)?;
+    let block_header_handle = read_handle_reference(reader, header.handle).ok();
+
+    Ok(MInsertEntity {
+        handle: header.handle,
+        position,
+        scale,
+        rotation,
+        num_columns,
+        num_rows,
+        column_spacing,
+        row_spacing,
+        block_header_handle,
+    })
 }
 
 pub fn decode_minsert_r2007(reader: &mut BitReader<'_>) -> Result<MInsertEntity> {
@@ -83,7 +115,8 @@ fn decode_minsert_with_header(
     let rotation = reader.read_bd()?;
     let _extrusion = reader.read_3bd()?;
     let has_attribs = reader.read_b()?;
-    let owned_obj_count = if has_attribs == 1 {
+    // R2004+ count the owned attributes; R2000 names the first and the last.
+    let owned_obj_count = if has_attribs == 1 && !reader.pre_r2004_layout() {
         reader.read_bl()?
     } else {
         0

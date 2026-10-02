@@ -1,11 +1,14 @@
 use crate::bit::{BitReader, Endian};
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
+use crate::entities::common::parse_common_entity_header_r14_with_handle;
 use crate::entities::common::{
     parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r2007,
     parse_common_entity_header_r2010, parse_common_entity_header_r2013,
-    parse_common_entity_layer_handle, read_handle_reference, CommonEntityHeader,
+    parse_common_entity_layer_handle, read_handle_reference, string_stream_reader,
+    CommonEntityHeader,
 };
+use crate::entities::common::{parse_common_entity_header_for_format, StringStreamFormat};
 use crate::entities::mtext::{decode_embedded_mtext_r2010, EmbeddedMTextData};
 use crate::entities::text::decode_r21_text_tail;
 
@@ -42,6 +45,364 @@ struct AttribTailData {
     lock_position: bool,
     prompt: Option<String>,
     embedded_mtext: Option<EmbeddedMTextData>,
+}
+
+/// The most strings an attribute keeps in its string stream: TEXT value,
+/// embedded MTEXT text, tag and prompt, with room for writers that add more.
+const MAX_ATTRIB_STRINGS: usize = 8;
+
+/// ATTRIB or ATTDEF of R2007 and later, read as the specification lays it out
+/// (ODA specification 20.4.4 and 20.4.5).
+///
+/// These versions keep every string of an object in its string stream: the
+/// data stream holds the TEXT fields without the text value and then the
+/// attribute fields, and the string stream holds the text value, the tag and,
+/// for ATTDEF, the prompt. The data stream ends exactly where the strings
+/// begin, which is what this function checks before it accepts a record; the
+/// callers keep the older heuristics as a fallback for records that do not
+/// pass.
+///
+/// A multi-line attribute (R2018, attribute type 2 or 4) embeds a whole MTEXT
+/// between the type and the attribute fields. Its text is the string in front
+/// of the tag; the flags and the lock bit are the last fields of the data
+/// stream and are read from its end. The position and size are the ones of the
+/// TEXT fields.
+///
+/// `object_data_end_bit` is where the handle stream begins; R2007 stores it in
+/// the record, so the argument is not used there.
+pub fn decode_attrib_exact(
+    reader: &mut BitReader<'_>,
+    format: StringStreamFormat,
+    object_data_end_bit: u32,
+    object_handle: u64,
+    is_attdef: bool,
+) -> Result<AttribEntity> {
+    let header =
+        parse_common_entity_header_for_format(reader, format, object_data_end_bit, object_handle)?;
+
+    let data_flags = reader.read_rc()?;
+    let elevation = if (data_flags & 0x01) == 0 {
+        reader.read_rd(Endian::Little)?
+    } else {
+        0.0
+    };
+    let insertion_x = reader.read_rd(Endian::Little)?;
+    let insertion_y = reader.read_rd(Endian::Little)?;
+    let alignment = if (data_flags & 0x02) == 0 {
+        let align_x = reader.read_dd(insertion_x)?;
+        let align_y = reader.read_dd(insertion_y)?;
+        Some((align_x, align_y, elevation))
+    } else {
+        None
+    };
+    let extrusion = reader.read_be()?;
+    let thickness = reader.read_bt()?;
+    let oblique_angle = if (data_flags & 0x04) == 0 {
+        reader.read_rd(Endian::Little)?
+    } else {
+        0.0
+    };
+    let rotation = if (data_flags & 0x08) == 0 {
+        reader.read_rd(Endian::Little)?
+    } else {
+        0.0
+    };
+    let height = reader.read_rd(Endian::Little)?;
+    let width_factor = if (data_flags & 0x10) == 0 {
+        reader.read_rd(Endian::Little)?
+    } else {
+        1.0
+    };
+    let generation = if (data_flags & 0x20) == 0 {
+        reader.read_bs()?
+    } else {
+        0
+    };
+    let horizontal_alignment = if (data_flags & 0x40) == 0 {
+        reader.read_bs()?
+    } else {
+        0
+    };
+    let vertical_alignment = if (data_flags & 0x80) == 0 {
+        reader.read_bs()?
+    } else {
+        0
+    };
+
+    let has_version = format != StringStreamFormat::R2007;
+    if has_version {
+        let _version = reader.read_rc()?;
+    }
+    let attribute_type = if format == StringStreamFormat::R2018 {
+        reader.read_rc()?
+    } else {
+        1
+    };
+    let multi_line = match attribute_type {
+        1 => false,
+        2 | 4 => true,
+        _ => {
+            return Err(DwgError::new(
+                ErrorKind::Format,
+                format!("unknown attribute type: {attribute_type}"),
+            ))
+        }
+    };
+
+    let not_exact = |what: &str| DwgError::new(ErrorKind::Format, format!("attribute {what}"));
+    let (mut string_reader, strings_end) = string_stream_reader(reader, header.obj_size)
+        .ok_or_else(|| not_exact("has no string stream"))?;
+    let strings_start = string_reader.tell_bits();
+
+    // The attribute fields end the data stream: [ATTDEF version RC], lock
+    // position B and, in front of it, flags RC.
+    let attdef_version_bits = if is_attdef && has_version { 8 } else { 0 };
+    let flags_bit = strings_start
+        .checked_sub(attdef_version_bits + 9)
+        .filter(|bit| *bit >= reader.tell_bits())
+        .ok_or_else(|| not_exact("data is shorter than its fields"))?;
+    let mut tail_reader = reader.clone();
+    tail_reader.set_bit_pos(flags_bit as u32);
+    let flags = tail_reader.read_rc()?;
+    let lock_position = tail_reader.read_b()? != 0;
+
+    if !multi_line {
+        let _field_length = reader.read_bs()?;
+        let _flags = reader.read_rc()?;
+        let _lock_position = reader.read_b()?;
+        if attdef_version_bits != 0 {
+            let _attdef_version = reader.read_rc()?;
+        }
+        if reader.tell_bits() != strings_start {
+            return Err(not_exact("data does not end at its string stream"));
+        }
+    }
+
+    let mut strings: Vec<String> = Vec::new();
+    while strings.len() < MAX_ATTRIB_STRINGS && string_reader.tell_bits() < u64::from(strings_end) {
+        match string_reader.read_tu() {
+            Ok(value) if string_reader.tell_bits() <= u64::from(strings_end) => strings.push(value),
+            _ => break,
+        }
+    }
+    // Single line: text value, tag, [prompt]. Multi line: the text of the
+    // embedded MTEXT sits between the (usually empty) text value and the tag.
+    let trailing = if is_attdef { 2 } else { 1 };
+    let (text, tag, prompt) = if multi_line {
+        if strings.len() < trailing + 2 {
+            return Err(not_exact("has too few strings"));
+        }
+        let prompt = is_attdef.then(|| strings[strings.len() - 1].clone());
+        let tag = strings[strings.len() - trailing].clone();
+        let mut text = mtext_plain_text(&strings[strings.len() - trailing - 1]);
+        if text.is_empty() {
+            text = strings[0].clone();
+        }
+        (text, tag, prompt)
+    } else {
+        if strings.len() != trailing + 1 {
+            return Err(not_exact("has an unexpected number of strings"));
+        }
+        let prompt = is_attdef.then(|| strings[2].clone());
+        (strings[0].clone(), strings[1].clone(), prompt)
+    };
+    if tag.is_empty() || tag.chars().any(char::is_control) {
+        return Err(not_exact("has no usable tag"));
+    }
+    if ![insertion_x, insertion_y, elevation, height, rotation]
+        .iter()
+        .all(|value| value.is_finite())
+        || height <= 0.0
+    {
+        return Err(not_exact("has an unusable position or height"));
+    }
+
+    reader.set_bit_pos(header.obj_size);
+    let (owner_handle, layer_handle, style_handle) =
+        match parse_common_entity_handles(reader, &header) {
+            Ok(common_handles) => (
+                common_handles.owner_ref,
+                common_handles.layer,
+                // The handles of an embedded MTEXT come first in a multi-line attribute.
+                if multi_line {
+                    None
+                } else {
+                    read_handle_reference(reader, header.handle).ok()
+                },
+            ),
+            Err(_) => (None, 0, None),
+        };
+
+    Ok(AttribEntity {
+        handle: header.handle,
+        owner_handle,
+        color_index: header.color.index,
+        true_color: header.color.true_color,
+        layer_handle,
+        text,
+        insertion: (insertion_x, insertion_y, elevation),
+        alignment,
+        extrusion,
+        thickness,
+        oblique_angle,
+        height,
+        rotation,
+        width_factor,
+        generation,
+        horizontal_alignment,
+        vertical_alignment,
+        style_handle,
+        tag: Some(tag),
+        flags,
+        lock_position,
+        prompt,
+    })
+}
+
+/// Plain text of MTEXT content: paragraph breaks become line feeds and the
+/// formatting codes are dropped.
+fn mtext_plain_text(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::with_capacity(value.len());
+    let mut index = 0;
+    // Skips the argument of a formatting code, up to and including its ';'.
+    let skip_argument = |index: &mut usize| {
+        while *index < chars.len() && chars[*index] != ';' {
+            *index += 1;
+        }
+        if *index < chars.len() {
+            *index += 1;
+        }
+    };
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '{' || ch == '}' {
+            index += 1;
+            continue;
+        }
+        if ch != '\\' {
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        let Some(&code) = chars.get(index + 1) else {
+            out.push('\\');
+            break;
+        };
+        index += 2;
+        match code {
+            '\\' | '{' | '}' => out.push(code),
+            'P' | 'X' => out.push('\n'),
+            '~' => out.push(' '),
+            'L' | 'l' | 'O' | 'o' | 'K' | 'k' => {}
+            'U' | 'u'
+                if chars.get(index) == Some(&'+')
+                    && chars.len() >= index + 5
+                    && chars[index + 1..index + 5]
+                        .iter()
+                        .all(char::is_ascii_hexdigit) =>
+            {
+                let digits: String = chars[index + 1..index + 5].iter().collect();
+                match u32::from_str_radix(&digits, 16)
+                    .ok()
+                    .and_then(char::from_u32)
+                {
+                    Some(decoded) => out.push(decoded),
+                    None => out.push(code),
+                }
+                index += 5;
+            }
+            'S' => {
+                // Stacked text: keep both parts, separated by a slash.
+                while index < chars.len() && chars[index] != ';' {
+                    out.push(match chars[index] {
+                        '#' | '^' => '/',
+                        other => other,
+                    });
+                    index += 1;
+                }
+                if index < chars.len() {
+                    index += 1;
+                }
+            }
+            'A' | 'C' | 'c' | 'F' | 'f' | 'H' | 'h' | 'Q' | 'q' | 'T' | 't' | 'W' | 'w' | 'p' => {
+                skip_argument(&mut index);
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+pub fn decode_attrib_r14(reader: &mut BitReader<'_>, object_handle: u64) -> Result<AttribEntity> {
+    decode_attrib_like_r14(reader, object_handle, false)
+}
+
+pub fn decode_attdef_r14(reader: &mut BitReader<'_>, object_handle: u64) -> Result<AttribEntity> {
+    decode_attrib_like_r14(reader, object_handle, true)
+}
+
+/// R13/R14 (ODA specification 20.4.4 and 20.4.5): the TEXT fields are stored in
+/// full, without the data flags of R2000, followed by the tag, the field
+/// length and the flags; an ATTDEF ends with its prompt.
+fn decode_attrib_like_r14(
+    reader: &mut BitReader<'_>,
+    object_handle: u64,
+    is_attdef: bool,
+) -> Result<AttribEntity> {
+    let header = parse_common_entity_header_r14_with_handle(reader, object_handle)?;
+    let elevation = reader.read_bd()?;
+    let insertion_x = reader.read_rd(Endian::Little)?;
+    let insertion_y = reader.read_rd(Endian::Little)?;
+    let align_x = reader.read_rd(Endian::Little)?;
+    let align_y = reader.read_rd(Endian::Little)?;
+    let extrusion = reader.read_3bd()?;
+    let thickness = reader.read_bd()?;
+    let oblique_angle = reader.read_bd()?;
+    let rotation = reader.read_bd()?;
+    let height = reader.read_bd()?;
+    let width_factor = reader.read_bd()?;
+    let text = reader.read_tv()?;
+    let generation = reader.read_bs()?;
+    let horizontal_alignment = reader.read_bs()?;
+    let vertical_alignment = reader.read_bs()?;
+    let tag = reader.read_tv()?;
+    let _field_length = reader.read_bs()?;
+    let flags = reader.read_rc()?;
+    let prompt = if is_attdef {
+        Some(reader.read_tv()?)
+    } else {
+        None
+    };
+
+    reader.set_bit_pos(header.obj_size);
+    let common_handles = parse_common_entity_handles(reader, &header)?;
+    let style_handle = read_handle_reference(reader, header.handle).ok();
+
+    Ok(AttribEntity {
+        handle: header.handle,
+        owner_handle: common_handles.owner_ref,
+        color_index: header.color.index,
+        true_color: header.color.true_color,
+        layer_handle: common_handles.layer,
+        text,
+        insertion: (insertion_x, insertion_y, elevation),
+        alignment: Some((align_x, align_y, elevation)),
+        extrusion,
+        thickness,
+        oblique_angle,
+        height,
+        rotation,
+        width_factor,
+        generation,
+        horizontal_alignment,
+        vertical_alignment,
+        style_handle,
+        tag: Some(tag),
+        flags,
+        lock_position: false,
+        prompt,
+    })
 }
 
 pub fn decode_attrib(reader: &mut BitReader<'_>) -> Result<AttribEntity> {
@@ -240,7 +601,9 @@ fn decode_attrib_like_body(
     } else {
         for with_version_prefix in [false, true] {
             reader.set_pos(tail_start.0, tail_start.1);
-            match parse_attrib_tail_data(reader, is_attdef, with_version_prefix) {
+            // The lock position flag exists from R2007 on, the versions that
+            // store their text as Unicode.
+            match parse_attrib_tail_data(reader, is_attdef, with_version_prefix, use_unicode_text) {
                 Ok(parsed) => {
                     tail = parsed;
                     break;
@@ -694,6 +1057,7 @@ fn parse_attrib_tail_data(
     reader: &mut BitReader<'_>,
     is_attdef: bool,
     with_version_prefix: bool,
+    has_lock_position: bool,
 ) -> Result<AttribTailData> {
     if with_version_prefix {
         let _version = reader.read_rc()?;
@@ -702,7 +1066,7 @@ fn parse_attrib_tail_data(
     let tag = reader.read_tv()?;
     let _field_length = reader.read_bs()?;
     let flags = reader.read_rc()?;
-    let lock_position = reader.read_b()? != 0;
+    let lock_position = has_lock_position && reader.read_b()? != 0;
     let prompt = if is_attdef {
         Some(reader.read_tv()?)
     } else {
@@ -1187,6 +1551,58 @@ mod tests {
         let embedded = tail.embedded_mtext.expect("embedded mtext");
         assert_eq!(embedded.text, "VALUE");
         assert_eq!(embedded.insertion, (10.0, 20.0, 0.0));
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::{mtext_plain_text, parse_attrib_tail_data};
+    use crate::bit::{BitReader, BitWriter};
+
+    #[test]
+    fn mtext_plain_text_drops_formatting_and_keeps_paragraphs() {
+        assert_eq!(mtext_plain_text("first\\Psecond"), "first\nsecond");
+        assert_eq!(
+            mtext_plain_text("{\\fArial|b0|i0;\\H2.5;bold} \\C1;red\\~x"),
+            "bold red x"
+        );
+        assert_eq!(
+            mtext_plain_text("\\S1#2; \\U+00B0 \\\\ \\{a\\}"),
+            "1/2 \u{b0} \\ {a}"
+        );
+        assert_eq!(mtext_plain_text("C:\\Users"), "C:Users");
+        assert_eq!(mtext_plain_text("plain"), "plain");
+    }
+
+    fn attdef_tail(with_lock_position: bool) -> Vec<u8> {
+        let mut writer = BitWriter::new();
+        writer.write_tv("PART_NO").expect("write tag");
+        writer.write_bs(0).expect("write field length");
+        writer.write_rc(2).expect("write flags");
+        if with_lock_position {
+            writer.write_b(1).expect("write lock position");
+        }
+        writer.write_tv("Part number?").expect("write prompt");
+        writer.into_bytes()
+    }
+
+    #[test]
+    fn attdef_tail_before_r2007_has_no_lock_position_bit() {
+        // R2000/R2004: tag, field length, flags, prompt. Reading a lock bit that
+        // is not there shifts the prompt by one bit.
+        let bytes = attdef_tail(false);
+        let mut reader = BitReader::new(&bytes);
+        let tail = parse_attrib_tail_data(&mut reader, true, false, false).expect("parse tail");
+        assert_eq!(tail.tag.as_deref(), Some("PART_NO"));
+        assert_eq!(tail.flags, 2);
+        assert!(!tail.lock_position);
+        assert_eq!(tail.prompt.as_deref(), Some("Part number?"));
+
+        let bytes = attdef_tail(true);
+        let mut reader = BitReader::new(&bytes);
+        let tail = parse_attrib_tail_data(&mut reader, true, false, true).expect("parse tail");
+        assert!(tail.lock_position);
+        assert_eq!(tail.prompt.as_deref(), Some("Part number?"));
     }
 }
 

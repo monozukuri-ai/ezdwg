@@ -1,11 +1,12 @@
 use crate::bit::{BitReader, Endian};
-use crate::core::error::ErrorKind;
+use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
 use crate::entities::common::{
-    parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r14,
-    parse_common_entity_header_r2007, parse_common_entity_header_r2010,
-    parse_common_entity_header_r2013, parse_common_entity_layer_handle, read_handle_reference,
-    CommonEntityHeader,
+    parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_for_format,
+    parse_common_entity_header_r14, parse_common_entity_header_r2007,
+    parse_common_entity_header_r2010, parse_common_entity_header_r2013,
+    parse_common_entity_layer_handle, read_handle_reference, string_stream_reader,
+    CommonEntityHeader, StringStreamFormat,
 };
 
 #[derive(Debug, Clone)]
@@ -54,6 +55,112 @@ pub fn decode_text_r14(reader: &mut BitReader<'_>, object_handle: u64) -> Result
         header.handle = object_handle;
     }
     decode_text_with_header_r14(reader, header, true)
+}
+
+/// TEXT of R2007 and later, read as the specification lays it out (ODA
+/// specification 20.4.2).
+///
+/// These versions keep the text value in the string stream of the object. The
+/// data stream holds the TEXT fields without it and ends exactly where the
+/// strings begin, which is what this function checks before it accepts a
+/// record; the callers keep the older heuristics for records that do not pass.
+pub fn decode_text_exact(
+    reader: &mut BitReader<'_>,
+    format: StringStreamFormat,
+    object_data_end_bit: u32,
+    object_handle: u64,
+) -> Result<TextEntity> {
+    let header =
+        parse_common_entity_header_for_format(reader, format, object_data_end_bit, object_handle)?;
+
+    let data_flags = reader.read_rc()?;
+    let elevation = if (data_flags & 0x01) == 0 {
+        reader.read_rd(Endian::Little)?
+    } else {
+        0.0
+    };
+    let insertion_x = reader.read_rd(Endian::Little)?;
+    let insertion_y = reader.read_rd(Endian::Little)?;
+    let alignment = if (data_flags & 0x02) == 0 {
+        let align_x = reader.read_dd(insertion_x)?;
+        let align_y = reader.read_dd(insertion_y)?;
+        Some((align_x, align_y, elevation))
+    } else {
+        None
+    };
+    let extrusion = reader.read_be()?;
+    let thickness = reader.read_bt()?;
+    let oblique_angle = if (data_flags & 0x04) == 0 {
+        reader.read_rd(Endian::Little)?
+    } else {
+        0.0
+    };
+    let rotation = if (data_flags & 0x08) == 0 {
+        reader.read_rd(Endian::Little)?
+    } else {
+        0.0
+    };
+    let height = reader.read_rd(Endian::Little)?;
+    let width_factor = if (data_flags & 0x10) == 0 {
+        reader.read_rd(Endian::Little)?
+    } else {
+        1.0
+    };
+    let generation = if (data_flags & 0x20) == 0 {
+        reader.read_bs()?
+    } else {
+        0
+    };
+    let horizontal_alignment = if (data_flags & 0x40) == 0 {
+        reader.read_bs()?
+    } else {
+        0
+    };
+    let vertical_alignment = if (data_flags & 0x80) == 0 {
+        reader.read_bs()?
+    } else {
+        0
+    };
+
+    let not_exact = |what: &str| DwgError::new(ErrorKind::Format, format!("text {what}"));
+    let (mut strings, strings_end) = string_stream_reader(reader, header.obj_size)
+        .ok_or_else(|| not_exact("has no string stream"))?;
+    if reader.tell_bits() != strings.tell_bits() {
+        return Err(not_exact("data does not end at its string stream"));
+    }
+    let text = strings.read_tu()?;
+    if strings.tell_bits() > u64::from(strings_end) {
+        return Err(not_exact("value runs past its string stream"));
+    }
+    if ![insertion_x, insertion_y, elevation, height, rotation]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Err(not_exact("has an unusable position or height"));
+    }
+
+    let (owner_handle, layer_handle, style_handle) = decode_text_handles(reader, &header, true)?;
+
+    Ok(TextEntity {
+        handle: header.handle,
+        color_index: header.color.index,
+        true_color: header.color.true_color,
+        owner_handle,
+        layer_handle,
+        text,
+        insertion: (insertion_x, insertion_y, elevation),
+        alignment,
+        extrusion,
+        thickness,
+        oblique_angle,
+        height,
+        rotation,
+        width_factor,
+        generation,
+        horizontal_alignment,
+        vertical_alignment,
+        style_handle,
+    })
 }
 
 pub fn decode_text_r2007(reader: &mut BitReader<'_>) -> Result<TextEntity> {

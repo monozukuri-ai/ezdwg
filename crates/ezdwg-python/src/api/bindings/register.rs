@@ -25,6 +25,9 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_linetypes, module)?)?;
     module.add_function(wrap_pyfunction!(decode_layer_linetypes, module)?)?;
     module.add_function(wrap_pyfunction!(decode_entity_linetypes, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_entity_lineweights, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_layer_states, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_dimstyles, module)?)?;
     module.add_function(wrap_pyfunction!(decode_line_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_line_owner_handles, module)?)?;
     module.add_function(wrap_pyfunction!(decode_point_entities, module)?)?;

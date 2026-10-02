@@ -2,9 +2,10 @@ use crate::bit::BitReader;
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
 use crate::entities::common::{
-    parse_common_entity_header, parse_common_entity_header_r14, parse_common_entity_header_r2007,
-    parse_common_entity_header_r2010, parse_common_entity_header_r2013,
-    parse_common_entity_owner_and_layer_handle, CommonEntityHeader,
+    parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r14,
+    parse_common_entity_header_r2007, parse_common_entity_header_r2010,
+    parse_common_entity_header_r2013, parse_common_entity_owner_and_layer_handle,
+    CommonEntityHeader,
 };
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -28,6 +29,11 @@ pub fn decode_point(reader: &mut BitReader<'_>) -> Result<PointEntity> {
 
 pub fn decode_point_r14(reader: &mut BitReader<'_>, object_handle: u64) -> Result<PointEntity> {
     let saved = reader.get_pos();
+    if let Some(entity) = decode_point_r14_spec(reader, object_handle) {
+        return Ok(entity);
+    }
+
+    reader.set_pos(saved.0, saved.1);
     if let Ok(entity) = decode_point_r14_fallback(reader, object_handle) {
         return Ok(entity);
     }
@@ -52,6 +58,34 @@ pub fn decode_point_r14(reader: &mut BitReader<'_>, object_handle: u64) -> Resul
 
     reader.set_pos(saved.0, saved.1);
     decode_point_r14_fallback(reader, object_handle)
+}
+
+/// R13/R14 as specified: thickness and extrusion are stored in full (BD and
+/// 3BD). Accepted only when the point data ends exactly where the handle
+/// stream begins; the scan below stays for records that do not.
+fn decode_point_r14_spec(reader: &mut BitReader<'_>, object_handle: u64) -> Option<PointEntity> {
+    let mut header = parse_common_entity_header_r14(reader).ok()?;
+    if header.handle == 0 {
+        header.handle = object_handle;
+    }
+    let location = reader.read_3bd().ok()?;
+    let _thickness = reader.read_bd().ok()?;
+    let _extrusion = reader.read_3bd().ok()?;
+    let x_axis_angle = reader.read_bd().ok()?;
+    if reader.tell_bits() != u64::from(header.obj_size) {
+        return None;
+    }
+    let common_handles = parse_common_entity_handles(reader, &header).ok()?;
+
+    Some(PointEntity {
+        handle: header.handle,
+        color_index: header.color.index,
+        true_color: header.color.true_color,
+        owner_handle: common_handles.owner_ref,
+        layer_handle: common_handles.layer,
+        location,
+        x_axis_angle,
+    })
 }
 
 fn decode_point_r14_fallback(

@@ -44,7 +44,8 @@ pub use arc::{
     decode_arc, decode_arc_r14, decode_arc_r2007, decode_arc_r2010, decode_arc_r2013, ArcEntity,
 };
 pub use attrib::{
-    decode_attdef, decode_attdef_r2007, decode_attdef_r2010, decode_attdef_r2013, decode_attrib,
+    decode_attdef, decode_attdef_r14, decode_attdef_r2007, decode_attdef_r2010,
+    decode_attdef_r2013, decode_attrib, decode_attrib_exact, decode_attrib_r14,
     decode_attrib_r2007, decode_attrib_r2010, decode_attrib_r2013, AttribEntity,
 };
 pub use body::{
@@ -55,35 +56,40 @@ pub use circle::{
     decode_circle, decode_circle_r14, decode_circle_r2007, decode_circle_r2010,
     decode_circle_r2013, CircleEntity,
 };
+pub use common::StringStreamFormat;
 pub use dim_diameter::{
-    decode_dim_diameter, decode_dim_diameter_r2007, decode_dim_diameter_r2010,
-    decode_dim_diameter_r2013, DimDiameterEntity,
+    decode_dim_diameter, decode_dim_diameter_r14, decode_dim_diameter_r2007,
+    decode_dim_diameter_r2010, decode_dim_diameter_r2013, DimDiameterEntity,
 };
 pub use dim_linear::{
-    decode_dim_layout, decode_dim_layout_r2007, decode_dim_layout_r2010, decode_dim_layout_r2013,
-    decode_dim_linear, decode_dim_linear_r2007, decode_dim_linear_r2010, decode_dim_linear_r2013,
-    DimLinearEntity, DimSpecificLayout, DimensionCommonData,
+    decode_dim_layout, decode_dim_layout_r14, decode_dim_layout_r2007, decode_dim_layout_r2010,
+    decode_dim_layout_r2013, decode_dim_linear, decode_dim_linear_r14, decode_dim_linear_r2007,
+    decode_dim_linear_r2010, decode_dim_linear_r2013, DimLinearEntity, DimSpecificLayout,
+    DimensionCommonData,
 };
 pub use dim_radius::{
-    decode_dim_radius, decode_dim_radius_r2007, decode_dim_radius_r2010, decode_dim_radius_r2013,
-    DimRadiusEntity,
+    decode_dim_radius, decode_dim_radius_r14, decode_dim_radius_r2007, decode_dim_radius_r2010,
+    decode_dim_radius_r2013, DimRadiusEntity,
 };
 pub use ellipse::{
     decode_ellipse, decode_ellipse_r14, decode_ellipse_r2007, decode_ellipse_r2010,
     decode_ellipse_r2013, EllipseEntity,
 };
 pub use face3d::{
-    decode_3dface, decode_3dface_r2007, decode_3dface_r2010, decode_3dface_r2013, Face3dEntity,
+    decode_3dface, decode_3dface_r14, decode_3dface_r2007, decode_3dface_r2010,
+    decode_3dface_r2013, Face3dEntity,
 };
 pub use hatch::{
-    decode_hatch, decode_hatch_r2004, decode_hatch_r2007, decode_hatch_r2010, decode_hatch_r2013,
-    HatchEntity, HatchPath, HatchPattern, HatchPatternLine,
+    decode_hatch, decode_hatch_r14, decode_hatch_r2004, decode_hatch_r2007, decode_hatch_r2010,
+    decode_hatch_r2013, HatchEntity, HatchPath, HatchPattern, HatchPatternLine,
 };
 pub use insert::{
-    decode_insert, decode_insert_r2007, decode_insert_r2010, decode_insert_r2013, InsertEntity,
+    decode_insert, decode_insert_r14, decode_insert_r2007, decode_insert_r2010,
+    decode_insert_r2013, InsertEntity,
 };
 pub use leader::{
-    decode_leader, decode_leader_r2007, decode_leader_r2010, decode_leader_r2013, LeaderEntity,
+    decode_leader, decode_leader_r14, decode_leader_r2007, decode_leader_r2010,
+    decode_leader_r2013, LeaderEntity,
 };
 pub use line::{
     decode_line, decode_line_r14, decode_line_r2007, decode_line_r2010, decode_line_r2013,
@@ -98,15 +104,16 @@ pub use lwpolyline::{
     decode_lwpolyline_r2013, LwPolylineEntity,
 };
 pub use minsert::{
-    decode_minsert, decode_minsert_r2007, decode_minsert_r2010, decode_minsert_r2013, MInsertEntity,
+    decode_minsert, decode_minsert_r14, decode_minsert_r2007, decode_minsert_r2010,
+    decode_minsert_r2013, MInsertEntity,
 };
 pub use mline::{
-    decode_mline, decode_mline_r2007, decode_mline_r2010, decode_mline_r2013, MLineEntity,
-    MLineVertex,
+    decode_mline, decode_mline_r14, decode_mline_r2007, decode_mline_r2010, decode_mline_r2013,
+    MLineEntity, MLineVertex,
 };
 pub use mtext::{
-    decode_mtext, decode_mtext_r2004, decode_mtext_r2007, decode_mtext_r2010, decode_mtext_r2013,
-    MTextEntity,
+    decode_mtext, decode_mtext_exact, decode_mtext_r14, decode_mtext_r2004, decode_mtext_r2007,
+    decode_mtext_r2010, decode_mtext_r2013, MTextEntity,
 };
 pub use oleframe::{
     decode_ole2frame, decode_ole2frame_r14, decode_ole2frame_r2007, decode_ole2frame_r2010,
@@ -118,9 +125,9 @@ pub use point::{
     PointEntity,
 };
 pub use polyline_2d::{
-    decode_polyline_2d, decode_polyline_2d_r14, decode_polyline_2d_r2000, decode_polyline_2d_r2007,
-    decode_polyline_2d_r2010, decode_polyline_2d_r2013, Polyline2dEntity, PolylineCurveType,
-    PolylineFlagsInfo,
+    decode_polyline_2d, decode_polyline_2d_r14, decode_polyline_2d_r14_speculative,
+    decode_polyline_2d_r2000, decode_polyline_2d_r2007, decode_polyline_2d_r2010,
+    decode_polyline_2d_r2013, Polyline2dEntity, PolylineCurveType, PolylineFlagsInfo,
 };
 pub use polyline_3d::{
     decode_polyline_3d, decode_polyline_3d_r2000, decode_polyline_3d_r2007,
@@ -143,33 +150,36 @@ pub use region::{
 };
 pub use seqend::{decode_seqend, SeqendEntity};
 pub use shape::{
-    decode_shape, decode_shape_r2007, decode_shape_r2010, decode_shape_r2013, ShapeEntity,
+    decode_shape, decode_shape_r14, decode_shape_r2007, decode_shape_r2010, decode_shape_r2013,
+    ShapeEntity,
 };
 pub use solid::{
-    decode_solid, decode_solid_r2007, decode_solid_r2010, decode_solid_r2013, SolidEntity,
+    decode_solid, decode_solid_r14, decode_solid_r2007, decode_solid_r2010, decode_solid_r2013,
+    SolidEntity,
 };
 pub use solid3d::{
     decode_3dsolid, decode_3dsolid_r14, decode_3dsolid_r2007, decode_3dsolid_r2010,
     decode_3dsolid_r2013, Solid3dEntity,
 };
 pub use spline::{
-    catmull_rom_spline, decode_spline, decode_spline_r2007, decode_spline_r2010,
+    catmull_rom_spline, decode_spline, decode_spline_r14, decode_spline_r2007, decode_spline_r2010,
     decode_spline_r2013, SplineEntity,
 };
 pub use text::{
-    decode_text, decode_text_r14, decode_text_r2007, decode_text_r2010, decode_text_r2013,
-    TextEntity,
+    decode_text, decode_text_exact, decode_text_r14, decode_text_r2007, decode_text_r2010,
+    decode_text_r2013, TextEntity,
 };
 pub use tolerance::{
-    decode_tolerance, decode_tolerance_r2007, decode_tolerance_r2010, decode_tolerance_r2013,
-    ToleranceEntity,
+    decode_tolerance, decode_tolerance_r14, decode_tolerance_r2007, decode_tolerance_r2010,
+    decode_tolerance_r2013, ToleranceEntity,
 };
 pub use trace::{
-    decode_trace, decode_trace_r2007, decode_trace_r2010, decode_trace_r2013, TraceEntity,
+    decode_trace, decode_trace_r14, decode_trace_r2007, decode_trace_r2010, decode_trace_r2013,
+    TraceEntity,
 };
 pub use vertex_2d::{
-    decode_vertex_2d, decode_vertex_2d_r2007, decode_vertex_2d_r2010, decode_vertex_2d_r2013,
-    Vertex2dEntity,
+    decode_vertex_2d, decode_vertex_2d_r14, decode_vertex_2d_r2007, decode_vertex_2d_r2010,
+    decode_vertex_2d_r2013, Vertex2dEntity,
 };
 pub use vertex_3d::{
     decode_vertex_3d, decode_vertex_3d_r2007, decode_vertex_3d_r2010, decode_vertex_3d_r2013,

@@ -1,6 +1,7 @@
 use crate::bit::{BitReader, Endian};
 use crate::core::error::ErrorKind;
 use crate::core::result::Result;
+use crate::entities::common::parse_common_entity_header_r14_with_handle;
 use crate::entities::common::{
     parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r2007,
     parse_common_entity_header_r2010, parse_common_entity_header_r2013,
@@ -23,6 +24,32 @@ pub struct Face3dEntity {
 pub fn decode_3dface(reader: &mut BitReader<'_>) -> Result<Face3dEntity> {
     let header = parse_common_entity_header(reader)?;
     decode_3dface_with_header(reader, header, false, false)
+}
+
+/// R13/R14: four full corner points and the invisible edge flags, without the
+/// compression R2000 introduced.
+pub fn decode_3dface_r14(reader: &mut BitReader<'_>, object_handle: u64) -> Result<Face3dEntity> {
+    let header = parse_common_entity_header_r14_with_handle(reader, object_handle)?;
+    let p1 = reader.read_3bd()?;
+    let p2 = reader.read_3bd()?;
+    let p3 = reader.read_3bd()?;
+    let p4 = reader.read_3bd()?;
+    let invisible_edge_flags = reader.read_bs()?;
+
+    reader.set_bit_pos(header.obj_size);
+    let layer_handle = parse_common_entity_handles(reader, &header)?.layer;
+
+    Ok(Face3dEntity {
+        handle: header.handle,
+        color_index: header.color.index,
+        true_color: header.color.true_color,
+        layer_handle,
+        p1,
+        p2,
+        p3,
+        p4,
+        invisible_edge_flags,
+    })
 }
 
 pub fn decode_3dface_r2007(reader: &mut BitReader<'_>) -> Result<Face3dEntity> {

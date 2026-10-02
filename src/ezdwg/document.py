@@ -287,22 +287,46 @@ class Document:
         Each entry holds ``handle``, ``color_index``, ``true_color`` and
         ``linetype`` (the linetype name, ``None`` when it cannot be read).
         A layer whose name cannot be read is listed as ``LAYER_<handle>``.
+
+        When the state of the layer can be read, the entry also holds
+        ``frozen``, ``off``, ``locked`` and ``plot`` (booleans) and
+        ``lineweight`` (DXF group 370: hundredths of a millimetre, -3 for the
+        default lineweight). A frozen or off layer is not displayed; ``plot`` is
+        ``False`` for a layer that is displayed but not plotted.
         """
         path = self.decode_path or self.path
         colors = _layer_color_map(path)
         linetype_names, layer_linetypes = _linetype_tables(path)
+        states = _layer_state_map(path)
         table: dict[str, dict[str, Any]] = {}
         for handle, name in _layer_names_by_handle(path).items():
             index, true_color = colors.get(handle, (None, None))
-            table.setdefault(
-                name or f"LAYER_{handle:X}",
-                {
-                    "handle": handle,
-                    "color_index": index,
-                    "true_color": true_color,
-                    "linetype": linetype_names.get(layer_linetypes.get(handle)),
-                },
-            )
+            entry = {
+                "handle": handle,
+                "color_index": index,
+                "true_color": true_color,
+                "linetype": linetype_names.get(layer_linetypes.get(handle)),
+            }
+            state = states.get(handle)
+            if state is not None:
+                entry.update(state)
+            table.setdefault(name or f"LAYER_{handle:X}", entry)
+        return table
+
+    def dimstyles(self) -> dict[str, dict[str, Any]]:
+        """Dimension style table by name.
+
+        Each entry holds ``handle``, ``dimscale`` (the overall scale; 0 for a
+        style that is scaled by the viewport or annotatively), ``dimtxt`` (text
+        height) and ``dimasz`` (arrow size). The sizes are in drawing units
+        before ``dimscale``.
+        """
+        path = self.decode_path or self.path
+        table: dict[str, dict[str, Any]] = {}
+        for handle, entry in _dimstyle_map(path).items():
+            table.setdefault(entry["name"] or f"DIMSTYLE_{handle:X}", {"handle": handle, **entry})
+        for entry in table.values():
+            entry.pop("name")
         return table
 
     @property
@@ -2141,14 +2165,15 @@ _SIMPLE_ENTITY_REGISTRY: dict[str, _SimpleEntitySpec] = {
     ),
     "TOLERANCE": _SimpleEntitySpec(
         rows_fn=lambda p: raw.decode_tolerance_entities(p),
-        build_dxf=lambda row, _: (
+        setup=lambda p: _dimstyle_map(p),
+        build_dxf=lambda row, dimstyles: (
             row[0],
             {
                 "text": row[1],
                 "insert": row[2],
                 "x_direction": row[3],
                 "extrusion": row[4],
-                "height": row[5],
+                "height": _tolerance_text_height(row[5], dimstyles.get(row[7])),
                 "dimgap": row[6],
                 "rotation": math.degrees(math.atan2(row[3][1], row[3][0])),
                 "dimstyle_handle": row[7],
@@ -3681,10 +3706,12 @@ class _EntityStyleMap(dict):
     - ``common_layers``: ``handle -> layer handle`` read from the common entity data,
       which holds for every entity type. It takes precedence over the layer handle
       of the type-specific decoders.
+    - ``lineweights``: ``handle -> (lineweight, invisible)``
     """
 
     linetypes: dict[int, tuple[str | None, int | None, float]]
     common_layers: dict[int, int]
+    lineweights: dict[int, tuple[int | None, bool]]
 
 
 @lru_cache(maxsize=16)
@@ -3692,6 +3719,7 @@ def _entity_style_map(path: str) -> dict[int, tuple[int | None, int | None, int]
     styles = _EntityStyleMap()
     styles.linetypes = _entity_linetype_map(path)
     styles.common_layers = _entity_common_layer_map(path)
+    styles.lineweights = _entity_lineweight_map(path)
     try:
         styles.update(
             (handle, (index, true_color, layer_handle))
@@ -3767,6 +3795,79 @@ def _entity_common_layer_map(path: str) -> dict[int, int]:
         handle: layer_handle
         for handle, layer_handle, *_rest in rows
         if layer_handle in layer_handles
+    }
+
+
+@lru_cache(maxsize=16)
+def _entity_lineweight_map(path: str) -> dict[int, tuple[int | None, bool]]:
+    """``(lineweight, invisible)`` of every entity, as DXF groups 370 and 60 hold them."""
+    decode = getattr(raw, "decode_entity_lineweights", None)
+    if not callable(decode):
+        return {}
+    try:
+        rows = decode(path)
+    except Exception:
+        return {}
+    return {
+        int(handle): (None if lineweight is None else int(lineweight), bool(invisible))
+        for handle, lineweight, invisible in rows
+    }
+
+
+@lru_cache(maxsize=16)
+def _dimstyle_map(path: str) -> dict[int, dict[str, Any]]:
+    """``name``, ``dimscale``, ``dimasz`` and ``dimtxt`` of every dimension style."""
+    decode = getattr(raw, "decode_dimstyles", None)
+    if not callable(decode):
+        return {}
+    try:
+        rows = decode(path)
+    except Exception:
+        return {}
+    return {
+        int(handle): {
+            "name": str(name),
+            "dimscale": float(dimscale),
+            "dimasz": float(dimasz),
+            "dimtxt": float(dimtxt),
+        }
+        for handle, name, dimscale, dimasz, dimtxt in rows
+    }
+
+
+def _tolerance_text_height(stored: float, dimstyle: dict[str, Any] | None) -> float:
+    """Text height of a feature control frame.
+
+    Only R13/R14 can store it with the entity. Otherwise it is the text height
+    of the dimension style times its overall scale (a scale of 0 counts as 1).
+    0.0 when neither is known.
+    """
+    if stored > 0.0:
+        return stored
+    if not dimstyle:
+        return 0.0
+    return dimstyle["dimtxt"] * (dimstyle["dimscale"] or 1.0)
+
+
+@lru_cache(maxsize=16)
+def _layer_state_map(path: str) -> dict[int, dict[str, Any]]:
+    """``frozen``, ``off``, ``locked``, ``plot`` and ``lineweight`` of every layer."""
+    decode = getattr(raw, "decode_layer_states", None)
+    if not callable(decode):
+        return {}
+    try:
+        rows = decode(path)
+    except Exception:
+        return {}
+    return {
+        int(handle): {
+            "frozen": bool(frozen),
+            "off": bool(off),
+            "locked": bool(locked),
+            "plot": bool(plot),
+            "lineweight": int(lineweight),
+        }
+        for handle, frozen, off, _frozen_new, locked, plot, lineweight in rows
     }
 
 
@@ -3915,6 +4016,9 @@ def _attach_entity_color(
     linetype = getattr(entity_style_map, "linetypes", {}).get(handle)
     if linetype is not None:
         dxf["linetype"], dxf["linetype_handle"], dxf["linetype_scale"] = linetype
+    lineweight = getattr(entity_style_map, "lineweights", {}).get(handle)
+    if lineweight is not None:
+        dxf["lineweight"], dxf["invisible"] = lineweight
     return dxf
 
 

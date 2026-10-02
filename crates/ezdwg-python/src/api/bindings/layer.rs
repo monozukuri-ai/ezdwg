@@ -698,7 +698,13 @@ fn decode_layer_name_record(
         version,
         version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
     ) {
-        decode_layer_name_from_string_stream(record, api_header, version)?
+        // The name is the first string of the string stream. The scan below looks
+        // for the most plausible string instead, and takes the color book name of
+        // a layer whose color comes from a color book.
+        match read_block_name_from_exact_string_stream(&reader, Some(api_header)) {
+            Some(name) => name,
+            None => decode_layer_name_from_string_stream(record, api_header, version)?,
+        }
     } else if matches!(version, version::DwgVersion::R2007) {
         // R2007 already keeps the entry name in the string stream; the data
         // stream continues with the flags, so there is no inline text to read.

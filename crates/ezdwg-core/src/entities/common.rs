@@ -37,6 +37,123 @@ pub struct CommonEntityHeader {
     /// R2004+: the color refers to a DBCOLOR object (color book color), whose
     /// handle sits in the handle stream right before the layer handle.
     pub has_color_handle: bool,
+    /// The entity is not displayed (DXF group 60 = 1).
+    pub invisible: bool,
+    /// Lineweight as stored (R2000+): an index into the lineweight table, with
+    /// 29 = BYLAYER, 30 = BYBLOCK and 31 = the default lineweight. See
+    /// `lineweight_from_index`. `None` before R2000, which has no lineweights.
+    pub line_weight: Option<u8>,
+}
+
+/// R2007+: the string stream of an object, which ends where its handle stream
+/// begins (`data_end_bit`).
+///
+/// Read backwards from there: a `B` flag (the stream is present), the stream
+/// size in bits as `RS` (with bit 15 set, a second `RS` in front of it holds
+/// the high bits) and, in front of the size, the strings in field order.
+///
+/// Returns a reader at the first string and the bit where the strings end, or
+/// `None` when the object has no string stream.
+pub fn string_stream_reader<'a>(
+    reader: &BitReader<'a>,
+    data_end_bit: u32,
+) -> Option<(BitReader<'a>, u32)> {
+    if data_end_bit < 17 || u64::from(data_end_bit) > reader.total_bits() {
+        return None;
+    }
+    let mut flag_reader = reader.clone();
+    flag_reader.set_bit_pos(data_end_bit - 1);
+    if flag_reader.read_b().ok()? == 0 {
+        return None;
+    }
+    let mut size_bit = data_end_bit - 17;
+    let mut size_reader = reader.clone();
+    size_reader.set_bit_pos(size_bit);
+    let mut size = u32::from(size_reader.read_rs(Endian::Little).ok()?);
+    if size & 0x8000 != 0 {
+        size_bit = size_bit.checked_sub(16)?;
+        let mut high_reader = reader.clone();
+        high_reader.set_bit_pos(size_bit);
+        let high = u32::from(high_reader.read_rs(Endian::Little).ok()?);
+        size = (size & 0x7FFF) | (high << 15);
+    }
+    if size == 0 {
+        return None;
+    }
+    let start_bit = size_bit.checked_sub(size)?;
+    let mut strings = reader.clone();
+    strings.set_bit_pos(start_bit);
+    Some((strings, size_bit))
+}
+
+/// The versions that keep the strings of an object in its string stream, as
+/// far as their object layouts differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringStreamFormat {
+    /// R2007: the record stores where its handle stream begins.
+    R2007,
+    /// R2010: the object header gives the size of the handle stream.
+    R2010,
+    /// R2013: as R2010; the common entity data carries the data store flag.
+    R2013,
+    /// R2018: as R2013; attributes carry their type (single or multi line).
+    R2018,
+}
+
+/// Common entity data of an entity of R2007 or later.
+///
+/// `object_data_end_bit` is where the handle stream begins; R2007 stores it in
+/// the record, so the argument is not used there. `object_handle` is the handle
+/// of the object index, which R2010+ records are addressed by.
+pub fn parse_common_entity_header_for_format(
+    reader: &mut BitReader<'_>,
+    format: StringStreamFormat,
+    object_data_end_bit: u32,
+    object_handle: u64,
+) -> Result<CommonEntityHeader> {
+    match format {
+        StringStreamFormat::R2007 => parse_common_entity_header_r2007(reader),
+        StringStreamFormat::R2010 => {
+            let mut header = parse_common_entity_header_r2010(reader, object_data_end_bit)?;
+            header.handle = object_handle;
+            Ok(header)
+        }
+        StringStreamFormat::R2013 | StringStreamFormat::R2018 => {
+            let mut header = parse_common_entity_header_r2013(reader, object_data_end_bit)?;
+            header.handle = object_handle;
+            Ok(header)
+        }
+    }
+}
+
+/// The first string of the string stream of an object (see
+/// `string_stream_reader`), or `None` when there is none or it runs past the
+/// stream.
+pub fn first_stream_string(reader: &BitReader<'_>, data_end_bit: u32) -> Option<String> {
+    let (mut strings, strings_end) = string_stream_reader(reader, data_end_bit)?;
+    let text = strings.read_tu().ok()?;
+    (strings.tell_bits() <= u64::from(strings_end)).then_some(text)
+}
+
+/// Lineweights in hundredths of a millimetre, by stored index 0..=23.
+const LINEWEIGHTS: [i16; 24] = [
+    0, 5, 9, 13, 15, 18, 20, 25, 30, 35, 40, 50, 53, 60, 70, 80, 90, 100, 106, 120, 140, 158, 200,
+    211,
+];
+
+/// Lineweight of a stored index as DXF group 370 writes it: hundredths of a
+/// millimetre, -1 = BYLAYER, -2 = BYBLOCK, -3 = the default lineweight.
+/// `None` for an index outside the table.
+///
+/// BYLAYER is index 29. Some writers store 28 instead: the DXF export of such
+/// a drawing has no lineweight on those entities, which is BYLAYER as well.
+pub fn lineweight_from_index(index: u8) -> Option<i16> {
+    match index {
+        28 | 29 => Some(-1),
+        30 => Some(-2),
+        31 => Some(-3),
+        _ => LINEWEIGHTS.get(usize::from(index)).copied(),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +194,19 @@ pub fn parse_common_entity_header_r14(reader: &mut BitReader<'_>) -> Result<Comm
         }
         Err(err) => Err(err),
     }
+}
+
+/// R13/R14 common entity data for the type-specific decoders: the object index
+/// names the handle when the record yields none.
+pub fn parse_common_entity_header_r14_with_handle(
+    reader: &mut BitReader<'_>,
+    object_handle: u64,
+) -> Result<CommonEntityHeader> {
+    let mut header = parse_common_entity_header_r14(reader)?;
+    if header.handle == 0 {
+        header.handle = object_handle;
+    }
+    Ok(header)
 }
 
 pub fn parse_common_entity_header_r2007(reader: &mut BitReader<'_>) -> Result<CommonEntityHeader> {
@@ -419,8 +549,8 @@ fn parse_common_entity_header_fields_from_entmode(
         (false, false, false)
     };
 
-    let _invisibility = reader.read_bs()?;
-    let _line_weight = reader.read_rc()?;
+    let invisibility = reader.read_bs()?;
+    let line_weight = reader.read_rc()?;
 
     Ok(CommonEntityHeader {
         obj_size,
@@ -440,6 +570,8 @@ fn parse_common_entity_header_fields_from_entmode(
         legacy_links_after_layer: false,
         ltype_scale,
         has_color_handle,
+        invisible: invisibility & 1 != 0,
+        line_weight: Some(line_weight),
     })
 }
 
@@ -475,7 +607,7 @@ fn parse_common_entity_header_r13_r14_spec(
     let no_links = reader.read_b()?;
     let color_index = reader.read_bs()?;
     let ltype_scale = reader.read_bd()?;
-    let _invisibility = reader.read_bs()?;
+    let invisibility = reader.read_bs()?;
 
     Ok(CommonEntityHeader {
         obj_size,
@@ -499,6 +631,8 @@ fn parse_common_entity_header_r13_r14_spec(
         legacy_links_after_layer: true,
         ltype_scale,
         has_color_handle: false,
+        invisible: invisibility & 1 != 0,
+        line_weight: None,
     })
 }
 
@@ -537,8 +671,8 @@ fn parse_common_entity_header_r14_impl(
     let no_links = reader.read_b()?;
     let color = read_common_entity_color_cmc(reader)?;
     let ltype_scale = reader.read_bd()?;
-    let _invisibility = reader.read_bs()?;
-    let _line_weight = reader.read_rc()?;
+    let invisibility = reader.read_bs()?;
+    let line_weight = reader.read_rc()?;
 
     let ltype_flags = if is_bylayer_ltype { 0 } else { 3 };
 
@@ -560,6 +694,8 @@ fn parse_common_entity_header_r14_impl(
         legacy_links_after_layer: true,
         ltype_scale,
         has_color_handle: false,
+        invisible: invisibility & 1 != 0,
+        line_weight: Some(line_weight),
     })
 }
 
@@ -594,11 +730,54 @@ fn read_common_entity_color_cmc(reader: &mut BitReader<'_>) -> Result<CommonEnti
 #[cfg(test)]
 mod tests {
     use super::{
-        checked_handle_count, parse_common_entity_handles, parse_common_entity_header,
-        parse_common_entity_header_r2010, parse_common_entity_header_r2013,
+        checked_handle_count, lineweight_from_index, parse_common_entity_handles,
+        parse_common_entity_header, parse_common_entity_header_r2010,
+        parse_common_entity_header_r2013, string_stream_reader,
     };
     use crate::bit::{BitReader, BitWriter, Endian};
     use crate::core::error::ErrorKind;
+
+    #[test]
+    fn lineweight_index_maps_to_the_dxf_value() {
+        assert_eq!(lineweight_from_index(0), Some(0));
+        assert_eq!(lineweight_from_index(7), Some(25));
+        assert_eq!(lineweight_from_index(23), Some(211));
+        assert_eq!(lineweight_from_index(24), None);
+        assert_eq!(lineweight_from_index(28), Some(-1));
+        assert_eq!(lineweight_from_index(29), Some(-1));
+        assert_eq!(lineweight_from_index(30), Some(-2));
+        assert_eq!(lineweight_from_index(31), Some(-3));
+    }
+
+    #[test]
+    fn string_stream_is_found_from_the_end_of_the_object_data() {
+        // Data bits, the strings, their size in bits and the "present" flag.
+        let mut writer = BitWriter::new();
+        writer.write_rc(0xAB).expect("write data");
+        let strings_start = writer.tell_bits() as u32;
+        writer.write_bs(2).expect("write length");
+        for unit in "OK".encode_utf16() {
+            writer.write_rs(Endian::Little, unit).expect("write unit");
+        }
+        let strings_bits = writer.tell_bits() as u32 - strings_start;
+        writer
+            .write_rs(Endian::Little, strings_bits as u16)
+            .expect("write size");
+        writer.write_b(1).expect("write flag");
+        let data_end = writer.tell_bits() as u32;
+        let bytes = writer.into_bytes();
+
+        let reader = BitReader::new(&bytes);
+        let (mut strings, strings_end) =
+            string_stream_reader(&reader, data_end).expect("string stream");
+        assert_eq!(strings.tell_bits(), u64::from(strings_start));
+        assert_eq!(strings_end, data_end - 17);
+        assert_eq!(strings.read_tu().expect("read string"), "OK");
+        assert_eq!(strings.tell_bits(), u64::from(strings_end));
+
+        // Without the flag there is no string stream.
+        assert!(string_stream_reader(&reader, data_end - 1).is_none());
+    }
 
     /// Common entity data of a R2000/R2004 entity followed by its handle stream.
     /// `first_flag` is "Nolinks" in R2000 and "XDic Missing Flag" in R2004.

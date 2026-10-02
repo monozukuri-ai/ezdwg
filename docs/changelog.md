@@ -3,6 +3,28 @@
 ## Unreleased
 
 ### Added
+- Layer state and lineweights. `Document.layers()` reports `off`, `frozen`,
+  `locked`, `plot` and `lineweight` for every layer, and every entity carries
+  `lineweight` and `invisible` in `Entity.dxf`. The raw functions are
+  `decode_layer_states` and `decode_entity_lineweights`. Lineweights use the
+  values of DXF group 370 (hundredths of a millimetre, `-1` BYLAYER, `-2`
+  BYBLOCK, `-3` default). Checked against DXF exports of the same drawings:
+  the state and lineweight of 1,659 layers and the lineweight and visibility
+  of 34,444 entities agree. R13/R14 files have neither lineweights nor a plot
+  flag.
+- R13/R14 (`AC1012`, `AC1014`) decode `INSERT`, `MINSERT`, `MTEXT`, `HATCH`,
+  `SOLID`, `TRACE`, `3DFACE`, `SPLINE`, `ATTRIB`, `ATTDEF`, `LEADER`,
+  `TOLERANCE`, `MLINE`, `SHAPE` and every `DIMENSION` type, with the layouts
+  these versions have (plain doubles where R2000 introduced flagged and
+  compressed forms, no fields that later versions added). They also report
+  where each entity lives (`Document.entity_placement()`), the names of their
+  blocks, and the dimension style and anonymous block of a dimension. Until
+  now such a file yielded lines, arcs, circles, ellipses, points, lightweight
+  polylines and single-line text only, all of them in model space, and
+  dimensions without any of their points. The R14 save of the ACadSharp sample
+  drawing decodes to the same values as its R2004 save for all of these types.
+- Dimension style sizes: `Document.dimstyles()` (`dimscale`, `dimtxt`,
+  `dimasz` by style name) and the raw function `decode_dimstyles`.
 - Linetypes. `Document.linetypes()` returns the linetype table (name,
   description and dash pattern), `Document.layers()` the layer table with each
   layer's linetype, and every entity carries `linetype`, `linetype_handle` and
@@ -67,6 +89,46 @@
   to account for `material flags`, `shadow flags`, R2010 visual-style bits, and the R2013+ ds-binary-data flag.
 
 ### Fixed
+- `TEXT` and `MTEXT` of R2007 and later are read from where the format keeps
+  them. These versions store every string of an object in its string stream,
+  but the decoders looked for the text in the data stream and settled on the
+  most plausible candidate. In drawings compared against an exact read, 373 of
+  6,665 `TEXT` entities came out with another text or justification (two-digit
+  numbers read as other characters, a middle-aligned text reported as baseline)
+  and 286 of 2,572 `MTEXT` entities with another text. The search only remains
+  as a fallback for records that do not have the specified layout.
+- `ATTRIB` and `ATTDEF` of R2007 and later were almost never decoded: 0 of 57
+  attributes in R2007 drawings, 0 of 159 in R2010, 7 of 2,986 in R2013 and 0 of
+  1,510 in R2018. They are read with their specified layout now (text, tag and
+  prompt from the string stream, the attribute fields from the end of the data
+  stream), including the multi-line attributes of R2018, whose text comes
+  without formatting codes. All but 3 of those attributes decode.
+- `ATTDEF` of R2000 and R2004: the prompt was empty and a definition with an
+  empty default value lost its tag and flags (so a constant definition was not
+  recognizable). These versions have no lock position flag; reading one shifted
+  the prompt by a bit.
+- R2010+ entities with a saved graphic of 256 bytes or more: the size of the
+  graphic (a BLL) was assembled with its bytes in the wrong order, so the
+  common entity data was looked for at a shifted position. Such entities
+  (multileaders, tables, entities of add-on applications) reported a wrong
+  lineweight, visibility, linetype or layer.
+- Layer names of R2010+ files: a layer whose color comes from a color book was
+  named after the book. The name is the first string of the string stream.
+- `TOLERANCE` was not decoded in any version: two fields that only R13/R14
+  store were read from every file, and R2007+ keep the text in the string
+  stream. Later versions take the text height from the dimension style, and
+  so does `Entity.dxf["height"]` when the entity stores none (the raw rows
+  keep the stored value, 0).
+- Dimension text overrides of R2007 and later (`text`) were always empty; they
+  are read from the string stream.
+- `INSERT` and `MINSERT` of R2000: the count of owned attributes only exists
+  from R2004 on. Reading it shifted the array counts of a `MINSERT` with
+  attributes.
+- R13/R14 `POINT` entities could come out at a wrong location (the layout was
+  searched for instead of read), and R13/R14 `POLYLINE_2D` read its thickness
+  and extrusion in the R2000 form, which shifted the elevation.
+- Lineweight index 28 is BYLAYER, like 29. Some writers store it for every
+  entity.
 - R2000 (`AC1015`) entities lost their layer: the common entity data was read
   with the R2004 meaning of one flag bit ("XDic Missing Flag", which R2000 does
   not have; the bit is "Nolinks" there), so the xdictionary handle was taken for
@@ -89,8 +151,7 @@
   dimensions and could pick an arrowhead block for a dimension that has no
   block. Both handles are now read from their place in the handle stream (the
   block lines of all 485 dimensions compared against DXF exports of the same
-  drawings agree); the scan only remains as a fallback. R13/R14 dimensions are
-  still unresolved.
+  drawings agree); the scan only remains as a fallback.
 - Block names of R2010+ files: the name is now read from the string stream
   before the record data in front of it. That data was read with a layout these
   versions do not have, and when the read failed the name was left to a scan

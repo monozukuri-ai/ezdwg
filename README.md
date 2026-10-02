@@ -7,8 +7,8 @@ This project is a **DWG read-focused parser** with growing high-level entity cov
 Documentation: https://monozukuri-ai.github.io/ezdwg/
 
 ## Status
-- High-level API (`ezdwg.read`): **R13 / AC1012** and **R14 / AC1014** (experimental), **R2000 / AC1015**, **R2004 / AC1018**, **R2007 / AC1021**, **R2010 / AC1024**, **R2013 / AC1027**, **R2018 / AC1032**
-- Raw API (`ezdwg.raw`): **R13 / AC1012** and **R14 / AC1014** (version detect + object headers), **R2000 / AC1015**, **R2004 / AC1018**, **R2007 / AC1021**, plus native **AC1024/AC1027/AC1032** support for object listing and `LINE`/`ARC`/`LWPOLYLINE` decode
+- High-level API (`ezdwg.read`): **R13 / AC1012** and **R14 / AC1014** (2D entities), **R2000 / AC1015**, **R2004 / AC1018**, **R2007 / AC1021**, **R2010 / AC1024**, **R2013 / AC1027**, **R2018 / AC1032**
+- Raw API (`ezdwg.raw`): the same versions, with the per-type `decode_*` functions and the table, style and placement functions
 - High-level entities include **LINE**, **ARC**, **LWPOLYLINE**, **POINT**, **CIRCLE**, **ELLIPSE**, **TEXT**, **MTEXT**, **DIMENSION**, **INSERT/MINSERT**, **HATCH**, and **SPLINE**
 - Raw API exposes the corresponding entity decoders plus low-level POLYLINE/VERTEX helpers
 - Output units/angles: high-level API returns ARC angles in **degrees**
@@ -167,9 +167,9 @@ raw.decode_line_entities("path/to/file.dwg")
 - Native DWG write currently targets **AC1015** only
 - Native DWG write supports a subset of entities: **LINE/RAY/XLINE/POINT/ARC/CIRCLE/LWPOLYLINE/TEXT/MTEXT**
 - High-level API supports R13 (AC1012, experimental), R14 (AC1014, experimental), R2000 (AC1015), R2004 (AC1018), R2007 (AC1021), R2010 (AC1024), R2013 (AC1027), and R2018 (AC1032)
-- AC1012/AC1014 currently have stable version detection/object-header listing; entity geometry decoding coverage is limited (the R13/R14 common entity header now follows the ODA layout, older heuristics remain as fallbacks)
+- AC1012/AC1014 decode the 2D entity types with the layouts of the ODA specification (LINE, ARC, CIRCLE, ELLIPSE, POINT, LWPOLYLINE, POLYLINE_2D, TEXT, MTEXT, ATTRIB/ATTDEF, INSERT/MINSERT, HATCH, SOLID, TRACE, 3DFACE, SPLINE, LEADER, TOLERANCE, MLINE, SHAPE, DIMENSION), with block membership, block names and dimension blocks. 3D polylines and meshes are not decoded for these versions; R13/R14 have no lineweights and no layer plot flag
 - AC1021/AC1024/AC1027/AC1032 use native decode for LINE/ARC/LWPOLYLINE/POINT/CIRCLE/ELLIPSE and are regression-tested against paired DXF samples
-- TEXT/MTEXT/DIMENSION decoders now use version-aware common header paths internally; R2007+ dedicated sample regression coverage is still pending
+- TEXT/MTEXT/ATTRIB/ATTDEF of R2007 and later are read from the string stream of the object and regression-tested on one drawing saved in every version (R14 to R2018)
 - AC1021/AC1024/AC1027/AC1032 entity style/layer color resolution is currently best-effort on some files
 - Legacy `POLYLINE/VERTEX/SEQEND` samples are not yet covered in AC1018 test data
 - ARC angles in raw API are **radians** (high‑level API converts to degrees)
