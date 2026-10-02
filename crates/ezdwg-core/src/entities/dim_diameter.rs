@@ -1,6 +1,7 @@
 use crate::bit::{BitReader, Endian};
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
+use crate::entities::common::first_stream_string;
 use crate::entities::common::{
     parse_common_entity_header, parse_common_entity_header_r2007, parse_common_entity_header_r2010,
     parse_common_entity_header_r2013, parse_common_entity_layer_handle, CommonEntityHeader,
@@ -10,7 +11,8 @@ use crate::entities::dim_common::{
     R2010_PLUS_VARIANTS,
 };
 use crate::entities::dim_linear::{
-    decode_dim_linear, decode_dim_linear_r2007, DimLinearEntity, DimensionCommonData,
+    decode_dim_linear, decode_dim_linear_r2007, decode_dim_radial_r14, DimLinearEntity,
+    DimensionCommonData,
 };
 
 pub type DimDiameterEntity = DimLinearEntity;
@@ -28,6 +30,13 @@ pub fn decode_dim_diameter(reader: &mut BitReader<'_>) -> Result<DimDiameterEnti
     }
     reader.set_pos(data_pos.0, data_pos.1);
     decode_dim_linear(reader)
+}
+
+pub fn decode_dim_diameter_r14(
+    reader: &mut BitReader<'_>,
+    object_handle: u64,
+) -> Result<DimDiameterEntity> {
+    decode_dim_radial_r14(reader, object_handle, true)
 }
 
 pub fn decode_dim_diameter_r2007(reader: &mut BitReader<'_>) -> Result<DimDiameterEntity> {
@@ -135,7 +144,8 @@ fn decode_r2010_plus_variant(
     let user_text = if parse_variant.has_user_text {
         reader.read_tv()?
     } else {
-        String::new()
+        // R2007+: the text override is the string of the string stream.
+        first_stream_string(reader, header.obj_size).unwrap_or_default()
     };
     let text_rotation = reader.read_bd()?;
     let horizontal_direction = reader.read_bd()?;

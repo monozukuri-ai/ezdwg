@@ -1,6 +1,9 @@
 type LinetypeRow = (u64, String, String, f64, Vec<f64>);
 type LayerLinetypeRow = (u64, u64);
 type EntityLinetypeRow = (u64, u64, u8, Option<u64>, f64);
+type EntityLineweightRow = (u64, Option<i16>, bool);
+type LayerStateRow = (u64, bool, bool, bool, bool, bool, i16);
+type DimStyleSizeRow = (u64, String, f64, f64, f64);
 
 /// A linetype definition holds at most 12 dash specifications in AutoCAD.
 const MAX_LINETYPE_DASHES: usize = 32;
@@ -448,6 +451,297 @@ pub fn decode_entity_linetypes(
             handles.ltype,
             scale,
         ));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Lineweight and visibility of every entity: `(handle, lineweight, invisible)`.
+///
+/// `lineweight` is the value of DXF group 370: hundredths of a millimetre,
+/// -1 = BYLAYER, -2 = BYBLOCK, -3 = the default lineweight. It is `None` when
+/// the file stores none (R13/R14) or the stored value is not a lineweight.
+/// `invisible` is DXF group 60: the entity is not displayed.
+///
+/// Like `decode_entity_linetypes`, the rows come from the common entity data
+/// alone and cover every entity type.
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_entity_lineweights(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<EntityLineweightRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let dynamic_type_classes = load_dynamic_type_classes(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    let mut seen: HashSet<u64> = HashSet::new();
+
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        let type_name = resolved_type_name(header.type_code, &dynamic_types);
+        if resolved_type_class(header.type_code, &type_name, &dynamic_type_classes) != "E" {
+            continue;
+        }
+        let Some((common, _handles)) =
+            decode_common_entity_header_and_handles(&record, decoder.version(), &header)
+        else {
+            continue;
+        };
+        if !seen.insert(obj.handle.0) {
+            continue;
+        }
+        result.push((
+            obj.handle.0,
+            common
+                .line_weight
+                .and_then(entities::common::lineweight_from_index),
+            common.invisible,
+        ));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// LAYER record (ODA specification 20.4.53): the state bits and the lineweight.
+///
+/// R2000+ pack them into one "Values" BS: frozen (bit 0), off (bit 1), frozen in
+/// new viewports (bit 2), locked (bit 3), plot (bit 4) and the lineweight index
+/// (bits 5-9). R13/R14 store the first four as single bits and have neither a
+/// plot flag nor lineweights.
+fn decode_layer_state_record(
+    record: &objects::ObjectRecord<'_>,
+    api_header: &ApiObjectHeader,
+    version: &version::DwgVersion,
+) -> crate::core::result::Result<(bool, bool, bool, bool, bool, i16)> {
+    let mut reader = record.bit_reader();
+    skip_object_type_prefix(&mut reader, version)?;
+    let _preamble = read_table_record_preamble(&mut reader, version, api_header)?;
+    if table_record_strings_in_stream(version) {
+        // R2007+ fold the 64-flag and the xref dependency bit into this one value.
+        let _xref_index_plus_one = reader.read_bs()?;
+    } else {
+        let _name = reader.read_tv()?;
+        let _flag_64 = reader.read_b()?;
+        let _xref_index_plus_one = reader.read_bs()?;
+        let _xdep = reader.read_b()?;
+    }
+    if matches!(version, version::DwgVersion::R13 | version::DwgVersion::R14) {
+        let frozen = reader.read_b()? != 0;
+        let off = reader.read_b()? != 0;
+        let frozen_in_new_viewports = reader.read_b()? != 0;
+        let locked = reader.read_b()? != 0;
+        return Ok((frozen, off, frozen_in_new_viewports, locked, true, -3));
+    }
+    let values = reader.read_bs()?;
+    let lineweight =
+        entities::common::lineweight_from_index(((values & 0x03E0) >> 5) as u8).unwrap_or(-3);
+    Ok((
+        values & 0x01 != 0,
+        values & 0x02 != 0,
+        values & 0x04 != 0,
+        values & 0x08 != 0,
+        values & 0x10 != 0,
+        lineweight,
+    ))
+}
+
+/// State of every layer:
+/// `(layer_handle, frozen, off, frozen_in_new_viewports, locked, plot, lineweight)`.
+///
+/// A frozen or off layer is not displayed; `plot` is false for a layer that is
+/// displayed but not plotted (DXF group 290 = 0). `lineweight` is the value of
+/// DXF group 370: hundredths of a millimetre, or -3 for the default lineweight.
+/// R13/R14 have no plot flag and no lineweights: `plot` is true and
+/// `lineweight` is -3 there. Layers whose record cannot be read are omitted.
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_layer_states(path: &str, limit: Option<usize>) -> PyResult<Vec<LayerStateRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    let mut seen: HashSet<u64> = HashSet::new();
+
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x33, "LAYER", &dynamic_types) {
+            continue;
+        }
+        let Ok((frozen, off, frozen_in_new_viewports, locked, plot, lineweight)) =
+            decode_layer_state_record(&record, &header, decoder.version())
+        else {
+            continue;
+        };
+        if !seen.insert(obj.handle.0) {
+            continue;
+        }
+        result.push((
+            obj.handle.0,
+            frozen,
+            off,
+            frozen_in_new_viewports,
+            locked,
+            plot,
+            lineweight,
+        ));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+
+/// DIMSTYLE record (ODA specification 20.4.68), as far as the sizes that scale
+/// a dimension: `(name, DIMSCALE, DIMASZ, DIMTXT)`.
+///
+/// R13/R14 store the flags and codes of the style in front of the sizes;
+/// R2000+ start with DIMPOST and DIMAPOST (strings, which R2007+ keep in the
+/// string stream) and put a second group of flags between DIMTM and DIMTXT.
+fn decode_dimstyle_record(
+    record: &objects::ObjectRecord<'_>,
+    api_header: &ApiObjectHeader,
+    version: &version::DwgVersion,
+) -> crate::core::result::Result<(String, f64, f64, f64)> {
+    let mut reader = record.bit_reader();
+    skip_object_type_prefix(&mut reader, version)?;
+    let preamble = read_table_record_preamble(&mut reader, version, api_header)?;
+    let strings_in_stream = table_record_strings_in_stream(version);
+    let name = if strings_in_stream {
+        // R2007+ fold the 64-flag and the xref dependency bit into this one value.
+        let _xref_index_plus_one = reader.read_bs()?;
+        read_table_record_stream_strings(&reader, preamble.data_end_bit, 1)
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    } else {
+        let name = reader.read_tv()?;
+        let _flag_64 = reader.read_b()?;
+        let _xref_index_plus_one = reader.read_bs()?;
+        let _xdep = reader.read_b()?;
+        name
+    };
+
+    if matches!(version, version::DwgVersion::R13 | version::DwgVersion::R14) {
+        // DIMTOL .. DIMSOXD
+        for _ in 0..11 {
+            let _flag = reader.read_b()?;
+        }
+        let _dimaltd = reader.read_rc()?;
+        let _dimzin = reader.read_rc()?;
+        let _dimsd1 = reader.read_b()?;
+        let _dimsd2 = reader.read_b()?;
+        let _dimtolj = reader.read_rc()?;
+        let _dimjust = reader.read_rc()?;
+        let _dimfit = reader.read_rc()?;
+        let _dimupt = reader.read_b()?;
+        // DIMTZIN, DIMALTZ, DIMALTTZ, DIMTAD
+        for _ in 0..4 {
+            let _code = reader.read_rc()?;
+        }
+        // DIMUNIT .. DIMALTTD
+        for _ in 0..6 {
+            let _code = reader.read_bs()?;
+        }
+    } else if !strings_in_stream {
+        let _dimpost = reader.read_tv()?;
+        let _dimapost = reader.read_tv()?;
+    }
+
+    let dimscale = reader.read_bd()?;
+    let dimasz = reader.read_bd()?;
+    // DIMEXO, DIMDLI, DIMEXE, DIMRND, DIMDLE, DIMTP, DIMTM
+    for _ in 0..7 {
+        let _size = reader.read_bd()?;
+    }
+    if !matches!(version, version::DwgVersion::R13 | version::DwgVersion::R14) {
+        if strings_in_stream {
+            let _dimfxl = reader.read_bd()?;
+            let _dimjogang = reader.read_bd()?;
+            let _dimtfill = reader.read_bs()?;
+            // DIMTFILLCLR (CMC): index, RGB and the color byte; its names are
+            // in the string stream.
+            let _color_index = reader.read_bs()?;
+            let _color_rgb = reader.read_bl()?;
+            let _color_byte = reader.read_rc()?;
+        }
+        // DIMTOL, DIMLIM, DIMTIH, DIMTOH, DIMSE1, DIMSE2
+        for _ in 0..6 {
+            let _flag = reader.read_b()?;
+        }
+        let _dimtad = reader.read_bs()?;
+        let _dimzin = reader.read_bs()?;
+        let _dimazin = reader.read_bs()?;
+        if strings_in_stream {
+            let _dimarcsym = reader.read_bs()?;
+        }
+    }
+    let dimtxt = reader.read_bd()?;
+
+    if ![dimscale, dimasz, dimtxt]
+        .iter()
+        .all(|value| value.is_finite() && *value >= 0.0 && *value < 1.0e12)
+    {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            "DIMSTYLE sizes are out of range",
+        ));
+    }
+    Ok((name, dimscale, dimasz, dimtxt))
+}
+
+/// Sizes of every dimension style: `(handle, name, dimscale, dimasz, dimtxt)`.
+///
+/// `dimtxt` is the text height and `dimasz` the arrow size of the style, in
+/// drawing units before `dimscale` (the overall scale; 0 for a style that is
+/// scaled by the viewport or annotatively).
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_dimstyles(path: &str, limit: Option<usize>) -> PyResult<Vec<DimStyleSizeRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    let mut seen: HashSet<u64> = HashSet::new();
+
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x45, "DIMSTYLE", &dynamic_types) {
+            continue;
+        }
+        let Ok((name, dimscale, dimasz, dimtxt)) =
+            decode_dimstyle_record(&record, &header, decoder.version())
+        else {
+            continue;
+        };
+        if !seen.insert(obj.handle.0) {
+            continue;
+        }
+        result.push((obj.handle.0, name, dimscale, dimasz, dimtxt));
         if let Some(limit) = limit {
             if result.len() >= limit {
                 break;

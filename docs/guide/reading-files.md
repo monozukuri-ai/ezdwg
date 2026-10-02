@@ -36,7 +36,8 @@ This returns a `Layout` object, which provides `query()` and `iter_entities()` t
 
 | Version Code | AutoCAD Version | Support Level |
 |-------------|-----------------|---------------|
-| AC1014 | R14 | Experimental |
+| AC1012 | R13 | 2D entities |
+| AC1014 | R14 | 2D entities |
 | AC1015 | R2000 | Full |
 | AC1018 | R2004 | Full |
 | AC1021 | R2007 | Full |
@@ -44,8 +45,8 @@ This returns a `Layout` object, which provides `query()` and `iter_entities()` t
 | AC1027 | R2013 | Full |
 | AC1032 | R2018 | Full |
 
-!!! note "AC1014 Support"
-    R14 (AC1014) has stable version detection and object-header listing, but entity geometry decoding coverage is limited.
+!!! note "R13 / R14 Support"
+    R13 (AC1012) and R14 (AC1014) files decode the 2D entity types (lines, arcs, circles, ellipses, points, polylines, text, attributes, block references, hatches, solids, splines, leaders, dimensions) with block membership and block names. 3D polylines and meshes are not decoded. These versions have no lineweights, no layer plot flag and no `$INSUNITS`, and their symbol names (layers, blocks) are upper case.
 
 ## Lazy Loading
 

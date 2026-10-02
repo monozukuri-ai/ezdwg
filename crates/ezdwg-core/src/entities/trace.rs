@@ -1,6 +1,7 @@
 use crate::bit::{BitReader, Endian};
 use crate::core::error::ErrorKind;
 use crate::core::result::Result;
+use crate::entities::common::parse_common_entity_header_r14_with_handle;
 use crate::entities::common::{
     parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r2007,
     parse_common_entity_header_r2010, parse_common_entity_header_r2013,
@@ -24,6 +25,35 @@ pub struct TraceEntity {
 pub fn decode_trace(reader: &mut BitReader<'_>) -> Result<TraceEntity> {
     let header = parse_common_entity_header(reader)?;
     decode_trace_with_header(reader, header, false, false)
+}
+
+/// R13/R14: thickness and extrusion are stored in full (BD and 3BD) instead
+/// of the flagged forms R2000 introduced.
+pub fn decode_trace_r14(reader: &mut BitReader<'_>, object_handle: u64) -> Result<TraceEntity> {
+    let header = parse_common_entity_header_r14_with_handle(reader, object_handle)?;
+    let thickness = reader.read_bd()?;
+    let elevation = reader.read_bd()?;
+    let c1 = read_2rd(reader)?;
+    let c2 = read_2rd(reader)?;
+    let c3 = read_2rd(reader)?;
+    let c4 = read_2rd(reader)?;
+    let extrusion = reader.read_3bd()?;
+
+    reader.set_bit_pos(header.obj_size);
+    let layer_handle = parse_common_entity_handles(reader, &header)?.layer;
+
+    Ok(TraceEntity {
+        handle: header.handle,
+        color_index: header.color.index,
+        true_color: header.color.true_color,
+        layer_handle,
+        p1: (c1.0, c1.1, elevation),
+        p2: (c2.0, c2.1, elevation),
+        p3: (c3.0, c3.1, elevation),
+        p4: (c4.0, c4.1, elevation),
+        thickness,
+        extrusion,
+    })
 }
 
 pub fn decode_trace_r2007(reader: &mut BitReader<'_>) -> Result<TraceEntity> {

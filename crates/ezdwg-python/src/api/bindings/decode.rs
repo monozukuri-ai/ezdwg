@@ -2045,7 +2045,9 @@ pub fn decode_entity_placements(
             continue;
         }
         let common = match version {
-            version::DwgVersion::R13 | version::DwgVersion::R14 => continue,
+            version::DwgVersion::R13 | version::DwgVersion::R14 => {
+                entities::common::parse_common_entity_header_r14(&mut reader)
+            }
             version::DwgVersion::R2000 | version::DwgVersion::R2004 => {
                 entities::common::parse_common_entity_header(&mut reader)
             }
@@ -3827,7 +3829,25 @@ pub fn decode_mtext_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<M
             return Err(to_py_err(err));
         }
         let reader_after_prefix = reader.clone();
-        let mut entity =
+        // An entity read from its exact position needs none of the recovery
+        // steps below, which search the record for a plausible text and owner.
+        let exact_entity = decode_exact_for_version(
+            &mut reader.clone(),
+            decoder.version(),
+            &header,
+            |exact_reader, format, object_data_end_bit| {
+                entities::decode_mtext_exact(
+                    exact_reader,
+                    format,
+                    object_data_end_bit,
+                    obj.handle.0,
+                )
+            },
+        );
+        let is_exact = exact_entity.is_some();
+        let mut entity = if let Some(entity) = exact_entity {
+            entity
+        } else {
             match decode_mtext_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
                 Ok(entity) => entity,
                 Err(err) if best_effort => {
@@ -3843,11 +3863,16 @@ pub fn decode_mtext_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<M
                     continue;
                 }
                 Err(err) => return Err(to_py_err(err)),
-            };
-        if matches!(
-            decoder.version(),
-            version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
-        ) {
+            }
+        };
+        if !is_exact
+            && matches!(
+                decoder.version(),
+                version::DwgVersion::R2010
+                    | version::DwgVersion::R2013
+                    | version::DwgVersion::R2018
+            )
+        {
             if let Some(recovered_text) =
                 recover_r2010_mtext_text(&reader_after_prefix, &header, entity.text.as_str())
             {
@@ -4505,8 +4530,9 @@ impl_version_dispatch! {
 }
 
 impl_version_dispatch! {
-    no_r14;
+    with_r14;
     fn decode_spline_for_version -> entities::SplineEntity;
+    r14: entities::decode_spline_r14;
     r2010: entities::decode_spline_r2010;
     r2013: entities::decode_spline_r2013;
     r2007: entities::decode_spline_r2007;
@@ -4519,6 +4545,16 @@ fn decode_text_for_version(
     header: &ApiObjectHeader,
     object_handle: u64,
 ) -> crate::core::result::Result<entities::TextEntity> {
+    if let Some(entity) = decode_exact_for_version(
+        reader,
+        version,
+        header,
+        |exact_reader, format, object_data_end_bit| {
+            entities::decode_text_exact(exact_reader, format, object_data_end_bit, object_handle)
+        },
+    ) {
+        return Ok(entity);
+    }
     match version {
         version::DwgVersion::R13 | version::DwgVersion::R14 => entities::decode_text_r14(reader, object_handle),
         version::DwgVersion::R2010 => decode_r2010_entity_with_end_bit_candidates(
@@ -4542,12 +4578,79 @@ fn decode_text_for_version(
     }
 }
 
+/// R2007+ ATTRIB/ATTDEF read from its exact position, as the specification lays
+/// it out. `None` when the record does not pass the layout check; the callers
+/// then fall back to the candidate search.
+fn decode_attrib_exact_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+    is_attdef: bool,
+) -> Option<entities::AttribEntity> {
+    decode_exact_for_version(
+        reader,
+        version,
+        header,
+        |exact_reader, format, object_data_end_bit| {
+            entities::decode_attrib_exact(
+                exact_reader,
+                format,
+                object_data_end_bit,
+                object_handle,
+                is_attdef,
+            )
+        },
+    )
+}
+
+/// Runs a decoder that reads an R2007+ entity from its exact position (the
+/// strings from the string stream of the object). `None` for older versions
+/// and for records that do not pass the checks of the decoder; the callers
+/// then fall back to their candidate search.
+fn decode_exact_for_version<T, F>(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    mut decode: F,
+) -> Option<T>
+where
+    F: FnMut(
+        &mut BitReader<'_>,
+        entities::StringStreamFormat,
+        u32,
+    ) -> crate::core::result::Result<T>,
+{
+    let format = match version {
+        version::DwgVersion::R2007 => entities::StringStreamFormat::R2007,
+        version::DwgVersion::R2010 => entities::StringStreamFormat::R2010,
+        version::DwgVersion::R2013 => entities::StringStreamFormat::R2013,
+        version::DwgVersion::R2018 => entities::StringStreamFormat::R2018,
+        _ => return None,
+    };
+    // R2007 stores the end of its data in the record itself.
+    let object_data_end_bit = if format == entities::StringStreamFormat::R2007 {
+        0
+    } else {
+        resolve_r2010_object_data_end_bit(header).ok()?
+    };
+    let mut exact_reader = reader.clone();
+    let entity = decode(&mut exact_reader, format, object_data_end_bit).ok()?;
+    *reader = exact_reader;
+    Some(entity)
+}
+
 fn decode_attrib_for_version(
     reader: &mut BitReader<'_>,
     version: &version::DwgVersion,
     header: &ApiObjectHeader,
     object_handle: u64,
 ) -> crate::core::result::Result<entities::AttribEntity> {
+    if let Some(entity) =
+        decode_attrib_exact_for_version(reader, version, header, object_handle, false)
+    {
+        return Ok(entity);
+    }
     match version {
         version::DwgVersion::R2010 => decode_r2010_entity_with_start_and_end_bit_candidates_scored(
             reader,
@@ -4572,6 +4675,9 @@ fn decode_attrib_for_version(
             )
         }
         version::DwgVersion::R2007 => entities::decode_attrib_r2007(reader),
+        version::DwgVersion::R13 | version::DwgVersion::R14 => {
+            entities::decode_attrib_r14(reader, object_handle)
+        }
         _ => entities::decode_attrib(reader),
     }
 }
@@ -4582,6 +4688,11 @@ fn decode_attdef_for_version(
     header: &ApiObjectHeader,
     object_handle: u64,
 ) -> crate::core::result::Result<entities::AttribEntity> {
+    if let Some(entity) =
+        decode_attrib_exact_for_version(reader, version, header, object_handle, true)
+    {
+        return Ok(entity);
+    }
     match version {
         version::DwgVersion::R2010 => decode_r2010_entity_with_start_and_end_bit_candidates_scored(
             reader,
@@ -4606,6 +4717,9 @@ fn decode_attdef_for_version(
             )
         }
         version::DwgVersion::R2007 => entities::decode_attdef_r2007(reader),
+        version::DwgVersion::R13 | version::DwgVersion::R14 => {
+            entities::decode_attdef_r14(reader, object_handle)
+        }
         _ => entities::decode_attdef(reader),
     }
 }
@@ -4966,6 +5080,16 @@ fn decode_mtext_for_version(
     header: &ApiObjectHeader,
     object_handle: u64,
 ) -> crate::core::result::Result<entities::MTextEntity> {
+    if let Some(entity) = decode_exact_for_version(
+        reader,
+        version,
+        header,
+        |exact_reader, format, object_data_end_bit| {
+            entities::decode_mtext_exact(exact_reader, format, object_data_end_bit, object_handle)
+        },
+    ) {
+        return Ok(entity);
+    }
     match version {
         version::DwgVersion::R2010 => decode_r2010_entity_with_end_bit_candidates_scored(
             reader,
@@ -4987,6 +5111,9 @@ fn decode_mtext_for_version(
         }
         version::DwgVersion::R2007 => entities::decode_mtext_r2007(reader),
         version::DwgVersion::R2004 => entities::decode_mtext_r2004(reader),
+        version::DwgVersion::R13 | version::DwgVersion::R14 => {
+            entities::decode_mtext_r14(reader, object_handle)
+        }
         _ => entities::decode_mtext(reader),
     }
 }
@@ -5064,8 +5191,9 @@ fn score_mtext_entity_candidate(entity: &entities::MTextEntity) -> i64 {
 
 
 impl_version_dispatch! {
-    no_r14;
+    with_r14;
     fn decode_leader_for_version -> entities::LeaderEntity;
+    r14: entities::decode_leader_r14;
     r2010: entities::decode_leader_r2010;
     r2013: entities::decode_leader_r2013;
     r2007: entities::decode_leader_r2007;
@@ -5089,13 +5217,17 @@ fn decode_hatch_for_version(
         }
         version::DwgVersion::R2007 => entities::decode_hatch_r2007(reader),
         version::DwgVersion::R2004 => entities::decode_hatch_r2004(reader),
+        version::DwgVersion::R13 | version::DwgVersion::R14 => {
+            entities::decode_hatch_r14(reader, object_handle)
+        }
         _ => entities::decode_hatch(reader),
     }
 }
 
 impl_version_dispatch! {
-    no_r14;
+    with_r14;
     fn decode_tolerance_for_version -> entities::ToleranceEntity;
+    r14: entities::decode_tolerance_r14;
     r2010: entities::decode_tolerance_r2010;
     r2013: entities::decode_tolerance_r2013;
     r2007: entities::decode_tolerance_r2007;
@@ -5103,8 +5235,9 @@ impl_version_dispatch! {
 }
 
 impl_version_dispatch! {
-    no_r14;
+    with_r14;
     fn decode_mline_for_version -> entities::MLineEntity;
+    r14: entities::decode_mline_r14;
     r2010: entities::decode_mline_r2010;
     r2013: entities::decode_mline_r2013;
     r2007: entities::decode_mline_r2007;
@@ -5112,8 +5245,9 @@ impl_version_dispatch! {
 }
 
 impl_version_dispatch! {
-    no_r14;
+    with_r14;
     fn decode_3dface_for_version -> entities::Face3dEntity;
+    r14: entities::decode_3dface_r14;
     r2010: entities::decode_3dface_r2010;
     r2013: entities::decode_3dface_r2013;
     r2007: entities::decode_3dface_r2007;
@@ -5121,8 +5255,9 @@ impl_version_dispatch! {
 }
 
 impl_version_dispatch! {
-    no_r14;
+    with_r14;
     fn decode_solid_for_version -> entities::SolidEntity;
+    r14: entities::decode_solid_r14;
     r2010: entities::decode_solid_r2010;
     r2013: entities::decode_solid_r2013;
     r2007: entities::decode_solid_r2007;
@@ -5130,8 +5265,9 @@ impl_version_dispatch! {
 }
 
 impl_version_dispatch! {
-    no_r14;
+    with_r14;
     fn decode_trace_for_version -> entities::TraceEntity;
+    r14: entities::decode_trace_r14;
     r2010: entities::decode_trace_r2010;
     r2013: entities::decode_trace_r2013;
     r2007: entities::decode_trace_r2007;
@@ -5139,8 +5275,9 @@ impl_version_dispatch! {
 }
 
 impl_version_dispatch! {
-    no_r14;
+    with_r14;
     fn decode_shape_for_version -> entities::ShapeEntity;
+    r14: entities::decode_shape_r14;
     r2010: entities::decode_shape_r2010;
     r2013: entities::decode_shape_r2013;
     r2007: entities::decode_shape_r2007;

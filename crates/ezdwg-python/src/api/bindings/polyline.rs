@@ -2050,7 +2050,13 @@ fn decode_polyline_2d_for_version(
 ) -> crate::core::result::Result<entities::Polyline2dEntity> {
     let start = reader.get_pos();
     match version {
-        version::DwgVersion::R13 | version::DwgVersion::R14 => entities::decode_polyline_2d_r14(reader, object_handle),
+        version::DwgVersion::R13 | version::DwgVersion::R14 => {
+            if is_r14_polyline_2d_speculative_type(version, header.type_code) {
+                entities::decode_polyline_2d_r14_speculative(reader, object_handle)
+            } else {
+                entities::decode_polyline_2d_r14(reader, object_handle)
+            }
+        }
         version::DwgVersion::R2010 => {
             let object_data_end_bit = resolve_r2010_object_data_end_bit(header)?;
             match entities::decode_polyline_2d_r2010(reader, object_data_end_bit, object_handle) {
@@ -2151,6 +2157,9 @@ fn decode_vertex_2d_for_version(
             entities::decode_vertex_2d_r2013(reader, object_data_end_bit, object_handle)
         }
         version::DwgVersion::R2007 => entities::decode_vertex_2d_r2007(reader),
+        version::DwgVersion::R13 | version::DwgVersion::R14 => {
+            entities::decode_vertex_2d_r14(reader, object_handle)
+        }
         _ => entities::decode_vertex_2d(reader),
     };
     if let Ok(entity) = primary {

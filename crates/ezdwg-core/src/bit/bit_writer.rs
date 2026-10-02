@@ -212,17 +212,20 @@ impl BitWriter {
             self.write_3b(0)?;
             return Ok(());
         }
-        let bytes = value.to_be_bytes();
-        let start = bytes.iter().position(|b| *b != 0).unwrap_or(bytes.len());
-        let significant = &bytes[start..];
-        if significant.len() > 7 {
+        // Least significant byte first, without the leading zero bytes.
+        let bytes = value.to_le_bytes();
+        let length = bytes
+            .iter()
+            .rposition(|b| *b != 0)
+            .map_or(0, |last| last + 1);
+        if length > 7 {
             return Err(DwgError::new(
                 ErrorKind::Unsupported,
                 format!("BLL value exceeds 7-byte encoding range: {value}"),
             ));
         }
-        self.write_3b(significant.len() as u8)?;
-        self.write_rcs(significant)
+        self.write_3b(length as u8)?;
+        self.write_rcs(&bytes[..length])
     }
 
     pub fn write_ms(&mut self, value: u32) -> Result<()> {

@@ -1044,8 +1044,9 @@ pub fn decode_block_entity_name_maps(
 }
 
 impl_version_dispatch! {
-    no_r14;
+    with_r14;
     fn decode_insert_for_version -> entities::InsertEntity;
+    r14: entities::decode_insert_r14;
     r2010: entities::decode_insert_r2010;
     r2013: entities::decode_insert_r2013;
     r2007: entities::decode_insert_r2007;
@@ -1116,6 +1117,9 @@ fn decode_minsert_for_version(
             }))
         }
         version::DwgVersion::R2007 => entities::decode_minsert_r2007(reader),
+        version::DwgVersion::R13 | version::DwgVersion::R14 => {
+            entities::decode_minsert_r14(reader, object_handle)
+        }
         _ => entities::decode_minsert(reader),
     }
 }
@@ -1572,12 +1576,16 @@ fn collect_block_header_name_entries_in_order(
         if !matches_type_name(header.type_code, 0x31, "BLOCK_HEADER", dynamic_types) {
             continue;
         }
-        let prefer_prefixed = matches!(
-            decoder.version(),
-            version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
-        );
+        let prefer_prefixed = block_header_record_is_prefixed(decoder.version());
         let mut decoded_handle_fallback = obj.handle.0;
-        if prefer_prefixed {
+        // R13/R14 records start with their handle, not with a size: the handle
+        // of the object index stands in when the name cannot be read.
+        let size_comes_first = !matches!(
+            decoder.version(),
+            version::DwgVersion::R13 | version::DwgVersion::R14
+        );
+        if !size_comes_first {
+        } else if prefer_prefixed {
             let mut prefixed_reader = record.bit_reader();
             if skip_object_type_prefix(&mut prefixed_reader, decoder.version()).is_ok() {
                 if let Ok(handle) =
@@ -1855,12 +1863,7 @@ fn collect_block_record_handle_aliases_in_order(
         if matches_type_name(header.type_code, 0x31, "BLOCK_HEADER", dynamic_types) {
             pending_name = block_header_names.get(&obj.handle.0).cloned();
             if pending_name.is_none() || pending_name.as_ref().is_some_and(|name| name.is_empty()) {
-                let prefer_prefixed = matches!(
-                    decoder.version(),
-                    version::DwgVersion::R2010
-                        | version::DwgVersion::R2013
-                        | version::DwgVersion::R2018
-                );
+                let prefer_prefixed = block_header_record_is_prefixed(decoder.version());
                 let parsed = if prefer_prefixed {
                     let mut prefixed_reader = record.bit_reader();
                     if skip_object_type_prefix(&mut prefixed_reader, decoder.version()).is_ok() {
@@ -1908,12 +1911,7 @@ fn collect_block_record_handle_aliases_in_order(
             }
             aliases.entry(obj.handle.0).or_insert_with(|| name.clone());
 
-            let prefer_prefixed = matches!(
-                decoder.version(),
-                version::DwgVersion::R2010
-                    | version::DwgVersion::R2013
-                    | version::DwgVersion::R2018
-            );
+            let prefer_prefixed = block_header_record_is_prefixed(decoder.version());
             let decoded_handle = if prefer_prefixed {
                 let mut prefixed_reader = record.bit_reader();
                 if skip_object_type_prefix(&mut prefixed_reader, decoder.version()).is_ok() {
@@ -1988,12 +1986,7 @@ fn collect_block_and_endblk_handle_aliases_in_order(
                     block_aliases
                         .entry(obj.handle.0)
                         .or_insert_with(|| name.clone());
-                    let prefer_prefixed = matches!(
-                        decoder.version(),
-                        version::DwgVersion::R2010
-                            | version::DwgVersion::R2013
-                            | version::DwgVersion::R2018
-                    );
+                    let prefer_prefixed = block_header_record_is_prefixed(decoder.version());
                     let decoded_handle = if prefer_prefixed {
                         let mut prefixed_reader = record.bit_reader();
                         if skip_object_type_prefix(&mut prefixed_reader, decoder.version()).is_ok()
@@ -2047,12 +2040,7 @@ fn collect_block_and_endblk_handle_aliases_in_order(
                 endblk_aliases
                     .entry(obj.handle.0)
                     .or_insert_with(|| name.clone());
-                let prefer_prefixed = matches!(
-                    decoder.version(),
-                    version::DwgVersion::R2010
-                        | version::DwgVersion::R2013
-                        | version::DwgVersion::R2018
-                );
+                let prefer_prefixed = block_header_record_is_prefixed(decoder.version());
                 let decoded_handle = if prefer_prefixed {
                     let mut prefixed_reader = record.bit_reader();
                     if skip_object_type_prefix(&mut prefixed_reader, decoder.version()).is_ok() {
@@ -3138,6 +3126,20 @@ fn parse_insert_block_header_handle_from_common_header(
     entities::common::read_handle_reference(&mut reader, header.handle).ok()
 }
 
+/// Versions whose BLOCK_HEADER decoder expects the reader in front of the
+/// object type: R2010+ and R13/R14. The decoders of R2000-R2007 try the record
+/// without that prefix first and fall back to it.
+fn block_header_record_is_prefixed(version: &version::DwgVersion) -> bool {
+    matches!(
+        version,
+        version::DwgVersion::R13
+            | version::DwgVersion::R14
+            | version::DwgVersion::R2010
+            | version::DwgVersion::R2013
+            | version::DwgVersion::R2018
+    )
+}
+
 fn decode_block_header_record_handle(
     reader: &mut BitReader<'_>,
     expected_handle: u64,
@@ -3293,13 +3295,26 @@ fn decode_block_header_name_record(
     } else {
         None
     };
+    let r13_r14 = matches!(
+        version,
+        version::DwgVersion::R13 | version::DwgVersion::R14
+    );
     let preamble = (|| -> crate::core::result::Result<(u32, u64)> {
-        let obj_size_bits = reader.read_rl(Endian::Little)?;
-        let record_handle = reader.read_h()?.value;
-        skip_eed(reader)?;
+        // R13/R14 store the object size after the handle and the EED.
+        let (obj_size_bits, record_handle) = if r13_r14 {
+            let record_handle = reader.read_h()?.value;
+            skip_eed(reader)?;
+            (reader.read_rl(Endian::Little)?, record_handle)
+        } else {
+            let obj_size_bits = reader.read_rl(Endian::Little)?;
+            let record_handle = reader.read_h()?.value;
+            skip_eed(reader)?;
+            (obj_size_bits, record_handle)
+        };
         let _num_reactors = reader.read_bl()?;
-        // The "XDic Missing Flag" exists from R2004 on; R2000 goes straight to the name.
-        if !reader.pre_r2004_layout() {
+        // The "XDic Missing Flag" exists from R2004 on; earlier versions go
+        // straight to the name.
+        if !reader.pre_r2004_layout() && !r13_r14 {
             let _xdic_missing_flag = reader.read_b()?;
         }
         if matches!(

@@ -283,11 +283,13 @@ impl<'a> BitReader<'a> {
         Ok(value)
     }
 
+    /// BLL (R2010+): a 3-bit byte count, then that many bytes, least
+    /// significant byte first.
     pub fn read_bll(&mut self) -> Result<u64> {
         let length = self.read_3b()? as usize;
         let mut value = 0u64;
-        for _ in 0..length {
-            value = (value << 8) | self.read_rc()? as u64;
+        for index in 0..length {
+            value |= (self.read_rc()? as u64) << (8 * index);
         }
         Ok(value)
     }
@@ -543,6 +545,15 @@ mod tests {
         let bytes = writer.into_bytes();
         let mut reader = BitReader::new(&bytes);
         assert_eq!(reader.read_tu().expect("read tu"), "テストA");
+    }
+
+    #[test]
+    fn read_bll_takes_the_least_significant_byte_first() {
+        // Byte count 2 (bits 010), then 0xCC 0x04: the size 1228 of a graphic
+        // image, as R2010+ files store it.
+        let bytes = [0b0101_1001, 0b1000_0000, 0b1000_0000];
+        let mut reader = BitReader::new(&bytes);
+        assert_eq!(reader.read_bll().expect("read bll"), 0x04CC);
     }
 
     #[test]

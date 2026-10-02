@@ -89,8 +89,19 @@ doc.linetypes()["CENTER"]["dashes"]  # [1.25, -0.25, 0.25, -0.25]
 Document.layers() -> dict[str, dict[str, Any]]
 ```
 
-Layer table by name. Each entry holds `handle`, `color_index`, `true_color` and
-`linetype` (the name of the layer's linetype, `None` when it cannot be read).
+Layer table by name. Each entry holds `handle`, `color_index`, `true_color`,
+`linetype` (the name of the layer's linetype, `None` when it cannot be read)
+and the state of the layer:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `off` | `bool` | The layer is turned off |
+| `frozen` | `bool` | The layer is frozen |
+| `locked` | `bool` | The layer is locked |
+| `plot` | `bool` | The layer is printed. Always `True` for R13/R14 files, which have no such flag |
+| `lineweight` | `int` | Hundredths of a millimetre; `-3` is the default lineweight (always, for R13/R14 files) |
+
+The entities of a layer that is off or frozen are not shown.
 
 ```python
 layers = doc.layers()
@@ -103,6 +114,22 @@ for entity in doc.modelspace().query("LINE"):
         layer = next(v for v in layers.values() if v["handle"] == entity.dxf["layer_handle"])
         name = layer["linetype"]
     scale = ltscale * entity.dxf["linetype_scale"]
+```
+
+#### dimstyles
+
+```python
+Document.dimstyles() -> dict[str, dict[str, Any]]
+```
+
+Dimension style table by name. Each entry holds `handle`, `dimscale` (the
+overall scale; 0 for a style that is scaled by the viewport or annotatively),
+`dimtxt` (text height) and `dimasz` (arrow size). The sizes are in drawing
+units before `dimscale`.
+
+```python
+style = doc.dimstyles()["ISO-25"]
+text_height = style["dimtxt"] * (style["dimscale"] or 1.0)
 ```
 
 #### units

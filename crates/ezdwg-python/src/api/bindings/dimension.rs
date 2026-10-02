@@ -556,8 +556,9 @@ fn dim_entity_row_from_linear_like(entity: &entities::DimLinearEntity) -> DimEnt
 }
 
 impl_version_dispatch! {
-    no_r14;
+    with_r14;
     fn decode_dim_linear_for_version -> entities::DimLinearEntity;
+    r14: entities::decode_dim_linear_r14;
     r2010: entities::decode_dim_linear_r2010;
     r2013: entities::decode_dim_linear_r2013;
     r2007: entities::decode_dim_linear_r2007;
@@ -594,6 +595,9 @@ macro_rules! impl_dim_layout_dispatch {
                     )
                 }
                 version::DwgVersion::R2007 => entities::decode_dim_layout_r2007(reader, $layout),
+                version::DwgVersion::R13 | version::DwgVersion::R14 => {
+                    entities::decode_dim_layout_r14(reader, object_handle, $layout)
+                }
                 _ => entities::decode_dim_layout(reader, $layout),
             }
         }
@@ -606,8 +610,9 @@ impl_dim_layout_dispatch!(fn decode_dim_ang3pt_for_version => entities::DimSpeci
 impl_dim_layout_dispatch!(fn decode_dim_ang2ln_for_version => entities::DimSpecificLayout::Ang2Ln);
 
 impl_version_dispatch! {
-    no_r14;
+    with_r14;
     fn decode_dim_radius_for_version -> entities::DimRadiusEntity;
+    r14: entities::decode_dim_radius_r14;
     r2010: entities::decode_dim_radius_r2010;
     r2013: entities::decode_dim_radius_r2013;
     r2007: entities::decode_dim_radius_r2007;
@@ -615,8 +620,9 @@ impl_version_dispatch! {
 }
 
 impl_version_dispatch! {
-    no_r14;
+    with_r14;
     fn decode_dim_diameter_for_version -> entities::DimDiameterEntity;
+    r14: entities::decode_dim_diameter_r14;
     r2010: entities::decode_dim_diameter_r2010;
     r2013: entities::decode_dim_diameter_r2013;
     r2007: entities::decode_dim_diameter_r2007;

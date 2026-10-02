@@ -1,6 +1,8 @@
 use crate::bit::{BitReader, Endian};
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
+use crate::entities::common::first_stream_string;
+use crate::entities::common::parse_common_entity_header_r14_with_handle;
 use crate::entities::common::{
     parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r2007,
     parse_common_entity_header_r2010, parse_common_entity_header_r2013,
@@ -171,6 +173,115 @@ pub fn decode_dim_linear_r2013(
     )
 }
 
+/// R13/R14 dimension of the given type-specific layout.
+pub fn decode_dim_layout_r14(
+    reader: &mut BitReader<'_>,
+    object_handle: u64,
+    layout: DimSpecificLayout,
+) -> Result<DimLinearEntity> {
+    decode_dim_r14(reader, object_handle, |reader| {
+        read_dim_specific(reader, layout)
+    })
+}
+
+pub fn decode_dim_linear_r14(
+    reader: &mut BitReader<'_>,
+    object_handle: u64,
+) -> Result<DimLinearEntity> {
+    decode_dim_layout_r14(reader, object_handle, DimSpecificLayout::Linear)
+}
+
+/// R13/R14 RADIUS (10-pt, 15-pt) or DIAMETER (15-pt, 10-pt) dimension; both
+/// end with the leader length.
+pub(crate) fn decode_dim_radial_r14(
+    reader: &mut BitReader<'_>,
+    object_handle: u64,
+    diameter: bool,
+) -> Result<DimLinearEntity> {
+    decode_dim_r14(reader, object_handle, |reader| {
+        let first = reader.read_3bd()?;
+        let second = reader.read_3bd()?;
+        let _leader_length = reader.read_bd()?;
+        let (point10, point15) = if diameter {
+            (second, first)
+        } else {
+            (first, second)
+        };
+        Ok(DimSpecificData {
+            point13: if diameter { point15 } else { point10 },
+            point14: if diameter { point10 } else { point15 },
+            point10,
+            ext_line_rotation: 0.0,
+            dim_rotation: 0.0,
+            point15: Some(point15),
+            point16: None,
+        })
+    })
+}
+
+/// R13/R14 dimension (ODA specification 20.4.22). The common dimension data is
+/// the one of R2000 without what that version added: attachment point, line
+/// spacing and the measurement.
+fn decode_dim_r14<F>(
+    reader: &mut BitReader<'_>,
+    object_handle: u64,
+    read_specific: F,
+) -> Result<DimLinearEntity>
+where
+    F: FnOnce(&mut BitReader<'_>) -> Result<DimSpecificData>,
+{
+    let header = parse_common_entity_header_r14_with_handle(reader, object_handle)?;
+    let extrusion = reader.read_3bd()?;
+    let text_mid_x = reader.read_rd(Endian::Little)?;
+    let text_mid_y = reader.read_rd(Endian::Little)?;
+    let elevation = reader.read_bd()?;
+    let dim_flags = reader.read_rc()?;
+    let user_text = reader.read_tv()?;
+    let text_rotation = reader.read_bd()?;
+    let horizontal_direction = reader.read_bd()?;
+    let insert_scale = reader.read_3bd()?;
+    let insert_rotation = reader.read_bd()?;
+    let point12_x = reader.read_rd(Endian::Little)?;
+    let point12_y = reader.read_rd(Endian::Little)?;
+    let specific = read_specific(reader)?;
+
+    reader.set_bit_pos(header.obj_size);
+    let (dimstyle_handle, anonymous_block_handle, layer_handle) =
+        read_dimension_handles(reader, &header)?;
+
+    Ok(DimLinearEntity {
+        common: DimensionCommonData {
+            handle: header.handle,
+            color_index: header.color.index,
+            true_color: header.color.true_color,
+            layer_handle,
+            extrusion,
+            text_midpoint: (text_mid_x, text_mid_y, elevation),
+            elevation,
+            dim_flags,
+            user_text,
+            text_rotation,
+            horizontal_direction,
+            insert_scale,
+            insert_rotation,
+            attachment_point: None,
+            line_spacing_style: None,
+            line_spacing_factor: None,
+            actual_measurement: None,
+            insert_point: Some((point12_x, point12_y, elevation)),
+            dimstyle_handle: Some(dimstyle_handle),
+            anonymous_block_handle: Some(anonymous_block_handle),
+        },
+        point13: specific.point13,
+        point14: specific.point14,
+        point10: specific.point10,
+        ext_line_rotation: specific.ext_line_rotation,
+        dim_rotation: specific.dim_rotation,
+        point15: specific.point15,
+        point16: specific.point16,
+    })
+}
+
 /// R2000/R2004 dimension of the given type-specific layout.
 pub fn decode_dim_layout(
     reader: &mut BitReader<'_>,
@@ -318,7 +429,8 @@ fn decode_r2010_plus_variant(
     let user_text = if parse_variant.has_user_text {
         reader.read_tv()?
     } else {
-        String::new()
+        // R2007+: the text override is the string of the string stream.
+        first_stream_string(reader, header.obj_size).unwrap_or_default()
     };
     let text_rotation = reader.read_bd()?;
     let horizontal_direction = reader.read_bd()?;

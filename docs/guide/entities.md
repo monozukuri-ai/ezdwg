@@ -76,6 +76,13 @@ Every entity carries its linetype next to its color and layer:
 | `linetype_scale` | `float` | The entity's own linetype scale (DXF group 48) |
 | `layer_handle` | `int` | Handle of the entity's layer; `Document.layers()` gives the layer's linetype for `BYLAYER` |
 
+## Lineweight and Visibility
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `lineweight` | `int \| None` | Hundredths of a millimetre, as DXF group 370: `-1` BYLAYER (see `Document.layers()`), `-2` BYBLOCK, `-3` the default lineweight. `None` for R13/R14 files, which have no lineweights |
+| `invisible` | `bool` | The invisibility flag of the entity (DXF group 60). A layer that is off or frozen hides its entities without setting it |
+
 ## Entity Type Reference
 
 ### LINE
@@ -131,10 +138,42 @@ Every entity carries its linetype next to its color and layer:
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `insert` | `(float, float, float)` | Insertion point |
+| `insert` | `(float, float, float)` | Insertion point: the left end of the baseline |
+| `align_point` | `(float, float, float) \| None` | Alignment point; `None` when the file stores none |
+| `halign` | `int` | Horizontal justification (DXF group 72): 0 left, 1 center, 2 right, 3 aligned, 4 middle, 5 fit |
+| `valign` | `int` | Vertical justification (DXF group 73): 0 baseline, 1 bottom, 2 middle, 3 top |
 | `text` | `str` | Text content |
 | `height` | `float` | Text height |
 | `rotation` | `float` | Rotation angle in degrees |
+| `width` | `float` | Width factor |
+| `oblique` | `float` | Oblique angle in degrees |
+
+A text with a justification other than left / baseline is anchored at
+`align_point`; `insert` is then the left end of the baseline that follows from
+it. "Aligned" and "fit" texts run from `insert` to `align_point`.
+
+### ATTRIB / ATTDEF
+
+An `ATTRIB` is the text of one attribute of a block reference, and an `ATTDEF`
+the definition inside the block that it was created from. Both carry the keys
+of `TEXT` and:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `tag` | `str` | Attribute tag |
+| `text` | `str` | Value (`ATTRIB`) or default value (`ATTDEF`) |
+| `prompt` | `str \| None` | Prompt of an `ATTDEF`; `None` for `ATTRIB` |
+| `attribute_flags` | `int` | DXF group 70: 1 invisible, 2 constant, 4 verify, 8 preset |
+| `lock_position` | `bool` | R2007 and later |
+
+`Document.entity_placement(handle)` returns `(0, insert_handle)` for an
+`ATTRIB`: the owner is its `INSERT`. An `ATTRIB` is drawn where it is stored,
+in the coordinate system of that `INSERT` itself, not in the one of the block.
+
+A multi-line attribute is one `ATTRIB` in R2018 files: `text` holds its lines
+separated by line feeds, without formatting codes, and the alignment point is
+the top-left corner of the text. Earlier versions store one single-line
+`ATTRIB` per line, with tags such as `TAG_001`.
 
 ### MTEXT
 
@@ -223,6 +262,20 @@ The `dxf` dictionary for DIMENSION entities includes:
 | `dimstyle_handle` | `int \| None` | Handle of the dimension style (`DIMSTYLE`) |
 | `anonymous_block_handle` | `int \| None` | Handle of the anonymous block (`BLOCK_HEADER`) that holds the saved graphics of the dimension; `None` when the dimension has no block |
 | `anonymous_block_name` | `str` | Name of that block (`*D...`); omitted when there is no block or its name is unknown |
+
+R13/R14 files store no measurement: `actual_measurement` is `None` there.
+
+### TOLERANCE
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `insert` | `(float, float, float)` | Insertion point |
+| `text` | `str` | Content of the feature control frame, with its formatting codes |
+| `x_direction` | `(float, float, float)` | Direction of the frame |
+| `rotation` | `float` | Angle of `x_direction` in degrees |
+| `height` | `float` | Text height: the one stored with the entity (R13/R14 only), otherwise the text height of the dimension style times its overall scale (`Document.dimstyles()`). `0.0` when neither is known |
+| `dimgap` | `float` | Gap as R13/R14 store it; `0.0` for later versions |
+| `dimstyle_handle` | `int \| None` | Handle of the dimension style |
 | `char_height` | `float` | Optional saved text height from the referenced anonymous block; omitted when unavailable or ambiguous |
 | `char_height_source` | `str` | `"anonymous_block"` when `char_height` was resolved from saved block text |
 

@@ -2,7 +2,8 @@ use crate::bit::{BitReader, Endian};
 use crate::core::error::ErrorKind;
 use crate::core::result::Result;
 use crate::entities::common::{
-    parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r2007,
+    parse_common_entity_handles, parse_common_entity_header,
+    parse_common_entity_header_r14_with_handle, parse_common_entity_header_r2007,
     parse_common_entity_header_r2010, parse_common_entity_header_r2013,
     parse_common_entity_layer_handle, read_handle_reference, CommonEntityHeader,
 };
@@ -20,6 +21,30 @@ pub struct InsertEntity {
 pub fn decode_insert(reader: &mut BitReader<'_>) -> Result<InsertEntity> {
     let header = parse_common_entity_header(reader)?;
     decode_insert_with_header(reader, header, false, false)
+}
+
+/// R13/R14 (ODA specification 20.4.9): the scale is three plain doubles and
+/// there is no owned object count.
+pub fn decode_insert_r14(reader: &mut BitReader<'_>, object_handle: u64) -> Result<InsertEntity> {
+    let header = parse_common_entity_header_r14_with_handle(reader, object_handle)?;
+    let position = reader.read_3bd()?;
+    let scale = reader.read_3bd()?;
+    let rotation = reader.read_bd()?;
+    let _extrusion = reader.read_3bd()?;
+    let _has_attribs = reader.read_b()?;
+
+    reader.set_bit_pos(header.obj_size);
+    let common_handles = parse_common_entity_handles(reader, &header)?;
+    let block_header_handle = read_handle_reference(reader, header.handle).ok();
+
+    Ok(InsertEntity {
+        handle: header.handle,
+        position,
+        scale,
+        rotation,
+        block_header_handle,
+        owner_handle: common_handles.owner_ref,
+    })
 }
 
 pub fn decode_insert_r2007(reader: &mut BitReader<'_>) -> Result<InsertEntity> {
@@ -80,7 +105,8 @@ fn decode_insert_with_header(
     let rotation = reader.read_bd()?;
     let _extrusion = reader.read_3bd()?;
     let has_attribs = reader.read_b()?;
-    let owned_obj_count = if has_attribs == 1 {
+    // R2004+ count the owned attributes; R2000 names the first and the last.
+    let owned_obj_count = if has_attribs == 1 && !reader.pre_r2004_layout() {
         reader.read_bl()?
     } else {
         0

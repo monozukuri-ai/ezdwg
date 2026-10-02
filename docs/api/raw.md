@@ -193,6 +193,49 @@ without a geometry decoder, and `layer_handle` is the layer stored there.
 A dash of an entity is `dash * $LTSCALE * linetype_scale` drawing units long
 (`$LTSCALE` is `Document.header_variables()["ltscale"]`).
 
+## Layer State and Lineweights
+
+### decode_layer_states
+
+```python
+raw.decode_layer_states(path: str, limit: int | None = None) -> list[tuple[int, bool, bool, bool, bool, bool, int]]
+```
+
+State of every layer. Each tuple:
+`(layer_handle, frozen, off, frozen_in_new_viewports, locked, plot, lineweight)`.
+
+`lineweight` is in hundredths of a millimetre, as DXF group 370 writes it:
+`-3` is the default lineweight, `-1` BYLAYER and `-2` BYBLOCK. R13/R14 files
+have neither a plot flag nor lineweights: `plot` is `True` and `lineweight` is
+`-3` for every layer.
+
+A layer that is off or frozen shows none of its entities; a layer with
+`plot = False` is displayed but not printed.
+
+### decode_dimstyles
+
+```python
+raw.decode_dimstyles(path: str, limit: int | None = None) -> list[tuple[int, str, float, float, float]]
+```
+
+Sizes of every dimension style. Each tuple:
+`(handle, name, dimscale, dimasz, dimtxt)`: the overall scale (0 for a style
+scaled by the viewport or annotatively), the arrow size and the text height.
+
+### decode_entity_lineweights
+
+```python
+raw.decode_entity_lineweights(path: str, limit: int | None = None) -> list[tuple[int, int | None, bool]]
+```
+
+Lineweight and visibility of every entity. Each tuple:
+`(handle, lineweight, invisible)`. `lineweight` uses the values above (`-1`
+when the entity takes the lineweight of its layer) and is `None` for R13/R14
+files. `invisible` is the invisibility flag of the entity (DXF group 60).
+
+Like `decode_entity_linetypes`, the rows come from the common entity data and
+cover every entity type.
+
 ## Geometry Decode Functions
 
 All geometry decode functions take a `path` and optional `limit` parameter.

@@ -95,6 +95,10 @@ pub fn decode_polyline_2d_r2000(reader: &mut BitReader<'_>) -> Result<Polyline2d
     decode_polyline_2d_with_header(reader, header, false, false)
 }
 
+/// R13/R14 (ODA specification 20.4.16): thickness and extrusion are stored in
+/// full (BD and 3BD), and there is no owned object count. The handle stream
+/// names the first and the last vertex; the vertices are resolved through
+/// their owner handle or by scanning the objects that follow.
 pub fn decode_polyline_2d_r14(
     reader: &mut BitReader<'_>,
     object_handle: u64,
@@ -103,9 +107,40 @@ pub fn decode_polyline_2d_r14(
     if header.handle == 0 {
         header.handle = object_handle;
     }
-    // R13/R14 have no owned-object count either, but the speculative R14 decode
-    // path relies on the value read here as a plausibility signal; the bounded
-    // capacity check keeps a garbage value from reserving memory.
+    let flags = reader.read_bs()?;
+    let curve_type = reader.read_bs()?;
+    let width_start = reader.read_bd()?;
+    let width_end = reader.read_bd()?;
+    let thickness = reader.read_bd()?;
+    let elevation = reader.read_bd()?;
+    let _extrusion = reader.read_3bd()?;
+
+    Ok(Polyline2dEntity {
+        handle: header.handle,
+        flags,
+        curve_type,
+        flags_info: PolylineFlagsInfo::from_flags(flags),
+        curve_type_info: PolylineCurveType::from_code(curve_type),
+        width_start,
+        width_end,
+        thickness,
+        elevation,
+        owned_handles: Vec::new(),
+    })
+}
+
+/// The R2004 layout read behind R13/R14 common entity data. No R13/R14 file
+/// stores a polyline this way; the bindings use it to probe objects of unknown
+/// classes, where an owned object count that resolves is the sign of a
+/// polyline.
+pub fn decode_polyline_2d_r14_speculative(
+    reader: &mut BitReader<'_>,
+    object_handle: u64,
+) -> Result<Polyline2dEntity> {
+    let mut header = parse_common_entity_header_r14(reader)?;
+    if header.handle == 0 {
+        header.handle = object_handle;
+    }
     decode_polyline_2d_with_header(reader, header, false, true)
 }
 
