@@ -3,9 +3,9 @@ use crate::core::error::ErrorKind;
 use crate::core::result::Result;
 use crate::entities::common::{
     checked_handle_count, parse_common_entity_handles, parse_common_entity_header,
-    parse_common_entity_header_r2007, parse_common_entity_header_r2010,
-    parse_common_entity_header_r2013, parse_common_entity_layer_handle, read_handle_reference,
-    CommonEntityHeader,
+    parse_common_entity_header_r14_with_handle, parse_common_entity_header_r2007,
+    parse_common_entity_header_r2010, parse_common_entity_header_r2013,
+    parse_common_entity_layer_handle, read_handle_reference, CommonEntityHeader,
 };
 
 #[derive(Debug, Clone)]
@@ -35,6 +35,16 @@ pub fn decode_polyline_mesh(reader: &mut BitReader<'_>) -> Result<PolylineMeshEn
 pub fn decode_polyline_mesh_r2000(reader: &mut BitReader<'_>) -> Result<PolylineMeshEntity> {
     let header = parse_common_entity_header(reader)?;
     decode_polyline_mesh_with_header(reader, header, false, false)
+}
+
+/// R13/R14: the body is the one of R2000 (no owned object count); only the
+/// common entity data differs.
+pub fn decode_polyline_mesh_r14(
+    reader: &mut BitReader<'_>,
+    object_handle: u64,
+) -> Result<PolylineMeshEntity> {
+    let header = parse_common_entity_header_r14_with_handle(reader, object_handle)?;
+    decode_polyline_mesh_with_header(reader, header, true, false)
 }
 
 pub fn decode_polyline_mesh_r2007(reader: &mut BitReader<'_>) -> Result<PolylineMeshEntity> {

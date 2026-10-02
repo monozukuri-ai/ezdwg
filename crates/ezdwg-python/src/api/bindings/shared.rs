@@ -231,6 +231,17 @@ type ShapeEntityRow = (
     Option<u64>,
 );
 type ViewportEntityRow = (u64,);
+type ViewportViewRow = (Point3, Point3, f64, f64, f64, f64, f64, Point2, u32, u8);
+type ViewportDetailRow = (
+    u64,
+    Option<Point3>,
+    f64,
+    f64,
+    Option<ViewportViewRow>,
+    Vec<u64>,
+    Option<u64>,
+    u64,
+);
 type OleFrameEntityRow = (u64,);
 type LongTransactionEntityRow = (
     u64,

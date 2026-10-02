@@ -3,6 +3,32 @@
 ## Unreleased
 
 ### Added
+- Layouts. `Document.layouts()` returns the layout table: the model tab and
+  the paper-space sheets with their name, tab order, block record, paper size,
+  margins, units and rotation. It marks the sheet that was current when the
+  file was saved: the entities of that sheet are the ones stored without an
+  owner handle (`entity_placement()` gives `(1, None)`), the entities of every
+  other sheet name their block record. The raw function is
+  `decode_layout_objects`. Every version is covered, R14 files that carry
+  layout objects included; the layouts of the ACadSharp sample drawing read
+  the same from all seven saves and match its DXF export. In 483 real-world
+  drawings, 1,479 of 1,481 layout objects decode, and the current sheet is
+  identified in 472 of the 476 drawings that have layouts.
+- Paper-space viewports. A `VIEWPORT` entity carries its window on the sheet
+  (`center`, `width`, `height`) and, from R2000 on, what it shows
+  (`view_center`, `view_height`, `view_target`, `view_direction`,
+  `view_twist_angle`), its `status_flags`, the layers that are frozen in it
+  (`frozen_layers`, `frozen_layer_handles`) and its clip boundary. The raw
+  function is `decode_viewport_details`. Until now a viewport had a handle, a
+  layer and a color only. R13/R14 keep the view in the extended data of the
+  entity, which is not read: their viewports have a window but no view. The
+  viewports of the ACadSharp sample drawing match its DXF export in every
+  version, and all 1,716 viewports of the real-world drawings decode.
+- R13/R14 (`AC1012`, `AC1014`) decode `POLYLINE_3D`, `POLYLINE_MESH`,
+  `POLYLINE_PFACE` and their vertices and faces. The 3D polyline and the
+  polyface mesh of the R14 save of the ACadSharp sample drawing decode to the
+  same values as in its R2004 save, and the 82 3D polylines of the real-world
+  R13/R14 drawings have their vertices.
 - Layer state and lineweights. `Document.layers()` reports `off`, `frozen`,
   `locked`, `plot` and `lineweight` for every layer, and every entity carries
   `lineweight` and `invisible` in `Entity.dxf`. The raw functions are
@@ -89,6 +115,14 @@
   to account for `material flags`, `shadow flags`, R2010 visual-style bits, and the R2013+ ds-binary-data flag.
 
 ### Fixed
+- A spline-fit 3D polyline is returned along its fitted vertices
+  (`decode_polyline_3d_with_vertices`, `POLYLINE_3D` points). The control
+  points of its frame, which the file stores in front of them, used to be part
+  of the path.
+- The members of a polyline in an R13-R2000 file (`vertex_handles`,
+  `face_handles`, `seqend_handle`, and the `owner_handle` of its vertices) are
+  resolved from the vertices that follow it. These versions list no owned
+  objects, and the members stayed empty.
 - `TEXT` and `MTEXT` of R2007 and later are read from where the format keeps
   them. These versions store every string of an object in its string stream,
   but the decoders looked for the text in the data stream and settled on the

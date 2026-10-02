@@ -46,7 +46,7 @@ This returns a `Layout` object, which provides `query()` and `iter_entities()` t
 | AC1032 | R2018 | Full |
 
 !!! note "R13 / R14 Support"
-    R13 (AC1012) and R14 (AC1014) files decode the 2D entity types (lines, arcs, circles, ellipses, points, polylines, text, attributes, block references, hatches, solids, splines, leaders, dimensions) with block membership and block names. 3D polylines and meshes are not decoded. These versions have no lineweights, no layer plot flag and no `$INSUNITS`, and their symbol names (layers, blocks) are upper case.
+    R13 (AC1012) and R14 (AC1014) files decode the 2D entity types (lines, arcs, circles, ellipses, points, polylines, text, attributes, block references, hatches, solids, splines, leaders, dimensions) with block membership and block names, as well as 3D polylines and meshes. These versions have no lineweights, no layer plot flag and no `$INSUNITS`, their symbol names (layers, blocks) are upper case, and their viewports state a window but no view.
 
 ## Lazy Loading
 

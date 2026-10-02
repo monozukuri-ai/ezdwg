@@ -328,7 +328,20 @@ pub fn decode_polyline_3d_with_vertices(
     let decoded_rows = decode_polyline_3d_vertex_rows(path, limit)?;
     let mut result = Vec::with_capacity(decoded_rows.len());
     for row in decoded_rows {
-        let mut vertices: Vec<Point3> = row.vertices.iter().map(|vertex| vertex.position).collect();
+        // A spline-fit polyline also stores the control points of its frame
+        // (vertex flag 16). The curve runs through the fitted vertices; the
+        // frame is not displayed.
+        let fitted: Vec<Point3> = row
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.flags & 0x10 == 0)
+            .map(|vertex| vertex.position)
+            .collect();
+        let mut vertices: Vec<Point3> = if fitted.len() >= 2 {
+            fitted
+        } else {
+            row.vertices.iter().map(|vertex| vertex.position).collect()
+        };
         if row.closed && vertices.len() > 1 {
             let first = vertices[0];
             let last = *vertices.last().unwrap();
@@ -1911,7 +1924,9 @@ pub fn decode_polyline_sequence_members(
         }
 
         let mut next_i = i + 1;
-        if let Some(owned_handles) = owned_handles {
+        // R13-R2000 list no owned objects: the members are the vertices that
+        // follow the polyline, up to its SEQEND.
+        if let Some(owned_handles) = owned_handles.filter(|handles| !handles.is_empty()) {
             for owned_handle in owned_handles {
                 match kind {
                     PolylineSequenceKind::Polyline2d => {
@@ -2122,8 +2137,9 @@ fn is_plausible_polyline_2d_entity(entity: &entities::Polyline2dEntity) -> bool 
 }
 
 impl_version_dispatch! {
-    no_r14;
+    with_r14;
     fn decode_polyline_3d_for_version -> entities::Polyline3dEntity;
+    r14: entities::decode_polyline_3d_r14;
     r2010: entities::decode_polyline_3d_r2010;
     r2013: entities::decode_polyline_3d_r2013;
     r2007: entities::decode_polyline_3d_r2007;
@@ -2132,8 +2148,9 @@ impl_version_dispatch! {
 }
 
 impl_version_dispatch! {
-    no_r14;
+    with_r14;
     fn decode_vertex_3d_for_version -> entities::Vertex3dEntity;
+    r14: entities::decode_vertex_3d_r14;
     r2010: entities::decode_vertex_3d_r2010;
     r2013: entities::decode_vertex_3d_r2013;
     r2007: entities::decode_vertex_3d_r2007;
@@ -2190,8 +2207,9 @@ fn decode_vertex_2d_for_version(
 }
 
 impl_version_dispatch! {
-    no_r14;
+    with_r14;
     fn decode_polyline_mesh_for_version -> entities::PolylineMeshEntity;
+    r14: entities::decode_polyline_mesh_r14;
     r2010: entities::decode_polyline_mesh_r2010;
     r2013: entities::decode_polyline_mesh_r2013;
     r2007: entities::decode_polyline_mesh_r2007;
@@ -2200,8 +2218,9 @@ impl_version_dispatch! {
 }
 
 impl_version_dispatch! {
-    no_r14;
+    with_r14;
     fn decode_polyline_pface_for_version -> entities::PolylinePFaceEntity;
+    r14: entities::decode_polyline_pface_r14;
     r2010: entities::decode_polyline_pface_r2010;
     r2013: entities::decode_polyline_pface_r2013;
     r2007: entities::decode_polyline_pface_r2007;
@@ -2210,8 +2229,9 @@ impl_version_dispatch! {
 }
 
 impl_version_dispatch! {
-    no_r14;
+    with_r14;
     fn decode_vertex_pface_face_for_version -> entities::VertexPFaceFaceEntity;
+    r14: entities::decode_vertex_pface_face_r14;
     r2010: entities::decode_vertex_pface_face_r2010;
     r2013: entities::decode_vertex_pface_face_r2013;
     r2007: entities::decode_vertex_pface_face_r2007;

@@ -130,16 +130,18 @@ pub use polyline_2d::{
     decode_polyline_2d_r2013, Polyline2dEntity, PolylineCurveType, PolylineFlagsInfo,
 };
 pub use polyline_3d::{
-    decode_polyline_3d, decode_polyline_3d_r2000, decode_polyline_3d_r2007,
+    decode_polyline_3d, decode_polyline_3d_r14, decode_polyline_3d_r2000, decode_polyline_3d_r2007,
     decode_polyline_3d_r2010, decode_polyline_3d_r2013, Polyline3dEntity,
 };
 pub use polyline_mesh::{
-    decode_polyline_mesh, decode_polyline_mesh_r2000, decode_polyline_mesh_r2007,
-    decode_polyline_mesh_r2010, decode_polyline_mesh_r2013, PolylineMeshEntity,
+    decode_polyline_mesh, decode_polyline_mesh_r14, decode_polyline_mesh_r2000,
+    decode_polyline_mesh_r2007, decode_polyline_mesh_r2010, decode_polyline_mesh_r2013,
+    PolylineMeshEntity,
 };
 pub use polyline_pface::{
-    decode_polyline_pface, decode_polyline_pface_r2000, decode_polyline_pface_r2007,
-    decode_polyline_pface_r2010, decode_polyline_pface_r2013, PolylinePFaceEntity,
+    decode_polyline_pface, decode_polyline_pface_r14, decode_polyline_pface_r2000,
+    decode_polyline_pface_r2007, decode_polyline_pface_r2010, decode_polyline_pface_r2013,
+    PolylinePFaceEntity,
 };
 pub use ray::{
     decode_ray, decode_ray_r14, decode_ray_r2007, decode_ray_r2010, decode_ray_r2013, RayEntity,
@@ -182,16 +184,16 @@ pub use vertex_2d::{
     decode_vertex_2d_r2013, Vertex2dEntity,
 };
 pub use vertex_3d::{
-    decode_vertex_3d, decode_vertex_3d_r2007, decode_vertex_3d_r2010, decode_vertex_3d_r2013,
-    Vertex3dEntity,
+    decode_vertex_3d, decode_vertex_3d_r14, decode_vertex_3d_r2007, decode_vertex_3d_r2010,
+    decode_vertex_3d_r2013, Vertex3dEntity,
 };
 pub use vertex_pface_face::{
-    decode_vertex_pface_face, decode_vertex_pface_face_r2007, decode_vertex_pface_face_r2010,
-    decode_vertex_pface_face_r2013, VertexPFaceFaceEntity,
+    decode_vertex_pface_face, decode_vertex_pface_face_r14, decode_vertex_pface_face_r2007,
+    decode_vertex_pface_face_r2010, decode_vertex_pface_face_r2013, VertexPFaceFaceEntity,
 };
 pub use viewport::{
     decode_viewport, decode_viewport_r14, decode_viewport_r2007, decode_viewport_r2010,
-    decode_viewport_r2013, ViewportEntity,
+    decode_viewport_r2013, ViewportEntity, ViewportView,
 };
 pub use xline::{
     decode_xline, decode_xline_r14, decode_xline_r2007, decode_xline_r2010, decode_xline_r2013,

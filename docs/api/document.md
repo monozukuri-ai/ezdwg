@@ -132,6 +132,46 @@ style = doc.dimstyles()["ISO-25"]
 text_height = style["dimtxt"] * (style["dimscale"] or 1.0)
 ```
 
+#### layouts
+
+```python
+Document.layouts() -> dict[str, dict[str, Any]]
+```
+
+Layout table by name, in tab order: the model tab and the paper-space sheets.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `handle` | `int` | Handle of the layout object |
+| `tab_order` | `int` | Position among the tabs; 0 is the model tab |
+| `model` | `bool` | `True` for the model tab |
+| `active` | `bool` | `True` for the paper-space sheet that was current when the file was saved |
+| `block_record_handle` | `int` | Block record that owns the entities of the layout |
+| `paper_width`, `paper_height` | `float` | Paper size in millimetres, before `plot_rotation` |
+| `margins` | `(float, float, float, float)` | Unprintable margins: left, bottom, right, top; millimetres |
+| `paper_size` | `str` | Name of the paper size |
+| `paper_units` | `int` | 0 inches, 1 millimetres, 2 pixels |
+| `plot_rotation` | `int` | 0-3 quarter turns counter-clockwise |
+| `limmin`, `limmax` | `(float, float)` | Limits of the layout |
+| `extmin`, `extmax` | `(float, float, float)` | Extents of the layout |
+| `viewport_handles` | `list[int]` | Viewports of the layout, the sheet's own viewport first (R2004+; empty before) |
+
+The entities of the active sheet are stored without an owner handle:
+`entity_placement()` gives `(1, None)` for them. The entities of every other
+sheet name the block record of their layout as owner.
+
+```python
+layouts = doc.layouts()
+sheets = {entry["block_record_handle"]: name for name, entry in layouts.items() if not entry["model"]}
+active = next((name for name, entry in layouts.items() if entry["active"]), None)
+
+for entity in doc.paperspace().query():
+    mode, owner = doc.entity_placement(entity.handle)
+    sheet = active if mode == 1 else sheets.get(owner)
+```
+
+Files written before R2000 may hold no layout objects; the table is empty then.
+
 #### units
 
 ```python

@@ -296,6 +296,8 @@ R14_TYPES = (
     "3DFACE",
     "SHAPE",
     "POINT",
+    "POLYLINE_3D",
+    "POLYLINE_PFACE",
 )
 # Keys that the two versions cannot share: what R2000 added, handles of objects
 # that are not the same in both files, and the alignment point, which R13/R14
@@ -331,6 +333,9 @@ _VERSION_KEYS = {
     "resolved_true_color",
     "color_index",
     "true_color",
+    # R2004 lists the vertices a polyline owns, but not its SEQEND; in an R14
+    # file the SEQEND is found behind the vertices.
+    "seqend_handle",
 }
 
 
@@ -411,3 +416,99 @@ def test_r14_entities_are_placed_like_the_r2004_entities() -> None:
     assert Counter(
         e.dxftype for e in r14.modelspace().query() if e.handle in shared_handles
     ) == Counter(e.dxftype for e in r2004.modelspace().query() if e.handle in shared_handles)
+
+
+def test_r14_3d_polyline_keeps_its_vertices() -> None:
+    (polyline,) = _entities(ezdwg.read(sample("AC1014")), "POLYLINE_3D").values()
+    (mesh,) = _entities(ezdwg.read(sample("AC1014")), "POLYLINE_PFACE").values()
+
+    assert len(polyline["points"]) == 5
+    assert polyline["points"][1] == pytest.approx((233.415, 3.349, 5.479), abs=1e-3)
+    assert not polyline["closed"]
+    assert (mesh["num_vertices"], mesh["num_faces"]) == (5, 2)
+    assert len(mesh["vertices"]) == 5 and len(mesh["faces"]) == 2
+
+
+# ------------------------------------------------------ layouts and viewports
+
+
+def test_layouts_of_every_version(document: ezdwg.Document) -> None:
+    layouts = document.layouts()
+
+    # In tab order; the names and sheets are those of the DXF export.
+    assert list(layouts) == ["Model", "Layout1", "Layout2", "MyLayout"]
+    assert [entry["tab_order"] for entry in layouts.values()] == [0, 1, 2, 3]
+    assert [entry["model"] for entry in layouts.values()] == [True, False, False, False]
+    assert [entry["block_record_handle"] for entry in layouts.values()] == [
+        0x1F,
+        0x58,
+        0x5D,
+        0x259,
+    ]
+    sheet = layouts["MyLayout"]
+    assert (sheet["paper_width"], sheet["paper_height"]) == (210.0, 297.0)
+    assert sheet["paper_size"] == "A4"
+    assert sheet["margins"] == pytest.approx((4.2333, 4.2227, 4.26, 4.2333), abs=1e-3)
+    assert (sheet["paper_units"], sheet["plot_rotation"]) == (0, 1)
+    assert layouts["Layout1"]["paper_size"] == "Letter_(8.50_x_11.00_Inches)"
+    assert layouts["Layout1"]["paper_width"] == pytest.approx(215.9, abs=1e-3)
+
+    # The sheet that was current when the file was saved: its entities are
+    # stored without an owner.
+    assert [name for name, entry in layouts.items() if entry["active"]] == ["MyLayout"]
+    unowned = {
+        handle
+        for handle in _entities(document, "VIEWPORT")
+        if document.entity_placement(handle) == (1, None)
+    }
+    assert unowned == {0x267, 0x26B}
+
+    # R2004+ list the viewports of a layout, the sheet's own viewport first.
+    listed = document.version not in ("AC1014", "AC1015")
+    assert sheet["viewport_handles"] == ([0x267, 0x26B] if listed else [])
+    assert layouts["Layout1"]["viewport_handles"] == ([0x240, 0x245] if listed else [])
+    assert layouts["Model"]["viewport_handles"] == []
+
+
+def test_viewports_of_every_version(document: ezdwg.Document) -> None:
+    viewports = _entities(document, "VIEWPORT")
+
+    assert sorted(viewports) == [0x240, 0x245, 0x252, 0x256, 0x267, 0x26B]
+    window = viewports[0x26B]
+    assert window["center"] == pytest.approx((5.68, 3.96667, 0.0), abs=1e-4)
+    assert window["width"] == pytest.approx(9.088, abs=1e-4)
+    assert window["height"] == pytest.approx(6.34667, abs=1e-4)
+    assert window["frozen_layers"] == [] and window["frozen_layer_handles"] == []
+    assert "clip_boundary_handle" not in window
+
+    if document.version == "AC1014":
+        # R13/R14 keep the view in the extended data of the entity.
+        assert "view_height" not in window
+        return
+    # What the window shows: DXF groups 12/22, 45, 16, 17, 51 and 90.
+    assert window["view_center"] == pytest.approx((6.0, 4.5))
+    assert window["view_height"] == pytest.approx(9.10887, abs=1e-4)
+    assert window["view_direction"] == (0.0, 0.0, 1.0)
+    assert window["view_target"] == (0.0, 0.0, 0.0)
+    assert window["view_twist_angle"] == 0.0
+    assert window["status_flags"] == 819808
+    # The sheet's own viewport shows the sheet at scale 1.
+    sheet = viewports[0x267]
+    assert sheet["view_center"] == pytest.approx(sheet["center"][:2])
+    assert sheet["view_height"] == pytest.approx(sheet["height"])
+    assert sheet["status_flags"] == 819232
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+def test_raw_layout_objects(version: str) -> None:
+    rows = ezdwg.raw.decode_layout_objects(sample(version))
+
+    assert sorted(row[1] for row in rows) == ["Layout1", "Layout2", "Model", "MyLayout"]
+    by_name = {row[1]: row for row in rows}
+    handle, _name, tab_order, flags, block_record, paper, limits, extents = by_name[
+        "MyLayout"
+    ][:8]
+    assert (handle, tab_order, flags, block_record) == (0x25A, 3, 1, 0x259)
+    assert paper[:2] == (210.0, 297.0) and paper[3:] == ("A4", 0, 1)
+    assert all(math.isfinite(value) for point in (*limits, *extents) for value in point)
+    assert by_name["MyLayout"][9] == 0x267  # last active viewport

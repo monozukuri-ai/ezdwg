@@ -222,6 +222,44 @@ Sizes of every dimension style. Each tuple:
 `(handle, name, dimscale, dimasz, dimtxt)`: the overall scale (0 for a style
 scaled by the viewport or annotatively), the arrow size and the text height.
 
+### decode_layout_objects
+
+```python
+raw.decode_layout_objects(path: str, limit: int | None = None) -> list[tuple]
+```
+
+Layouts of the drawing (the model tab and the paper-space sheets). Each tuple:
+`(handle, name, tab_order, flags, block_record_handle, paper, limits, extents,
+viewport_handles, last_active_viewport_handle, plot)`.
+
+- `paper`: `(paper_width, paper_height, (left, bottom, right, top) margins,
+  paper_size_name, paper_units, plot_rotation)`. Sizes are millimetres before
+  the plot rotation (0-3 quarter turns counter-clockwise); `paper_units` is 0
+  for inches, 1 for millimetres and 2 for pixels.
+- `limits` and `extents`: `(min, max)` in layout units.
+- `viewport_handles`: the viewports of the layout, the sheet's own viewport
+  first (R2004+; empty before).
+- `plot`: `(plot_flags, plot_origin, plot_type, window_min, window_max,
+  scale_numerator, scale_denominator, scale_type, scale_factor)`.
+
+Layouts whose record cannot be read are omitted.
+
+### decode_viewport_details
+
+```python
+raw.decode_viewport_details(path: str, limit: int | None = None) -> list[tuple]
+```
+
+Paper-space viewports. Each tuple: `(handle, center, width, height, view,
+frozen_layer_handles, clip_boundary_handle, layer_handle)`.
+
+`center`, `width` and `height` place the viewport on its sheet; `center` is
+`None` when the body of the viewport cannot be read. `view` is `(target,
+direction, twist_angle, view_height, lens_length, front_clip_z, back_clip_z,
+view_center, status_flags, render_mode)` with the twist angle in radians, or
+`None` for R13/R14 files, which keep the view in the extended data of the
+entity. `decode_viewport_entities` still returns the handles alone.
+
 ### decode_entity_lineweights
 
 ```python

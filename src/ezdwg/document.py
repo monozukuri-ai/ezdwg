@@ -329,6 +329,39 @@ class Document:
             entry.pop("name")
         return table
 
+    def layouts(self) -> dict[str, dict[str, Any]]:
+        """Layout table by name: the model tab and the paper-space sheets.
+
+        Each entry holds ``handle``, ``tab_order`` (0 for the model tab),
+        ``model`` (``True`` for the model tab), ``block_record_handle`` (the
+        block record that owns the entities of the layout) and ``active``:
+        ``True`` for the paper-space layout that was current when the file was
+        saved. Its entities are the ones stored with ``entmode == 1`` and no
+        owner handle (see ``entity_placement``); the entities of every other
+        sheet name their block record as owner.
+
+        The sheet itself is described by ``paper_width`` and ``paper_height``
+        (millimetres, before ``plot_rotation``), ``margins`` (left, bottom,
+        right, top; millimetres), ``paper_size`` (the name of the size),
+        ``paper_units`` (0 inches, 1 millimetres, 2 pixels), ``plot_rotation``
+        (0-3 quarter turns counter-clockwise), ``limmin`` / ``limmax`` and
+        ``extmin`` / ``extmax`` in layout units, and ``viewport_handles``: the
+        viewports of the layout with the sheet's own viewport first (R2004+;
+        empty before).
+
+        Files written before R2000 may hold no layout objects; the table is
+        empty then.
+        """
+        path = self.decode_path or self.path
+        table: dict[str, dict[str, Any]] = {}
+        for handle, entry in sorted(
+            _layout_map(path).items(), key=lambda item: (item[1]["tab_order"], item[0])
+        ):
+            table.setdefault(entry["name"] or f"LAYOUT_{handle:X}", {"handle": handle, **entry})
+        for entry in table.values():
+            entry.pop("name")
+        return table
+
     @property
     def insunits(self) -> int | None:
         """Raw ``$INSUNITS`` drawing-units code, or ``None`` when unavailable."""
@@ -2110,8 +2143,9 @@ _SIMPLE_ENTITY_REGISTRY: dict[str, _SimpleEntitySpec] = {
         ),
     ),
     "VIEWPORT": _SimpleEntitySpec(
-        rows_fn=lambda p: raw.decode_viewport_entities(p),
-        build_dxf=lambda row, _: (int(row[0]), {}) if row else None,
+        rows_fn=lambda p: _viewport_rows(p),
+        build_dxf=lambda row, layer_names: _viewport_dxf(row, layer_names),
+        setup=lambda p: _layer_names_by_handle(p),
     ),
     "RAY": _SimpleEntitySpec(
         rows_fn=lambda p: raw.decode_ray_entities(p),
@@ -3833,6 +3867,163 @@ def _dimstyle_map(path: str) -> dict[int, dict[str, Any]]:
         }
         for handle, name, dimscale, dimasz, dimtxt in rows
     }
+
+
+def _viewport_rows(path: str) -> list[Any]:
+    """Viewport rows with geometry when the extension provides them."""
+    decode = getattr(raw, "decode_viewport_details", None)
+    if callable(decode):
+        try:
+            return list(decode(path))
+        except Exception:
+            # Fall back to the handles; that call reports what is wrong with the file.
+            pass
+    return list(raw.decode_viewport_entities(path))
+
+
+def _viewport_dxf(row: Any, layer_names: dict[int, str] | None) -> tuple[int, dict] | None:
+    """DXF-style attributes of a paper-space viewport.
+
+    ``center``, ``width`` and ``height`` place the viewport on the sheet.
+    ``view_center`` (display coordinates), ``view_height``, ``view_target``,
+    ``view_direction`` and ``view_twist_angle`` (degrees) describe what it
+    shows; they are missing for R13/R14 files. ``frozen_layers`` names the
+    layers that are frozen in this viewport and ``frozen_layer_handles`` holds
+    their handles.
+    """
+    if not row:
+        return None
+    handle = int(row[0])
+    if len(row) < 8:
+        return handle, {}
+    _, center, width, height, view, frozen_layer_handles, clip_boundary_handle, _layer = row[:8]
+    dxf: dict[str, Any] = {}
+    if center is not None:
+        dxf["center"] = tuple(center)
+        dxf["width"] = float(width)
+        dxf["height"] = float(height)
+    if view is not None:
+        (
+            target,
+            direction,
+            twist_angle,
+            view_height,
+            lens_length,
+            front_clip_z,
+            back_clip_z,
+            view_center,
+            status_flags,
+            render_mode,
+        ) = view
+        dxf.update(
+            {
+                "view_target": tuple(target),
+                "view_direction": tuple(direction),
+                "view_twist_angle": math.degrees(twist_angle),
+                "view_height": float(view_height),
+                "view_center": tuple(view_center),
+                "lens_length": float(lens_length),
+                "front_clip_z": float(front_clip_z),
+                "back_clip_z": float(back_clip_z),
+                "status_flags": int(status_flags),
+                "render_mode": int(render_mode),
+            }
+        )
+    names = layer_names or {}
+    dxf["frozen_layer_handles"] = [int(layer_handle) for layer_handle in frozen_layer_handles]
+    dxf["frozen_layers"] = [
+        names.get(layer_handle) or f"LAYER_{layer_handle:X}"
+        for layer_handle in dxf["frozen_layer_handles"]
+    ]
+    if clip_boundary_handle:
+        dxf["clip_boundary_handle"] = int(clip_boundary_handle)
+    return handle, dxf
+
+
+@lru_cache(maxsize=16)
+def _layout_map(path: str) -> dict[int, dict[str, Any]]:
+    """Layout objects by handle, with the model tab and the active sheet marked."""
+    decode = getattr(raw, "decode_layout_objects", None)
+    if not callable(decode):
+        return {}
+    try:
+        rows = decode(path)
+    except Exception:
+        return {}
+    header_names = _block_header_name_map(path)
+    layouts: dict[int, dict[str, Any]] = {}
+    for (
+        handle,
+        name,
+        tab_order,
+        flags,
+        block_record_handle,
+        paper,
+        limits,
+        extents,
+        viewport_handles,
+        last_active_viewport,
+        plot,
+    ) in rows:
+        paper_width, paper_height, margins, paper_size, paper_units, plot_rotation = paper
+        block_name = header_names.get(int(block_record_handle), "")
+        layouts[int(handle)] = {
+            "name": str(name),
+            "tab_order": int(tab_order),
+            "flags": int(flags),
+            "model": block_name.strip().upper() in _MODELSPACE_BLOCK_NAMES,
+            "active": False,
+            "block_record_handle": int(block_record_handle),
+            "paper_width": float(paper_width),
+            "paper_height": float(paper_height),
+            "margins": tuple(float(value) for value in margins),
+            "paper_size": str(paper_size),
+            "paper_units": int(paper_units),
+            "plot_rotation": int(plot_rotation),
+            "limmin": tuple(limits[0]),
+            "limmax": tuple(limits[1]),
+            "extmin": tuple(extents[0]),
+            "extmax": tuple(extents[1]),
+            "viewport_handles": [int(value) for value in viewport_handles],
+            "last_active_viewport_handle": int(last_active_viewport),
+            "plot_layout_flags": int(plot[0]),
+            "plot_type": int(plot[2]),
+            "plot_scale": (float(plot[5]), float(plot[6])),
+        }
+    active = _active_layout_handle(layouts, _entity_placement_map(path))
+    if active is not None:
+        layouts[active]["active"] = True
+    return layouts
+
+
+def _active_layout_handle(
+    layouts: dict[int, dict[str, Any]], placements: dict[int, tuple[int, int]]
+) -> int | None:
+    """The paper-space layout whose entities are stored without an owner handle.
+
+    The entities of the sheet that was current at save time carry
+    ``entmode == 1``; those of every other sheet name their block record. So
+    the active sheet is the one whose viewports are stored that way or, when
+    it has no viewport, the only sheet whose block record owns no entity.
+    """
+    sheets = {handle: entry for handle, entry in layouts.items() if not entry["model"]}
+    if not sheets:
+        return None
+    if len(sheets) == 1:
+        return next(iter(sheets))
+    for handle, entry in sorted(sheets.items(), key=lambda item: item[1]["tab_order"]):
+        viewports = [*entry["viewport_handles"], entry["last_active_viewport_handle"]]
+        if any(placements.get(viewport, (None, 0))[0] == 1 for viewport in viewports if viewport):
+            return handle
+    owners = {owner for mode, owner in placements.values() if mode == 0 and owner}
+    unowned = [
+        handle
+        for handle, entry in sorted(sheets.items(), key=lambda item: item[1]["tab_order"])
+        if entry["block_record_handle"] not in owners
+    ]
+    if len(unowned) == 1:
+        return unowned[0]
+    return None
 
 
 def _tolerance_text_height(stored: float, dimstyle: dict[str, Any] | None) -> float:

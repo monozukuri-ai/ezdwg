@@ -279,5 +279,32 @@ R13/R14 files store no measurement: `actual_measurement` is `None` there.
 | `char_height` | `float` | Optional saved text height from the referenced anonymous block; omitted when unavailable or ambiguous |
 | `char_height_source` | `str` | `"anonymous_block"` when `char_height` was resolved from saved block text |
 
+### VIEWPORT
+
+A paper-space viewport: a window on a sheet that shows model space.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `center` | `(float, float, float)` | Center of the window on the sheet |
+| `width`, `height` | `float` | Size of the window |
+| `view_center` | `(float, float)` | Center of the view in display coordinates (DXF groups 12, 22) |
+| `view_height` | `float` | Height of the view in model units; `height / view_height` is the scale of the view |
+| `view_target` | `(float, float, float)` | View target point |
+| `view_direction` | `(float, float, float)` | View direction; `(0, 0, 1)` for a plan view |
+| `view_twist_angle` | `float` | View twist in degrees |
+| `status_flags` | `int` | DXF group 90: `0x20000` the viewport is off, `0x10000` it has a clip boundary, `0x1` perspective |
+| `frozen_layers` | `list[str]` | Names of the layers that are frozen in this viewport |
+| `frozen_layer_handles` | `list[int]` | Their handles |
+| `clip_boundary_handle` | `int` | Entity that clips the viewport; omitted when there is none |
+| `lens_length`, `front_clip_z`, `back_clip_z`, `render_mode` | | The remaining view settings |
+
+The view keys are missing for R13/R14 files, which keep the view in the
+extended data of the entity. `center`, `width` and `height` are missing when
+the body of the viewport cannot be read.
+
+Every sheet has one viewport that stands for the sheet itself: the first of
+`Document.layouts()[name]["viewport_handles"]`. Its view shows the sheet at
+scale 1.
+
 !!! note "ARC Angles"
     The high-level API returns ARC angles in **degrees**. The raw API (`ezdwg.raw`) returns angles in **radians**.

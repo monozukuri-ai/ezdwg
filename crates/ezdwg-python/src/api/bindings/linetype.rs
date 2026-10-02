@@ -4,6 +4,21 @@ type EntityLinetypeRow = (u64, u64, u8, Option<u64>, f64);
 type EntityLineweightRow = (u64, Option<i16>, bool);
 type LayerStateRow = (u64, bool, bool, bool, bool, bool, i16);
 type DimStyleSizeRow = (u64, String, f64, f64, f64);
+type LayoutPaperRow = (f64, f64, (f64, f64, f64, f64), String, u16, u16);
+type LayoutPlotRow = (u16, Point2, u16, Point2, Point2, f64, f64, u16, f64);
+type LayoutObjectRow = (
+    u64,
+    String,
+    u32,
+    u16,
+    u64,
+    LayoutPaperRow,
+    (Point2, Point2),
+    (Point3, Point3),
+    Vec<u64>,
+    u64,
+    LayoutPlotRow,
+);
 
 /// A linetype definition holds at most 12 dash specifications in AutoCAD.
 const MAX_LINETYPE_DASHES: usize = 32;
@@ -742,6 +757,252 @@ pub fn decode_dimstyles(path: &str, limit: Option<usize>) -> PyResult<Vec<DimSty
             continue;
         }
         result.push((obj.handle.0, name, dimscale, dimasz, dimtxt));
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+
+/// LAYOUT object (ODA specification 20.4.84): the plot settings of the sheet
+/// followed by the layout itself.
+///
+/// R2007+ keep the five text fields (page setup, printer, paper size, style
+/// sheet and layout name) in the string stream, in that order. R13-R2000 have
+/// the plot view as a name in the data; R2004+ as a handle, and they list the
+/// viewports of the layout at the end of the handle stream.
+fn decode_layout_record(
+    record: &objects::ObjectRecord<'_>,
+    api_header: &ApiObjectHeader,
+    version: &version::DwgVersion,
+    object_handle: u64,
+) -> crate::core::result::Result<LayoutObjectRow> {
+    let mut reader = record.bit_reader();
+    skip_object_type_prefix(&mut reader, version)?;
+    let preamble = read_table_record_preamble(&mut reader, version, api_header)?;
+    let strings_in_stream = table_record_strings_in_stream(version);
+    let pre_r2004 = matches!(
+        version,
+        version::DwgVersion::R13 | version::DwgVersion::R14 | version::DwgVersion::R2000
+    );
+    let mut stream_strings = if strings_in_stream {
+        read_table_record_stream_strings(&reader, preamble.data_end_bit, 5)
+    } else {
+        Vec::new()
+    }
+    .into_iter();
+    let mut read_text = |reader: &mut BitReader<'_>| -> crate::core::result::Result<String> {
+        if strings_in_stream {
+            Ok(stream_strings.next().unwrap_or_default())
+        } else {
+            reader.read_tv()
+        }
+    };
+    let read_2bd = |reader: &mut BitReader<'_>| -> crate::core::result::Result<Point2> {
+        Ok((reader.read_bd()?, reader.read_bd()?))
+    };
+    let read_2rd = |reader: &mut BitReader<'_>| -> crate::core::result::Result<Point2> {
+        Ok((
+            reader.read_rd(Endian::Little)?,
+            reader.read_rd(Endian::Little)?,
+        ))
+    };
+
+    // Plot settings.
+    let _page_setup_name = read_text(&mut reader)?;
+    let _printer = read_text(&mut reader)?;
+    let plot_flags = reader.read_bs()?;
+    let margin_left = reader.read_bd()?;
+    let margin_bottom = reader.read_bd()?;
+    let margin_right = reader.read_bd()?;
+    let margin_top = reader.read_bd()?;
+    let paper_width = reader.read_bd()?;
+    let paper_height = reader.read_bd()?;
+    let paper_size = read_text(&mut reader)?;
+    let plot_origin = read_2bd(&mut reader)?;
+    let paper_units = reader.read_bs()?;
+    let plot_rotation = reader.read_bs()?;
+    let plot_type = reader.read_bs()?;
+    let window_min = read_2bd(&mut reader)?;
+    let window_max = read_2bd(&mut reader)?;
+    if pre_r2004 {
+        let _plot_view_name = reader.read_tv()?;
+    }
+    let scale_numerator = reader.read_bd()?;
+    let scale_denominator = reader.read_bd()?;
+    let _style_sheet = read_text(&mut reader)?;
+    let scale_type = reader.read_bs()?;
+    let scale_factor = reader.read_bd()?;
+    let _paper_image_origin = read_2bd(&mut reader)?;
+    if !pre_r2004 {
+        let _shade_plot_mode = reader.read_bs()?;
+        let _shade_plot_resolution = reader.read_bs()?;
+        let _shade_plot_dpi = reader.read_bs()?;
+    }
+
+    // Layout.
+    let name = read_text(&mut reader)?;
+    let tab_order = reader.read_bl()?;
+    let flags = reader.read_bs()?;
+    let _ucs_origin = reader.read_3bd()?;
+    let limits_min = read_2rd(&mut reader)?;
+    let limits_max = read_2rd(&mut reader)?;
+    let _insertion_base = reader.read_3bd()?;
+    let _ucs_x_axis = reader.read_3bd()?;
+    let _ucs_y_axis = reader.read_3bd()?;
+    let _elevation = reader.read_bd()?;
+    let _ortho_view_type = reader.read_bs()?;
+    let extents_min = reader.read_3bd()?;
+    let extents_max = reader.read_3bd()?;
+    let viewport_count = if pre_r2004 {
+        0
+    } else {
+        reader.read_bl()? as usize
+    };
+
+    let sizes = [
+        margin_left,
+        margin_bottom,
+        margin_right,
+        margin_top,
+        paper_width,
+        paper_height,
+    ];
+    if !sizes.iter().all(|value| value.is_finite() && value.abs() < 1.0e9)
+        || !is_plausible_table_text(&name)
+        || tab_order > 100_000
+    {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            "LAYOUT fields are out of range",
+        ));
+    }
+
+    let Some(data_end_bit) = preamble.data_end_bit else {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            "LAYOUT without a handle stream position",
+        ));
+    };
+    let base_handle = if preamble.handle != 0 {
+        preamble.handle
+    } else {
+        object_handle
+    };
+    reader.set_bit_pos(data_end_bit);
+    let read_handle = |reader: &mut BitReader<'_>| {
+        entities::common::read_handle_reference(reader, base_handle)
+    };
+    let _parent = read_handle(&mut reader)?;
+    let reactors =
+        entities::common::checked_handle_count(&reader, preamble.num_reactors as usize, "reactor")?;
+    for _ in 0..reactors {
+        let _reactor = read_handle(&mut reader)?;
+    }
+    if !preamble.xdic_missing {
+        let _xdictionary = read_handle(&mut reader)?;
+    }
+    if !pre_r2004 {
+        let _plot_view = read_handle(&mut reader)?;
+    }
+    if strings_in_stream {
+        let _visual_style = read_handle(&mut reader)?;
+    }
+    let block_record_handle = read_handle(&mut reader)?;
+    let last_active_viewport = read_handle(&mut reader)?;
+    let _base_ucs = read_handle(&mut reader)?;
+    let _named_ucs = read_handle(&mut reader)?;
+    let mut viewport_handles = Vec::new();
+    if let Ok(count) =
+        entities::common::checked_handle_count(&reader, viewport_count, "layout viewport")
+    {
+        for _ in 0..count {
+            let Ok(handle) = read_handle(&mut reader) else {
+                break;
+            };
+            if handle != 0 {
+                viewport_handles.push(handle);
+            }
+        }
+    }
+
+    Ok((
+        base_handle,
+        name,
+        tab_order,
+        flags,
+        block_record_handle,
+        (
+            paper_width,
+            paper_height,
+            (margin_left, margin_bottom, margin_right, margin_top),
+            paper_size,
+            paper_units,
+            plot_rotation,
+        ),
+        (limits_min, limits_max),
+        (extents_min, extents_max),
+        viewport_handles,
+        last_active_viewport,
+        (
+            plot_flags,
+            plot_origin,
+            plot_type,
+            window_min,
+            window_max,
+            scale_numerator,
+            scale_denominator,
+            scale_type,
+            scale_factor,
+        ),
+    ))
+}
+
+/// Layouts of the drawing (the model tab and the paper-space sheets):
+/// `(handle, name, tab_order, flags, block_record_handle, paper, limits,
+/// extents, viewport_handles, last_active_viewport_handle, plot)`.
+///
+/// `block_record_handle` names the block record that holds the entities of
+/// the layout. `paper` is `(paper_width, paper_height, (left, bottom, right,
+/// top) margins, paper_size_name, paper_units, plot_rotation)`: sizes in
+/// millimetres before the plot rotation (0-3, quarter turns counter-clockwise);
+/// `paper_units` is 0 for inches, 1 for millimetres and 2 for pixels.
+/// `limits` and `extents` are `(min, max)` in layout units. `viewport_handles`
+/// lists the viewports of the layout, the sheet's own viewport first (R2004+;
+/// empty before). `plot` is `(plot_flags, plot_origin, plot_type, window_min,
+/// window_max, scale_numerator, scale_denominator, scale_type, scale_factor)`.
+/// Layouts whose record cannot be read are omitted; files written before
+/// R2000 may have none.
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_layout_objects(path: &str, limit: Option<usize>) -> PyResult<Vec<LayoutObjectRow>> {
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let mut result = Vec::new();
+    let mut seen: HashSet<u64> = HashSet::new();
+
+    for obj in index.objects.iter() {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x52, "LAYOUT", &dynamic_types) {
+            continue;
+        }
+        let Ok(mut row) = decode_layout_record(&record, &header, decoder.version(), obj.handle.0)
+        else {
+            continue;
+        };
+        row.0 = obj.handle.0;
+        if !seen.insert(obj.handle.0) {
+            continue;
+        }
+        result.push(row);
         if let Some(limit) = limit {
             if result.len() >= limit {
                 break;

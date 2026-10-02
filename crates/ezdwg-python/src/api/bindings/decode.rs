@@ -4215,6 +4215,55 @@ pub fn decode_viewport_entities(
     )
 }
 
+/// Paper-space viewports with their geometry and view: `(handle, center,
+/// width, height, view, frozen_layer_handles, clip_boundary_handle,
+/// layer_handle)`.
+///
+/// `center`, `width` and `height` place the viewport in paper space; `center`
+/// is `None` when the body of the viewport cannot be read. `view` is
+/// `(target, direction, twist_angle, view_height, lens_length, front_clip_z,
+/// back_clip_z, view_center, status_flags, render_mode)` with the twist angle
+/// in radians. It is `None` for R13/R14, which keep the view in the extended
+/// data of the entity.
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_viewport_details(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<ViewportDetailRow>> {
+    collect_entity_rows(
+        path,
+        limit,
+        0x22,
+        "VIEWPORT",
+        decode_viewport_for_version,
+        |entity| {
+            (
+                entity.handle,
+                entity.center,
+                entity.width,
+                entity.height,
+                entity.view.map(|view| {
+                    (
+                        view.target,
+                        view.direction,
+                        view.twist_angle,
+                        view.view_height,
+                        view.lens_length,
+                        view.front_clip_z,
+                        view.back_clip_z,
+                        view.view_center,
+                        view.status_flags,
+                        view.render_mode,
+                    )
+                }),
+                entity.frozen_layer_handles,
+                entity.clip_boundary_handle,
+                entity.layer_handle,
+            )
+        },
+    )
+}
+
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_oleframe_entities(
     path: &str,

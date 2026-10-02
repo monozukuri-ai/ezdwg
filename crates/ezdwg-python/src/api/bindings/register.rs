@@ -110,6 +110,8 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_trace_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_shape_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_viewport_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_viewport_details, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_layout_objects, module)?)?;
     module.add_function(wrap_pyfunction!(decode_oleframe_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_ole2frame_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_long_transaction_entities, module)?)?;
