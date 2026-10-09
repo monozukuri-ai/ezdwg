@@ -396,7 +396,7 @@ fn decode_polyline_3d_vertex_rows(
             sorted[i].handle.0,
         ) {
             Ok(poly) => poly,
-            Err(err) if best_effort => {
+            Err(_err) if best_effort => {
                 i += 1;
                 continue;
             }
@@ -457,7 +457,7 @@ fn build_vertex_3d_map(
             obj.handle.0,
         ) {
             Ok(vertex) => vertex,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         vertex_map.insert(vertex.handle, vertex);
@@ -509,7 +509,7 @@ fn collect_polyline_3d_vertices(
                 sorted[next_i].handle.0,
             ) {
                 Ok(vertex) => vertex,
-                Err(err) if best_effort => {
+                Err(_err) if best_effort => {
                     next_i += 1;
                     continue;
                 }
@@ -658,7 +658,7 @@ fn decode_polyline_mesh_vertex_rows(
             sorted[i].handle.0,
         ) {
             Ok(poly) => poly,
-            Err(err) if best_effort => {
+            Err(_err) if best_effort => {
                 i += 1;
                 continue;
             }
@@ -721,7 +721,7 @@ fn build_vertex_mesh_map(
             obj.handle.0,
         ) {
             Ok(vertex) => vertex,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         vertex_map.insert(vertex.handle, vertex);
@@ -773,7 +773,7 @@ fn collect_polyline_mesh_vertices(
                 sorted[next_i].handle.0,
             ) {
                 Ok(vertex) => vertex,
-                Err(err) if best_effort => {
+                Err(_err) if best_effort => {
                     next_i += 1;
                     continue;
                 }
@@ -924,7 +924,7 @@ fn decode_polyline_pface_rows(path: &str, limit: Option<usize>) -> PyResult<Vec<
             sorted[i].handle.0,
         ) {
             Ok(poly) => poly,
-            Err(err) if best_effort => {
+            Err(_err) if best_effort => {
                 i += 1;
                 continue;
             }
@@ -987,7 +987,7 @@ fn build_vertex_pface_map(
             obj.handle.0,
         ) {
             Ok(vertex) => vertex,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         vertex_map.insert(vertex.handle, vertex);
@@ -1024,7 +1024,7 @@ fn build_vertex_pface_face_map(
             obj.handle.0,
         ) {
             Ok(face) => face,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         face_map.insert(face.handle, face);
@@ -1086,7 +1086,7 @@ fn collect_polyline_pface_data(
                 sorted[next_i].handle.0,
             ) {
                 Ok(vertex) => vertex,
-                Err(err) if best_effort => {
+                Err(_err) if best_effort => {
                     next_i += 1;
                     continue;
                 }
@@ -1116,7 +1116,7 @@ fn collect_polyline_pface_data(
                 sorted[next_i].handle.0,
             ) {
                 Ok(face) => face,
-                Err(err) if best_effort => {
+                Err(_err) if best_effort => {
                     next_i += 1;
                     continue;
                 }
@@ -1236,12 +1236,12 @@ pub fn decode_vertex_2d_entities(
     for obj in index.objects.iter() {
         let record = match decoder.parse_object_record(obj.offset) {
             Ok(record) => record,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         let header = match parse_object_header_for_version(&record, decoder.version()) {
             Ok(header) => header,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         if !matches_type_name(header.type_code, 0x0A, "VERTEX_2D", &dynamic_types) {
@@ -1360,7 +1360,7 @@ fn decode_polyline_2d_vertex_rows(
         let obj = sorted[i];
         let record = match decoder.parse_object_record(obj.offset) {
             Ok(record) => record,
-            Err(err) if best_effort => {
+            Err(_err) if best_effort => {
                 i += 1;
                 continue;
             }
@@ -1368,7 +1368,7 @@ fn decode_polyline_2d_vertex_rows(
         };
         let header = match parse_object_header_for_version(&record, decoder.version()) {
             Ok(header) => header,
-            Err(err) if best_effort => {
+            Err(_err) if best_effort => {
                 i += 1;
                 continue;
             }
@@ -1491,12 +1491,12 @@ fn build_vertex_2d_map(
     for obj in sorted {
         let record = match decoder.parse_object_record(obj.offset) {
             Ok(record) => record,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         let header = match parse_object_header_for_version(&record, decoder.version()) {
             Ok(header) => header,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         if !matches_type_name(header.type_code, 0x0A, "VERTEX_2D", dynamic_types) {
@@ -1581,7 +1581,7 @@ fn collect_polyline_vertices(
         let next = sorted[next_i];
         let next_record = match decoder.parse_object_record(next.offset) {
             Ok(record) => record,
-            Err(err) if best_effort => {
+            Err(_err) if best_effort => {
                 next_i += 1;
                 continue;
             }
@@ -1589,7 +1589,7 @@ fn collect_polyline_vertices(
         };
         let next_header = match parse_object_header_for_version(&next_record, decoder.version()) {
             Ok(header) => header,
-            Err(err) if best_effort => {
+            Err(_err) if best_effort => {
                 next_i += 1;
                 continue;
             }

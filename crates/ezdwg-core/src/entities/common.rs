@@ -1134,7 +1134,7 @@ pub fn parse_common_entity_owner_and_layer_handle(
     reader.set_bit_pos(header.obj_size);
     match parse_common_entity_handles(reader, header) {
         Ok(common_handles) => Ok((common_handles.owner_ref, common_handles.layer)),
-        Err(err) if allow_layer_only_fallback => {
+        Err(_err) if allow_layer_only_fallback => {
             reader.set_bit_pos(header.obj_size);
             let layer_handle = parse_common_entity_layer_handle(reader, header)?;
             Ok((None, layer_handle))

@@ -313,7 +313,7 @@ where
             &mut decode_entity_row,
         ) {
             Ok(entity) => dim_entity_row_from_linear_like(&entity),
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         result.push(row);
@@ -715,12 +715,12 @@ fn parse_record_and_header<'a>(
 ) -> PyResult<Option<(objects::ObjectRecord<'a>, ApiObjectHeader)>> {
     let record = match decoder.parse_object_record(offset) {
         Ok(record) => record,
-        Err(err) if best_effort => return Ok(None),
+        Err(_err) if best_effort => return Ok(None),
         Err(err) => return Err(to_py_err(err)),
     };
     let header = match parse_object_header_for_version(&record, decoder.version()) {
         Ok(header) => header,
-        Err(err) if best_effort => return Ok(None),
+        Err(_err) if best_effort => return Ok(None),
         Err(err) => return Err(to_py_err(err)),
     };
     Ok(Some((record, header)))
@@ -838,16 +838,37 @@ fn resolve_r2010_string_stream_range_spec(
     base_reader: &BitReader<'_>,
     end_bit: u32,
 ) -> Option<(u32, u32)> {
-    const STRING_STREAM_METADATA_BITS: u32 = 16 * 8;
+    // FIX (layer-name mojibake bug): per LibreDWG src/decode_r2007.c
+    // obj_string_stream() (authoritative reference), the has_strings
+    // presence flag is the single last bit of the object (end_bit - 1).
+    // The 16-bit "low_size" RS sits immediately before that flag, i.e.
+    // starts at end_bit - 1 - 16 = end_bit - 17. If its high bit (0x8000)
+    // is set, a second 16-bit "hi_size" RS sits immediately before *that*
+    // (16 more bits back -- no extra presence-bit offset the second time).
+    //
+    // The previous constant here was `16 * 8` (= 128), i.e. 16 *bytes*
+    // where the format needs 16 *bits* -- an 8x-too-large gap that lands on
+    // unrelated bytes elsewhere in the record and reads a garbage size,
+    // which is why this function essentially never found real data on
+    // R2007+ files and every layer name silently fell through to the
+    // scanning/scoring fallbacks below (scan_layer_name_range,
+    // scan_shifted_utf16_layer_name_candidates) -- which is also why fixing
+    // *this* one constant is likely enough to make most of that scanning
+    // machinery unnecessary in practice, even though it's left in place
+    // here as a safety net rather than removed (see TODO below).
+    const PRESENCE_BIT_BITS: u32 = 1;
+    const SIZE_FIELD_BITS: u32 = 16;
 
-    let mut size_field_start = end_bit.checked_sub(STRING_STREAM_METADATA_BITS)?;
+    let mut size_field_start = end_bit
+        .checked_sub(PRESENCE_BIT_BITS)?
+        .checked_sub(SIZE_FIELD_BITS)?;
     let mut size_reader = base_reader.clone();
     size_reader.set_bit_pos(size_field_start);
     let low_size = u32::from(size_reader.read_rs(Endian::Little).ok()?);
 
     let mut stream_size_bits = low_size;
     if (stream_size_bits & 0x8000) != 0 {
-        size_field_start = size_field_start.checked_sub(STRING_STREAM_METADATA_BITS)?;
+        size_field_start = size_field_start.checked_sub(SIZE_FIELD_BITS)?;
         let mut hi_reader = base_reader.clone();
         hi_reader.set_bit_pos(size_field_start);
         let high_size = u32::from(hi_reader.read_rs(Endian::Little).ok()?);
@@ -1231,6 +1252,8 @@ fn normalize_recovered_mtext_text(text: String) -> String {
     normalized
 }
 
+
+// Still used by the existing layer-color decoder until the full-record path lands.
 #[derive(Clone, Copy)]
 struct LayerColorParseVariant {
     pre_flag_bits: u8,
@@ -1395,25 +1418,33 @@ mod tests {
 
     #[test]
     fn resolve_r2010_string_stream_ranges_prefers_spec_layout() {
-        let end_bit = 320u32;
+        // end_bit chosen so end_bit-17 is byte-aligned (test helper requirement).
+        let end_bit = 321u32;
         let mut bytes = vec![0u8; end_bit.div_ceil(8) as usize];
-        set_le_u16(&mut bytes, end_bit - (16 * 8), 64);
+        // Size field sits 17 bits before end_bit (1 presence bit + 16 size
+        // bits), per LibreDWG's obj_string_stream -- see fix comment on
+        // resolve_r2010_string_stream_range_spec. 64 bits of string data.
+        set_le_u16(&mut bytes, end_bit - 17, 64);
         set_bit(&mut bytes, end_bit - 1);
 
         let ranges = resolve_r2010_string_stream_ranges(&BitReader::new(&bytes), end_bit);
-        assert_eq!(ranges, vec![(128, 192)]);
+        assert_eq!(ranges, vec![(240, 304)]);
     }
 
     #[test]
     fn resolve_r2010_string_stream_ranges_supports_hi_size_extension() {
-        let end_bit = 512u32;
+        // end_bit chosen so end_bit-17 and end_bit-33 are both byte-aligned.
+        let end_bit = 513u32;
         let mut bytes = vec![0u8; end_bit.div_ceil(8) as usize];
-        set_le_u16(&mut bytes, end_bit - (16 * 8), 0x8008);
-        set_le_u16(&mut bytes, end_bit - (32 * 8), 0x0000);
+        // low_size (high bit set -> hi_size follows) at end_bit-17, hi_size
+        // immediately before that at end_bit-33 (16 more bits, no extra
+        // presence-bit offset the second time).
+        set_le_u16(&mut bytes, end_bit - 17, 0x8008);
+        set_le_u16(&mut bytes, end_bit - 33, 0x0000);
         set_bit(&mut bytes, end_bit - 1);
 
         let ranges = resolve_r2010_string_stream_ranges(&BitReader::new(&bytes), end_bit);
-        assert_eq!(ranges, vec![(248, 256)]);
+        assert_eq!(ranges, vec![(472, 480)]);
     }
 
     #[test]
