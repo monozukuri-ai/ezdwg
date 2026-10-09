@@ -270,7 +270,7 @@ class Document:
         """Live VP Freeze + LAYER xdict property overrides (mutable in memory).
 
         Mutated by ``LayerState.apply(..., viewport=…)``; never written back
-        to the DWG. See ``ezdwg_vplayer_scope.md`` V2a/V2b/V3-C.
+        to the DWG or consumed by entity plotting/export.
         """
         from .layer_states import build_viewport_override_table
 

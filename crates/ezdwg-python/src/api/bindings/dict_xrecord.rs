@@ -489,4 +489,3 @@ fn xdata_value_to_py(py: Python<'_>, value: &objects::XDataValue) -> PyResult<Py
         Raw(b) => Ok(pyo3::types::PyBytes::new_bound(py, b).into_py(py)),
     }
 }
-

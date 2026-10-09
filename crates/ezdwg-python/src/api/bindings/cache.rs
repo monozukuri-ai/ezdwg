@@ -22,26 +22,27 @@ const DECODE_CACHE_CAPACITY: usize = 8;
 
 /// Identity of a DWG file for cache lookup.
 ///
-/// When `modified` is `None` (mtime unavailable) the key still compares by
-/// path+size, but callers should treat a miss as permanent for that process
-/// if they cannot re-stat -- the layer cache never inserts a hit-able entry
-/// in that case either (see file_key).
+/// A missing timestamp or failed stat disables caching for that read.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct FileKey {
-    path: String,
+    path: std::path::PathBuf,
     size: u64,
     modified: Option<Duration>,
 }
 
-fn file_key(path: &str) -> FileKey {
-    let meta = std::fs::metadata(path).ok();
-    FileKey {
-        path: path.to_string(),
-        size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
-        modified: meta
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()),
-    }
+fn file_key(path: &str) -> Option<FileKey> {
+    let canonical = std::fs::canonicalize(path).ok()?;
+    let meta = std::fs::metadata(&canonical).ok()?;
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(FileKey {
+        path: canonical,
+        size: meta.len(),
+        modified: Some(modified),
+    })
 }
 
 /// FIFO (path, size, mtime) → Arc<T> store. Used by layer.rs today; other
@@ -59,10 +60,7 @@ impl<T> PathFifoCache<T> {
 
     fn get(&self, key: &FileKey) -> Option<Arc<T>> {
         let cache = self.entries.lock().unwrap();
-        cache
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.clone())
+        cache.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
     }
 
     fn insert(&self, key: FileKey, value: Arc<T>) {

@@ -13,7 +13,6 @@
 // relocated to the bottom of this file for organization, logic unchanged.
 // ============================================================================
 
-
 // --- Cache: one real file parse serves all public LAYER functions below ---
 // Key + FIFO policy live in cache.rs (FileKey / PathFifoCache). Do not add
 // another process-global static for a second table; extend PathFifoCache
@@ -34,14 +33,18 @@ fn clear_layer_records_cache() {
 /// file triggers exactly one real parse, not one each.
 fn get_all_layer_records(path: &str) -> PyResult<Arc<Vec<LayerRecord>>> {
     let key = file_key(path);
-    if let Some(records) = layer_records_cache().get(&key) {
-        return Ok(records);
+    if let Some(key) = key.as_ref() {
+        if let Some(records) = layer_records_cache().get(key) {
+            return Ok(records);
+        }
     }
 
     let mut records_vec = parse_all_layer_records(path)?;
     let _ = resolve_layer_names_from_tables(path, &mut records_vec);
     let records = Arc::new(records_vec);
-    layer_records_cache().insert(key, records.clone());
+    if let Some(key) = key {
+        layer_records_cache().insert(key, records.clone());
+    }
     Ok(records)
 }
 
@@ -69,7 +72,13 @@ fn parse_all_layer_records(path: &str) -> PyResult<Vec<LayerRecord>> {
             }
             return Err(to_py_err(err));
         }
-        match parse_layer_record(&record, &header, &mut reader, decoder.version(), obj.handle.0) {
+        match parse_layer_record(
+            &record,
+            &header,
+            &mut reader,
+            decoder.version(),
+            obj.handle.0,
+        ) {
             Ok(rec) => result.push(rec),
             // A LAYER object that's unrecoverably corrupt still can't
             // produce a row -- there's no field left to anchor one to.
@@ -219,7 +228,11 @@ fn decode_eed(
         let app_handle = reader.read_h()?.value;
         let raw = reader.read_rcs(ext_size as usize)?;
         let items = parse_eed_payload(&raw, version);
-        blocks.push(EedBlock { size: ext_size, app_handle, items });
+        blocks.push(EedBlock {
+            size: ext_size,
+            app_handle,
+            items,
+        });
         ext_size = reader.read_bs()?;
     }
     Ok(blocks)
@@ -241,73 +254,140 @@ fn parse_eed_payload(data: &[u8], version: &version::DwgVersion) -> Vec<EedItem>
         let remaining = data.len() - pos;
         let item = match code {
             0 if unicode => {
-                if remaining < 2 { break; }
+                if remaining < 2 {
+                    break;
+                }
                 let len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
                 pos += 2;
                 let byte_len = len.saturating_mul(2);
-                if pos + byte_len > data.len() { break; }
+                if pos + byte_len > data.len() {
+                    break;
+                }
                 let mut units = Vec::with_capacity(len);
                 for i in 0..len {
-                    units.push(u16::from_le_bytes([data[pos + i * 2], data[pos + i * 2 + 1]]));
+                    units.push(u16::from_le_bytes([
+                        data[pos + i * 2],
+                        data[pos + i * 2 + 1],
+                    ]));
                 }
                 pos += byte_len;
-                EedItem { code, kind: EedValue::String(String::from_utf16_lossy(&units)) }
+                EedItem {
+                    code,
+                    kind: EedValue::String(String::from_utf16_lossy(&units)),
+                }
             }
             0 => {
-                if remaining < 1 { break; }
+                if remaining < 1 {
+                    break;
+                }
                 let len = data[pos] as usize;
                 pos += 1;
-                if pos + 2 + len > data.len() { break; }
+                if pos + 2 + len > data.len() {
+                    break;
+                }
                 pos += 2;
                 let value = String::from_utf8_lossy(&data[pos..pos + len]).into_owned();
                 pos += len;
-                EedItem { code, kind: EedValue::String(value) }
+                EedItem {
+                    code,
+                    kind: EedValue::String(value),
+                }
             }
             2 => {
-                if remaining < 1 { break; }
-                let v = data[pos]; pos += 1;
-                EedItem { code, kind: EedValue::Control(v) }
+                if remaining < 1 {
+                    break;
+                }
+                let v = data[pos];
+                pos += 1;
+                EedItem {
+                    code,
+                    kind: EedValue::Control(v),
+                }
             }
             3 | 5 => {
-                if remaining < 8 { break; }
+                if remaining < 8 {
+                    break;
+                }
                 let v = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
                 pos += 8;
-                EedItem { code, kind: if code == 3 { EedValue::LayerRef(v) } else { EedValue::EntityRef(v) } }
+                EedItem {
+                    code,
+                    kind: if code == 3 {
+                        EedValue::LayerRef(v)
+                    } else {
+                        EedValue::EntityRef(v)
+                    },
+                }
             }
             4 => {
-                if remaining < 1 { break; }
-                let len = data[pos] as usize; pos += 1;
-                if pos + len > data.len() { break; }
-                let bytes = data[pos..pos + len].to_vec(); pos += len;
-                EedItem { code, kind: EedValue::Binary(bytes) }
+                if remaining < 1 {
+                    break;
+                }
+                let len = data[pos] as usize;
+                pos += 1;
+                if pos + len > data.len() {
+                    break;
+                }
+                let bytes = data[pos..pos + len].to_vec();
+                pos += len;
+                EedItem {
+                    code,
+                    kind: EedValue::Binary(bytes),
+                }
             }
             10 | 11 | 12 | 13 => {
-                if remaining < 24 { break; }
+                if remaining < 24 {
+                    break;
+                }
                 let x = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
                 let y = f64::from_le_bytes(data[pos + 8..pos + 16].try_into().unwrap());
                 let z = f64::from_le_bytes(data[pos + 16..pos + 24].try_into().unwrap());
                 pos += 24;
-                EedItem { code, kind: EedValue::Point(x, y, z) }
+                EedItem {
+                    code,
+                    kind: EedValue::Point(x, y, z),
+                }
             }
             40 | 41 | 42 => {
-                if remaining < 8 { break; }
+                if remaining < 8 {
+                    break;
+                }
                 let v = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
                 pos += 8;
-                EedItem { code, kind: EedValue::Real(v) }
+                EedItem {
+                    code,
+                    kind: EedValue::Real(v),
+                }
             }
             70 => {
-                if remaining < 2 { break; }
-                let v = i16::from_le_bytes([data[pos], data[pos + 1]]); pos += 2;
-                EedItem { code, kind: EedValue::Short(v) }
+                if remaining < 2 {
+                    break;
+                }
+                let v = i16::from_le_bytes([data[pos], data[pos + 1]]);
+                pos += 2;
+                EedItem {
+                    code,
+                    kind: EedValue::Short(v),
+                }
             }
             71 => {
-                if remaining < 4 { break; }
-                let v = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()); pos += 4;
-                EedItem { code, kind: EedValue::Long(v) }
+                if remaining < 4 {
+                    break;
+                }
+                let v = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+                pos += 4;
+                EedItem {
+                    code,
+                    kind: EedValue::Long(v),
+                }
             }
             _ => {
-                let rest = data[pos..].to_vec(); pos = data.len();
-                EedItem { code, kind: EedValue::Unknown(rest) }
+                let rest = data[pos..].to_vec();
+                pos = data.len();
+                EedItem {
+                    code,
+                    kind: EedValue::Unknown(rest),
+                }
             }
         };
         items.push(item);
@@ -428,10 +508,7 @@ fn read_layer_handle_stream(
 
     use version::DwgVersion::*;
     // plotstyle: present from R2000 onward in the LAYER handle tail
-    if matches!(
-        version,
-        R2000 | R2004 | R2007 | R2010 | R2013 | R2018
-    ) {
+    if matches!(version, R2000 | R2004 | R2007 | R2010 | R2013 | R2018) {
         out.plotstyle = take(&mut rest);
     }
     // material: R2007+
@@ -479,14 +556,12 @@ fn validate_layer_handle_types(
 
         if let Some(h) = r.ltype_handle {
             match type_map.get(&h) {
-                Some((code, name))
-                    if *code == LTYPE_TYPE || type_name_matches(name, "LTYPE") => {}
+                Some((code, name)) if *code == LTYPE_TYPE || type_name_matches(name, "LTYPE") => {}
                 Some((code, name)) => {
                     r.ltype_handle = None;
                     r.linetype = None;
-                    r.handle_warnings.push(format!(
-                        "ltype handle {h} type {code}/{name} is not LTYPE"
-                    ));
+                    r.handle_warnings
+                        .push(format!("ltype handle {h} type {code}/{name} is not LTYPE"));
                 }
                 None => {}
             }
@@ -572,7 +647,9 @@ fn parse_table_object_name(
     use version::DwgVersion::*;
     let obj_size = if matches!(version, R2000 | R2004 | R2007) {
         reader.read_rl(Endian::Little).ok()
-    } else { None };
+    } else {
+        None
+    };
     let _h = reader.read_h().ok()?;
     let mut ext = reader.read_bs().ok()?;
     while ext > 0 {
@@ -580,26 +657,42 @@ fn parse_table_object_name(
         let _ = reader.read_rcs(ext as usize).ok()?;
         ext = reader.read_bs().ok()?;
     }
-    if matches!(version, R14) { let _ = reader.read_rl(Endian::Little).ok()?; }
+    if matches!(version, R14) {
+        let _ = reader.read_rl(Endian::Little).ok()?;
+    }
     let _ = reader.read_bl().ok()?;
-    if !matches!(version, R14 | R2000) { let _ = reader.read_b().ok()?; }
-    if matches!(version, R2013 | R2018) { let _ = reader.read_b().ok()?; }
+    if !matches!(version, R14 | R2000) {
+        let _ = reader.read_b().ok()?;
+    }
+    if matches!(version, R2013 | R2018) {
+        let _ = reader.read_b().ok()?;
+    }
     if matches!(version, R14 | R2000 | R2004) {
         let name = reader.read_tv().ok()?;
         let t = name.trim().to_string();
         return if t.is_empty() { None } else { Some(t) };
     }
-    let exact_end = if matches!(version, R2007) { obj_size } else { None };
+    let exact_end = if matches!(version, R2007) {
+        obj_size
+    } else {
+        None
+    };
     for (mut sr, _) in locate_layer_string_stream_starts(record, api_header, version, exact_end) {
         if let Ok(n) = sr.read_tu() {
             let t = n.trim().to_string();
-            if !t.is_empty() { return Some(t); }
+            if !t.is_empty() {
+                return Some(t);
+            }
         }
     }
     None
 }
 
-fn build_table_name_map(path: &str, type_code: u16, type_name: &str) -> PyResult<HashMap<u64, String>> {
+fn build_table_name_map(
+    path: &str,
+    type_code: u16,
+    type_name: &str,
+) -> PyResult<HashMap<u64, String>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let best_effort = is_best_effort_compat_version(&decoder);
@@ -607,9 +700,16 @@ fn build_table_name_map(path: &str, type_code: u16, type_name: &str) -> PyResult
     let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut map = HashMap::new();
     for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)? else { continue; };
-        if !matches_type_name(header.type_code, type_code, type_name, &dynamic_types) { continue; }
-        if let Some(name) = parse_table_object_name(&record, &header, decoder.version(), obj.handle.0) {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, type_code, type_name, &dynamic_types) {
+            continue;
+        }
+        if let Some(name) =
+            parse_table_object_name(&record, &header, decoder.version(), obj.handle.0)
+        {
             map.insert(obj.handle.0, name);
         }
     }
@@ -628,13 +728,23 @@ fn resolve_layer_names_from_tables(path: &str, records: &mut [LayerRecord]) -> P
         if let Some(h) = r.ltype_handle {
             r.linetype = ltype_map.get(&h).cloned();
         }
-        r.eed_app_names = r.eed.iter().map(|b| appid_map.get(&b.app_handle).cloned()).collect();
+        r.eed_app_names = r
+            .eed
+            .iter()
+            .map(|b| appid_map.get(&b.app_handle).cloned())
+            .collect();
         for (block, app_name) in r.eed.iter().zip(r.eed_app_names.iter()) {
-            if app_name.as_deref() != Some("AcAecLayerStandard") { continue; }
-            let strings: Vec<&str> = block.items.iter().filter_map(|it| match &it.kind {
-                EedValue::String(s) => Some(s.as_str()),
-                _ => None,
-            }).collect();
+            if app_name.as_deref() != Some("AcAecLayerStandard") {
+                continue;
+            }
+            let strings: Vec<&str> = block
+                .items
+                .iter()
+                .filter_map(|it| match &it.kind {
+                    EedValue::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .collect();
             if strings.len() >= 2 && !strings[1].is_empty() {
                 r.description = Some(strings[1].to_string());
             } else if strings.len() == 1 && !strings[0].is_empty() {
@@ -686,11 +796,35 @@ pub fn decode_layer_eed(
 pub fn decode_layer_handles(
     path: &str,
     limit: Option<usize>,
-) -> PyResult<Vec<(u64, Option<u64>, Option<u64>, Option<u64>, Option<u64>, Option<u64>, Option<u64>, Option<String>)>> {
+) -> PyResult<
+    Vec<(
+        u64,
+        Option<u64>,
+        Option<u64>,
+        Option<u64>,
+        Option<u64>,
+        Option<u64>,
+        Option<u64>,
+        Option<String>,
+    )>,
+> {
     let records = get_all_layer_records(path)?;
-    Ok(records.iter().take(limit.unwrap_or(usize::MAX)).map(|r| {
-        (r.handle, r.owner_handle, r.xdic_handle, r.plotstyle_handle, r.material_handle, r.ltype_handle, r.visualstyle_handle, r.linetype.clone())
-    }).collect())
+    Ok(records
+        .iter()
+        .take(limit.unwrap_or(usize::MAX))
+        .map(|r| {
+            (
+                r.handle,
+                r.owner_handle,
+                r.xdic_handle,
+                r.plotstyle_handle,
+                r.material_handle,
+                r.ltype_handle,
+                r.visualstyle_handle,
+                r.linetype.clone(),
+            )
+        })
+        .collect())
 }
 
 fn parse_layer_record(
@@ -795,7 +929,7 @@ fn parse_layer_record(
         }
     };
 
-        // Color (CMC) — exact bitstream fields only.
+    // Color (CMC) — exact bitstream fields only.
     //
     // Layout (ODA / LibreDWG bit_read_CMC):
     //   BS  index          — ACI (or signed on R14; negative means off)
@@ -841,9 +975,7 @@ fn parse_layer_record(
             let color_index = match method {
                 0xC0 => 256u16, // ByLayer
                 0xC1 => 0u16,   // ByBlock
-                0xC3 if raw_index == 0 && (rgb24 & 0x00FFFF00) == 0 => {
-                    (rgb24 & 0xFF) as u16
-                }
+                0xC3 if raw_index == 0 && (rgb24 & 0x00FFFF00) == 0 => (rgb24 & 0xFF) as u16,
                 _ if raw_index != 0 => raw_index,
                 _ if method == 0xC3 && (rgb24 & 0x00FFFF00) == 0 => (rgb24 & 0xFF) as u16,
                 _ => raw_index,
@@ -852,11 +984,7 @@ fn parse_layer_record(
             // true_color only for true-color method 0xC2 (24-bit RGB).
             // Method 0xC3 stores palette RGB or ACI-in-low-byte — not a
             // free true-color; leave true_color None so ACI is the color.
-            let true_color = if method == 0xC2 && rgb24 != 0 {
-                Some(rgb24)
-            } else {
-                None
-            };
+            let true_color = if method == 0xC2 { Some(rgb24) } else { None };
 
             let (color_name, book_name) = if matches!(version, R2004) {
                 let color_name = if color_byte & 0x01 != 0 {
@@ -1264,7 +1392,6 @@ fn read_entity_layer_handle_at_fixed_index(
     None
 }
 
-
 #[cfg(test)]
 fn layer_handle_score(layer_handle: u64, known_layer_handles: &HashSet<u64>) -> u64 {
     if known_layer_handles.contains(&layer_handle) {
@@ -1290,7 +1417,8 @@ fn layer_handle_candidate_score(
     allow_exact_zero_layer_bonus: bool,
     known_layer_handles: &HashSet<u64>,
 ) -> u64 {
-    let mut score = layer_handle_score(layer_handle, known_layer_handles).saturating_add(handle_index);
+    let mut score =
+        layer_handle_score(layer_handle, known_layer_handles).saturating_add(handle_index);
     if let Some(expected) = expected_layer_index {
         let distance = expected.abs_diff(handle_index as usize) as u64;
         score = score.saturating_add(distance.saturating_mul(48));
@@ -1450,11 +1578,11 @@ fn decode_layer_name_from_string_stream(
     best.filter(|(score, _)| *score <= 1_536)
         .map(|(_score, name)| name)
         .ok_or_else(|| {
-        DwgError::new(
-            ErrorKind::Format,
-            "failed to decode layer name from string stream",
-        )
-    })
+            DwgError::new(
+                ErrorKind::Format,
+                "failed to decode layer name from string stream",
+            )
+        })
 }
 
 fn scan_layer_name_range(
@@ -1501,7 +1629,8 @@ fn scan_layer_name_range(
             if let Some(penalty) = end_bit_penalty {
                 score = score.saturating_add(penalty);
             }
-            score = score.saturating_add((u64::from(end_bit) - reader.tell_bits()).saturating_div(128));
+            score =
+                score.saturating_add((u64::from(end_bit) - reader.tell_bits()).saturating_div(128));
             score = score.saturating_add(fallback_bias);
             if prefer_tv {
                 score = score.saturating_add(4);
@@ -1587,7 +1716,10 @@ fn shift_bits_bytes(raw: &[u8], shift: u8) -> Vec<u8> {
 
 fn is_plausible_layer_name_fragment_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric()
-        || matches!(ch, '_' | '-' | '.' | '$' | '*' | ' ' | '/' | '(' | ')' | '[' | ']')
+        || matches!(
+            ch,
+            '_' | '-' | '.' | '$' | '*' | ' ' | '/' | '(' | ')' | '[' | ']'
+        )
         || ('\u{FF61}'..='\u{FF9F}').contains(&ch)
         || ('\u{3040}'..='\u{30FF}').contains(&ch)
         || ('\u{4E00}'..='\u{9FFF}').contains(&ch)
@@ -1623,10 +1755,13 @@ fn should_split_ascii_layer_token_before_cjk(current: &str, next: char) -> bool 
     if current.chars().count() < 3 {
         return false;
     }
-    if !current
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '$' | '*' | ' ' | '/' | '(' | ')' | '[' | ']'))
-    {
+    if !current.chars().all(|ch| {
+        ch.is_ascii_alphanumeric()
+            || matches!(
+                ch,
+                '_' | '-' | '.' | '$' | '*' | ' ' | '/' | '(' | ')' | '[' | ']'
+            )
+    }) {
         return false;
     }
     if !current.chars().any(|ch| ch.is_ascii_alphabetic()) {
@@ -1655,9 +1790,12 @@ fn shifted_utf16_layer_name_candidate_penalty(name: &str, _shift: u8) -> u64 {
     let char_count = name.chars().count();
     let has_ascii_alpha = name.chars().any(|ch| ch.is_ascii_alphabetic());
     let has_non_ascii = name.chars().any(|ch| !ch.is_ascii());
-    let has_separator = name
-        .chars()
-        .any(|ch| matches!(ch, '_' | '-' | '.' | '$' | '*' | ' ' | '/' | '(' | ')' | '[' | ']'));
+    let has_separator = name.chars().any(|ch| {
+        matches!(
+            ch,
+            '_' | '-' | '.' | '$' | '*' | ' ' | '/' | '(' | ')' | '[' | ']'
+        )
+    });
 
     if char_count <= 2 && !name.chars().all(|ch| ch.is_ascii_digit()) {
         score = score.saturating_add(1_024);
@@ -1675,11 +1813,7 @@ fn shifted_utf16_layer_name_candidate_penalty(name: &str, _shift: u8) -> u64 {
     score
 }
 
-fn update_best_layer_name_candidate(
-    best: &mut Option<(u64, String)>,
-    score: u64,
-    candidate: &str,
-) {
+fn update_best_layer_name_candidate(best: &mut Option<(u64, String)>, score: u64, candidate: &str) {
     match best {
         Some((best_score, best_name))
             if score > *best_score
@@ -1718,7 +1852,10 @@ fn layer_name_candidate_score(name: &str) -> u64 {
         .chars()
         .filter(|&ch| {
             !ch.is_ascii_alphanumeric()
-                && !matches!(ch, '_' | '-' | '.' | '$' | '*' | ' ' | '/' | '(' | ')' | '[' | ']' | '、' | '・')
+                && !matches!(
+                    ch,
+                    '_' | '-' | '.' | '$' | '*' | ' ' | '/' | '(' | ')' | '[' | ']' | '、' | '・'
+                )
                 && !('\u{FF61}'..='\u{FF9F}').contains(&ch)
                 && !('\u{3040}'..='\u{30FF}').contains(&ch)
                 && !('\u{4E00}'..='\u{9FFF}').contains(&ch)
@@ -1834,10 +1971,28 @@ mod layer_name_tests {
     fn layer_candidate_score_prefers_expected_first_handle_when_entity_mode_has_no_owner() {
         let known = HashSet::from([160u64]);
         let exact_first_score = layer_handle_candidate_score(
-            160, 0, Some(0), 549, Some(509), false, 81, Some(130), false, &known,
+            160,
+            0,
+            Some(0),
+            549,
+            Some(509),
+            false,
+            81,
+            Some(130),
+            false,
+            &known,
         );
         let later_score = layer_handle_candidate_score(
-            160, 1, Some(0), 533, Some(509), false, 81, Some(130), false, &known,
+            160,
+            1,
+            Some(0),
+            533,
+            Some(509),
+            false,
+            81,
+            Some(130),
+            false,
+            &known,
         );
         assert!(exact_first_score < later_score);
     }
@@ -1846,12 +2001,29 @@ mod layer_name_tests {
     fn layer_candidate_score_does_not_prefer_zero_without_zero_bonus() {
         let known = HashSet::from([160u64]);
         let zero_score = layer_handle_candidate_score(
-            0, 0, Some(0), 493, Some(509), false, 81, Some(130), false, &known,
+            0,
+            0,
+            Some(0),
+            493,
+            Some(509),
+            false,
+            81,
+            Some(130),
+            false,
+            &known,
         );
         let known_score = layer_handle_candidate_score(
-            160, 0, Some(0), 549, Some(509), false, 81, Some(130), false, &known,
+            160,
+            0,
+            Some(0),
+            549,
+            Some(509),
+            false,
+            81,
+            Some(130),
+            false,
+            &known,
         );
         assert!(known_score < zero_score);
     }
 }
-

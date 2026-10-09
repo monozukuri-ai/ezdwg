@@ -24,16 +24,21 @@
 ///   objid_handles:   list[int]
 ///   xdata_raw:       bytes
 type LayerStateRawRow = (
-    String,                 // name
-    u64,                    // xrecord_handle
-    Option<i64>,            // mask
-    Option<String>,         // description
-    Vec<(i16, PyObject)>,   // xdata groups (code, py value)
-    Vec<u64>,               // objid handles
-    Vec<u8>,                // raw xdata bytes
+    String,               // name
+    u64,                  // xrecord_handle
+    Option<i64>,          // mask
+    Option<String>,       // description
+    Vec<(i16, PyObject)>, // xdata groups (code, py value)
+    Vec<u64>,             // objid handles
+    Vec<u8>,              // raw xdata bytes
 );
 
 fn extract_mask_and_description(groups: &[objects::XDataGroup]) -> (Option<i64>, Option<String>) {
+    let header_end = groups
+        .iter()
+        .position(|g| matches!(g.code, 8 | 330))
+        .unwrap_or(groups.len());
+    let groups = &groups[..header_end];
     // LibreDWG / .las layout observed on AC1032 layer-state XRECORDs:
     //   91  global LayerStateMasks (prefer over per-layer 90)
     //   301 description (state-level only; group 1 is per-layer plotstyle)
@@ -188,14 +193,6 @@ fn discover_layer_state_entries(path: &str) -> PyResult<Vec<(String, u64)>> {
     Ok(states)
 }
 
-
-
-
-
-
-
-
-
 /// List layer-state names present in the drawing (cheap path).
 #[pyfunction]
 pub fn decode_layer_state_names(path: &str) -> PyResult<Vec<String>> {
@@ -284,22 +281,21 @@ fn discover_plotstyle_entries(path: &str) -> PyResult<Vec<(String, u64)>> {
     let mut entries: Vec<(String, u64)> = Vec::new();
     let mut seen: HashSet<u64> = HashSet::new();
 
-    let push_dict = |dict: &objects::Dictionary,
-                     entries: &mut Vec<(String, u64)>,
-                     seen: &mut HashSet<u64>| {
-        for e in &dict.entries {
-            if e.name.is_empty() {
-                continue;
-            }
-            if let Some(xh) = e.value_handle {
-                if seen.insert(xh.0) {
-                    entries.push((e.name.clone(), xh.0));
+    let push_dict =
+        |dict: &objects::Dictionary, entries: &mut Vec<(String, u64)>, seen: &mut HashSet<u64>| {
+            for e in &dict.entries {
+                if e.name.is_empty() {
+                    continue;
                 }
-            } else if !entries.iter().any(|(n, _)| n == &e.name) {
-                entries.push((e.name.clone(), 0));
+                if let Some(xh) = e.value_handle {
+                    if seen.insert(xh.0) {
+                        entries.push((e.name.clone(), xh.0));
+                    }
+                } else if !entries.iter().any(|(n, _)| n == &e.name) {
+                    entries.push((e.name.clone(), 0));
+                }
             }
-        }
-    };
+        };
 
     // Path A: any DICTIONARY containing ACAD_PLOTSTYLENAME → child dict entries
     for obj in index.objects.iter() {
@@ -397,6 +393,26 @@ const OVR_KEY_PLOTSTYLE: &str = "ADSK_XREC_LAYER_PLOTSTYLE_OVR";
 /// linetype handle, lineweight index, transparency, or plot-style handle).
 type LayerVpOverrideRow = (u64, String, String, u64, i64);
 
+#[cfg(test)]
+mod layer_state_header_tests {
+    use super::*;
+
+    #[test]
+    fn per_layer_flags_do_not_become_state_mask() {
+        let groups = vec![
+            objects::XDataGroup {
+                code: 330,
+                value: objects::XDataValue::Int64(16),
+            },
+            objects::XDataGroup {
+                code: 90,
+                value: objects::XDataValue::Int32(8),
+            },
+        ];
+        assert_eq!(extract_mask_and_description(&groups), (None, None));
+    }
+}
+
 fn ovr_property_for_dict_key(key: &str) -> Option<&'static str> {
     let k = key.to_ascii_uppercase();
     if k == OVR_KEY_COLOR {
@@ -437,10 +453,7 @@ fn xdata_handle_u64(value: &objects::XDataValue) -> Option<u64> {
 }
 
 /// Parse one override XRECORD into `(viewport_handle, value)` pairs.
-fn parse_ovr_xrecord_groups(
-    groups: &[objects::XDataGroup],
-    property: &str,
-) -> Vec<(u64, i64)> {
+fn parse_ovr_xrecord_groups(groups: &[objects::XDataGroup], property: &str) -> Vec<(u64, i64)> {
     // Value group codes per property (ezdxf / LibreDWG observations).
     let value_codes: &[i16] = match property {
         "color" => &[420, 62],
@@ -524,8 +537,7 @@ pub fn decode_layer_vp_overrides(path: &str) -> PyResult<Vec<LayerVpOverrideRow>
         let Some(&xdic_idx) = by_handle.get(&xdic_h) else {
             continue;
         };
-        let Some(dict) =
-            decode_one_dictionary(&decoder, &index.objects[xdic_idx], best_effort)
+        let Some(dict) = decode_one_dictionary(&decoder, &index.objects[xdic_idx], best_effort)
         else {
             continue;
         };
@@ -541,9 +553,7 @@ pub fn decode_layer_vp_overrides(path: &str) -> PyResult<Vec<LayerVpOverrideRow>
             let Some(&xr_idx) = by_handle.get(&xr_h.0) else {
                 continue;
             };
-            let Some(xr) =
-                decode_one_xrecord(&decoder, &index.objects[xr_idx], best_effort)
-            else {
+            let Some(xr) = decode_one_xrecord(&decoder, &index.objects[xr_idx], best_effort) else {
                 continue;
             };
             for (vp_h, value) in parse_ovr_xrecord_groups(&xr.groups, prop) {
@@ -560,4 +570,3 @@ pub fn decode_layer_vp_overrides(path: &str) -> PyResult<Vec<LayerVpOverrideRow>
 
     Ok(rows)
 }
-

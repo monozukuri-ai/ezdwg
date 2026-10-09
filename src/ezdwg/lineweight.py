@@ -2,12 +2,8 @@
 Lineweight enum -> mm conversion for ezdwg.
 
 The standard table is ported directly from LibreDWG's dxf_cvt_lweight
-(src/dwg.c) rather than re-derived -- see ezdwg_lineweight_proposal.md for
-the cross-check against values already observed in this project's own test
-fixtures (index 9 -> 35 == Layer_lw_035's 0.35mm, index 11 -> 50 ==
-Layer_lw_050's 0.50mm, index 31 -> -3 == the "Default" sentinel that
-explains why nearly every layer tested this session showed
-lineweight_index=31).
+(src/dwg.c). Fixture checks include index 9 -> 35 == Layer_lw_035's 0.35mm, index 11 -> 50 ==
+Layer_lw_050's 0.50mm, and index 31 -> -3 == the "Default" sentinel.
 """
 
 from __future__ import annotations
@@ -26,11 +22,38 @@ DEFAULT = -3
 # Index -> hundredths of a millimeter. 24-28 are reserved/unused in the
 # format as of this writing (map to 0); 29-31 are the sentinels above.
 STANDARD_TABLE: dict[int, int] = {
-    0: 0, 1: 5, 2: 9, 3: 13, 4: 15, 5: 18, 6: 20, 7: 25,
-    8: 30, 9: 35, 10: 40, 11: 50, 12: 53, 13: 60, 14: 70, 15: 80,
-    16: 90, 17: 100, 18: 106, 19: 120, 20: 140, 21: 158, 22: 200, 23: 211,
-    24: 0, 25: 0, 26: 0, 27: 0, 28: 0,
-    29: BYLAYER, 30: BYBLOCK, 31: DEFAULT,
+    0: 0,
+    1: 5,
+    2: 9,
+    3: 13,
+    4: 15,
+    5: 18,
+    6: 20,
+    7: 25,
+    8: 30,
+    9: 35,
+    10: 40,
+    11: 50,
+    12: 53,
+    13: 60,
+    14: 70,
+    15: 80,
+    16: 90,
+    17: 100,
+    18: 106,
+    19: 120,
+    20: 140,
+    21: 158,
+    22: 200,
+    23: 211,
+    24: 0,
+    25: 0,
+    26: 0,
+    27: 0,
+    28: 0,
+    29: BYLAYER,
+    30: BYBLOCK,
+    31: DEFAULT,
 }
 
 
@@ -62,13 +85,20 @@ def _lookup(index: int, custom_table: Optional[Mapping[int, int]]) -> tuple[int,
     _logger.error(
         "lineweight index %d is out of the valid 0-31 range -- wrapping to "
         "%d (mod 32) and flagging the affected layer",
-        index, wrapped,
+        index,
+        wrapped,
     )
-    value = custom_table[wrapped] if custom_table and wrapped in custom_table else STANDARD_TABLE[wrapped]
+    value = (
+        custom_table[wrapped]
+        if custom_table and wrapped in custom_table
+        else STANDARD_TABLE[wrapped]
+    )
     return value, True
 
 
-def lineweight_to_mm(index: int, custom_table: Optional[Mapping[int, int]] = None) -> int:
+def lineweight_to_mm(
+    index: int, custom_table: Optional[Mapping[int, int]] = None
+) -> int:
     """Convert a raw DWG lineweight enum index to hundredths of a
     millimeter (matching ezdxf's `layer.dxf.lineweight` convention), or one
     of the BYLAYER/BYBLOCK/DEFAULT sentinels above.

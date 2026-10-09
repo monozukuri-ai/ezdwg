@@ -28,10 +28,7 @@ AcLy nested schema
   GROUP_NAME (300)        display name
   GROUP_EXPRESSION (301)  filter expression string
 
-Notes
----------------------------
-- LAS_FILTER_COUNT = 12 dictionary keys under ACAD_LAYERFILTERS
-- LAS_ACLY_ROOT_COUNT = 16 top-level ACLYDICTIONARY entries
+Filter counts depend on the drawing.
 """
 
 from __future__ import annotations
@@ -45,9 +42,6 @@ GROUP_STRING = 1
 GROUP_FLAGS = 70
 GROUP_EXPRESSION = 301
 GROUP_NAME_ALT = 300
-
-LAS_FILTER_COUNT = 12
-LAS_ACLY_ROOT_COUNT = 16
 
 
 @dataclass(frozen=True)
@@ -270,7 +264,11 @@ def _build_tree_from_flat(nodes: Sequence[tuple]) -> tuple[LayerFilter, ...]:
             self.children: list[_B] = []
 
         def freeze(self) -> LayerFilter:
-            name_pat = _name_pattern_from_expression(self.expression or "") if self.expression else None
+            name_pat = (
+                _name_pattern_from_expression(self.expression or "")
+                if self.expression
+                else None
+            )
             return LayerFilter(
                 name=self.name,
                 handle=self.handle,

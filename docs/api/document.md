@@ -9,6 +9,7 @@ class Document:
     version: str
     decode_path: str | None = None
     decode_version: str | None = None
+    lineweight_table: Mapping[int, int] | None = None
 ```
 
 A DWG document. Created by [`ezdwg.read()`](core.md#ezdwgread).
@@ -86,8 +87,16 @@ doc.linetypes()["CENTER"]["dashes"]  # [1.25, -0.25, 0.25, -0.25]
 #### layers
 
 ```python
+Document.layers -> LayerTable
 Document.layers() -> dict[str, dict[str, Any]]
 ```
+
+`doc.layers` is a cached table of immutable `Layer` snapshots. Iterate over
+layers, look up names with `doc.layers["0"]`, or use `by_handle(handle)` and
+`to_records()`. Calling the table preserves the legacy dictionary API below.
+Lineweight is in hundredths of a millimetre; `lineweight_index` is the stored
+DWG enum. `ezdwg.read(path, lineweight_table={9: 35})` accepts a custom mapping.
+Transparency is an optional percentage (0 opaque, up to 90 transparent).
 
 Layer table by name. Each entry holds `handle`, `color_index`, `true_color`,
 `linetype` (the name of the layer's linetype, `None` when it cannot be read)
@@ -115,6 +124,48 @@ for entity in doc.modelspace().query("LINE"):
         name = layer["linetype"]
     scale = ltscale * entity.dxf["linetype_scale"]
 ```
+
+#### layer states, filters, and viewport overrides
+
+```python
+doc = ezdwg.read("drawing.dwg")
+print(doc.layer_states.names())
+state = doc.layer_state("Saved state")
+if state is not None:
+    preview = state.apply(doc, dry_run=True)
+    result = state.apply(doc)  # updates the cached layer metadata in memory
+
+for layer_filter in doc.layer_filters:
+    print(layer_filter.name, layer_filter.name_pattern)
+for node in doc.layer_filter_tree.walk():
+    print(node.depth, node.name, node.expression)
+```
+
+`LayerStateMasks` selects properties for `diff()` / `apply()`. Use
+`properties=ezdwg.LayerStateMasks.COLOR` to select color alone. Unresolved
+properties are skipped. `skip_missing=False` raises `KeyError` before mutation
+if a referenced layer is missing. `doc.diff_layer_state(name, **kwargs)` and
+`doc.apply_layer_state(name, **kwargs)` offer named-state shortcuts.
+
+Passing `viewport=<entity handle>` applies freeze/display properties to
+`doc.viewport_overrides`. Other flags remain global. Override colors and
+transparency are decoded; override lineweight is in hundredths of a millimetre.
+Without a viewport argument, global layer metadata is restored and the summary
+reports any skipped viewport context.
+
+State/override application changes these metadata tables only. Entity queries,
+plotting, DWG export, and DXF export continue to read their existing decode
+paths; they do not consume the modified tables. There is no DWG write-back.
+
+Layer-state decoding is covered by populated AC1027/AC1032 fixtures. Current
+public fixtures have empty filter/override tables; populated Python table
+behavior is tested with synthetic rows. Native populated filter/override
+decoding remains best effort. `matches_name()` evaluates only a name pattern,
+not arbitrary AcLy expressions or other filter properties.
+
+Native layer results are cached by canonical path, size, and modification time.
+Call `ezdwg.clear_decode_caches()` after batch work or before rereading a file
+whose size/timestamp was preserved. Existing `Document` snapshots remain alive.
 
 #### dimstyles
 

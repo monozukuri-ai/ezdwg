@@ -9,8 +9,7 @@ Layer.transparency, Layer.standard and Layer.description are filled from EED:
   - AcCmTransparency  (binary code 71 / DXF 1071) → transparency percent
   - AcAecLayerStandard (1000-strings) → standard (1st) + description (2nd)
 
-See ezdwg_layers_api_proposal.md / ezdwg_layers_implementation_plan.md for
-the design rationale.
+See the Document API documentation for the collection and legacy dict views.
 """
 
 from __future__ import annotations
@@ -63,9 +62,11 @@ class Layer:
     handle: int
     name: str
 
-    color: int                          # ACI index, always positive (sign doesn't encode visibility)
-    true_color: Optional[int]           # 0xRRGGBB, or None if this layer has no true color set
-    rgb: Optional[tuple[int, int, int]]  # derived from true_color; convenience, same nullability
+    color: int  # ACI index, always positive (sign doesn't encode visibility)
+    true_color: Optional[int]  # 0xRRGGBB, or None if this layer has no true color set
+    rgb: Optional[
+        tuple[int, int, int]
+    ]  # derived from true_color; convenience, same nullability
 
     on: bool
     frozen: bool
@@ -73,16 +74,16 @@ class Layer:
     frozen_in_new_viewports: bool
     plot: bool
 
-    lineweight_index: int               # raw DWG enum index (0-31ish); ready now
+    lineweight_index: int  # raw DWG enum index (0-31ish); ready now
     lineweight_index_out_of_range: bool  # True if lineweight_index needed mod-32
-                                           # wraparound to resolve -- see lineweight.py.
-                                           # False for every real file decoded so far;
-                                           # exists for defensive/malformed-data cases.
-    lineweight: int                       # 1/100 mm, or a BYLAYER/BYBLOCK/DEFAULT
-                                           # sentinel (see the lineweight module) --
-                                           # converted from lineweight_index at
-                                           # construction time using whichever table
-                                           # (standard, or custom via Document) applied.
+    # wraparound to resolve -- see lineweight.py.
+    # False for every real file decoded so far;
+    # exists for defensive/malformed-data cases.
+    lineweight: int  # 1/100 mm, or a BYLAYER/BYBLOCK/DEFAULT
+    # sentinel (see the lineweight module) --
+    # converted from lineweight_index at
+    # construction time using whichever table
+    # (standard, or custom via Document) applied.
 
     linetype: Optional[str]
     ltype_handle: Optional[int]
@@ -146,7 +147,9 @@ class LayerTable:
     ):
         self._by_name: dict[str, Layer] = {layer.name: layer for layer in layers}
         self._by_handle: dict[int, Layer] = {layer.handle: layer for layer in layers}
-        self._ordered: list[Layer] = layers  # file order, i.e. LAYER_CONTROL entry order
+        self._ordered: list[Layer] = (
+            layers  # file order, i.e. LAYER_CONTROL entry order
+        )
         self.incomplete_handles: list[int] = incomplete_handles or []
         self.lineweight_flagged_handles: list[int] = lineweight_flagged_handles or []
 
@@ -219,6 +222,20 @@ def _rgb_from_true_color(true_color: Optional[int]) -> Optional[tuple[int, int, 
     if true_color is None:
         return None
     return ((true_color >> 16) & 0xFF, (true_color >> 8) & 0xFF, true_color & 0xFF)
+
+
+def _properties_from_raw_color(value: int) -> dict:
+    """Normalize the signed AcCmColor stored in an XRECORD."""
+    method = (value >> 24) & 0xFF
+    if method == 0xC2:
+        return {"true_color": value & 0xFFFFFF}
+    if method == 0xC3:
+        return {"color": value & 0xFF, "true_color": None}
+    if method in (0xC0, 0xC1):
+        return {"color": 256 if method == 0xC0 else 0, "true_color": None}
+    if 0 <= value <= 256:
+        return {"color": value, "true_color": None}
+    return {}
 
 
 def _transparency_from_raw(value: int) -> float:
@@ -328,7 +345,9 @@ def build_layer_table(
     eed_by_handle = {row[0]: row[1] for row in raw.decode_layer_eed(path)}
     details_by_handle = {}
     try:
-        details_by_handle = {row[0]: row for row in raw.decode_layer_color_details(path)}
+        details_by_handle = {
+            row[0]: row for row in raw.decode_layer_color_details(path)
+        }
     except Exception:
         pass
 
@@ -357,6 +376,7 @@ def build_layer_table(
     lineweight_flagged: list[int] = []
 
     for handle, name in names:
+        name = name or f"LAYER_{handle:X}"
         color_row = colors_by_handle.get(handle)
         flags_row = flags_by_handle.get(handle)
         state_row = states_by_handle.get(handle)
@@ -375,7 +395,9 @@ def build_layer_table(
         lw_mm_from_states = None
         if state_row is not None:
             # Prefer states path for visibility flags.
-            _, frozen, off, frozen_in_new, locked, plotflag, lw_mm_from_states = state_row
+            _, frozen, off, frozen_in_new, locked, plotflag, lw_mm_from_states = (
+                state_row
+            )
             frozen = bool(frozen)
             off = bool(off)
             frozen_in_new = bool(frozen_in_new)
@@ -387,7 +409,9 @@ def build_layer_table(
                 # Fall back to sentinel DEFAULT when only states provided mm.
                 lineweight_index = 31
         else:
-            _, frozen, off, frozen_in_new, locked, plotflag, lineweight_index = flags_row
+            _, frozen, off, frozen_in_new, locked, plotflag, lineweight_index = (
+                flags_row
+            )
 
         lw_mm, lw_out_of_range = _lineweight._lookup(lineweight_index, lineweight_table)
         # decode_layer_states returns the DXF lineweight (1/100 mm or -3 DEFAULT).
@@ -403,7 +427,16 @@ def build_layer_table(
         owner_h = xdic_h = plotstyle_h = material_h = ltype_h = visualstyle_h = None
         linetype_name = None
         if hrow is not None:
-            _, owner_h, xdic_h, plotstyle_h, material_h, ltype_h, visualstyle_h, linetype_name = hrow
+            (
+                _,
+                owner_h,
+                xdic_h,
+                plotstyle_h,
+                material_h,
+                ltype_h,
+                visualstyle_h,
+                linetype_name,
+            ) = hrow
         if linetype_name is None and ltype_h is not None:
             linetype_name = ltype_name_by_handle.get(ltype_h)
 
