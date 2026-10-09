@@ -30,6 +30,19 @@ type EntityStyleRow = (u64, Option<u16>, Option<u32>, u64);
 type EntityPlacementRow = (u64, u8, u64);
 type ObjectLayerHandleRow = (u64, u64);
 type LayerColorRow = (u64, u16, Option<u32>);
+// TODO(task-2): fold LayerColorRow + LayerFlagsRow into one row/struct once
+// Document.layers() (task list Task 6) lands, instead of two raw functions
+// that each re-parse the file. Kept separate for now so this change doesn't
+// alter decode_layer_colors()'s existing return shape.
+// Tuple: (handle, frozen, off, frozen_in_new, locked, plotflag, lineweight_idx)
+type LayerFlagsRow = (u64, bool, bool, bool, bool, bool, u8);
+// FEATURE: color_index/true_color plus color_name/book_name (the
+// color-book reference itself, e.g. "DIC COLOR GUIDE(R)"/"DIC 7"), kept as
+// its own row type/function rather than changing LayerColorRow's existing
+// shape -- same pattern as LayerFlagsRow being separate from
+// LayerColorRow. See decode_layer_color_details' doc comment for the
+// best-effort caveat on the two string fields.
+type LayerColorDetailRow = (u64, u16, Option<u32>, Option<String>, Option<String>);
 type LayerNameRow = (u64, String);
 type HeaderVariablesRow = (
     Option<u16>,    // insunits

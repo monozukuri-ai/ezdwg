@@ -3,6 +3,13 @@
 ## Unreleased
 
 ### Added
+- Structured `Document.layers` (`Layer` / `LayerTable`) with callable legacy
+  `doc.layers()` access, lineweight conversion, and EED transparency/description.
+- Layer-state discovery, masked in-memory diff/apply, property/nested filter
+  discovery, and viewport layer override metadata. These metadata changes are
+  not written to DWG/DXF or used by plotting.
+- Shared native layer decode cache with file metadata invalidation and
+  `clear_decode_caches()` support.
 - Native `AC1021` (`R2007`) read path in the high-level API (`ezdwg.read`) without compatibility conversion.
 - Native `AC1024` (`R2010`) read path in the high-level API (`ezdwg.read`) for `LINE`, `ARC`, and `LWPOLYLINE`.
 - Native `AC1027` (`R2013`) read path in the high-level API (`ezdwg.read`) for `LINE`, `ARC`, and `LWPOLYLINE`.
@@ -39,6 +46,9 @@
   to account for `material flags`, `shadow flags`, R2010 visual-style bits, and the R2013+ ds-binary-data flag.
 
 ### Fixed
+- Object-map page offsets, body-handle identity, 64-bit handle references, and
+  string-stream size metadata. Layer-state lineweights and viewport colors/
+  transparency now use decoded units, including true-color black and ACI restore.
 - `POLYLINE_2D` / `POLYLINE_3D` / `POLYLINE_PFACE` / `POLYLINE_MESH`: the "Owned Object
   Count" BL is only read for R2004+ layouts (ODA spec 20.4.16 / 20.4.17 / 20.4.33 / 20.4.34).
   R2000 files used to read the count from unrelated bits, which silently dropped most 2D

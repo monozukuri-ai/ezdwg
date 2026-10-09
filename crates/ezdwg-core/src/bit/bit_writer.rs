@@ -500,6 +500,22 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_full_width_handles_and_reject_invalid_counter() {
+        let values = [0, u32::MAX as u64, 1u64 << 32, 1u64 << 56, u64::MAX];
+        let mut writer = BitWriter::new();
+        for value in values {
+            writer.write_h(0, value).unwrap();
+        }
+        let bytes = writer.into_bytes();
+        let mut reader = BitReader::new(&bytes);
+        for value in values {
+            assert_eq!(reader.read_h().unwrap().value, value);
+        }
+        assert!(BitReader::new(&[0x09]).read_h().is_err());
+        assert!(BitReader::new(&[0x08, 1, 2]).read_h().is_err());
+    }
+
+    #[test]
     fn roundtrip_crc_writer() {
         let mut writer = BitWriter::new();
         writer.write_rc(0xAB).unwrap();
