@@ -6,8 +6,9 @@
 //
 // Public functions (registered on ezdwg.raw):
 //   decode_layer_state_names(path) -> list[str]
-//   decode_layer_states(path) -> list of raw rows
+//   decode_layer_states(path) / decode_layer_state_xrecords(path)
 //   decode_plotstyles(path) -> list[(name, handle)]
+//   decode_layer_vp_overrides(path) -> list[(layer_h, name, prop, vp_h, value)]
 // ============================================================================
 
 /// One raw layer-state row (Phase 1 contract).
@@ -252,6 +253,7 @@ pub fn decode_layer_state_xrecords(py: Python<'_>, path: &str) -> PyResult<Vec<L
     }
     Ok(rows)
 }
+
 // ---------------------------------------------------------------------------
 // Plot-style name table (ACAD_PLOTSTYLENAME dictionary)
 // ---------------------------------------------------------------------------
@@ -365,5 +367,197 @@ fn discover_plotstyle_entries(path: &str) -> PyResult<Vec<(String, u64)>> {
 #[pyfunction]
 pub fn decode_plotstyles(path: &str) -> PyResult<Vec<(String, u64)>> {
     discover_plotstyle_entries(path)
+}
+
+// ---------------------------------------------------------------------------
+// Viewport layer property overrides (LAYER xdict ADSK_XREC_LAYER_*_OVR)
+// ---------------------------------------------------------------------------
+//
+// VP Freeze lives on the VIEWPORT entity. VP Color / Linetype / Lineweight /
+// Transparency / Plot Style live on each LAYER's extension dictionary as
+// XRECORDs. See ezdwg_vplayer_scope.md §13.
+//
+// XRECORD xdata shape (repeated per viewport):
+//   102 "{ADSK_LYR_COLOR_OVERRIDE" | …LINETYPE… | …
+//   335 <viewport handle>
+//   420|343|370|440|…  <value>
+//   102 "}"
+
+const OVR_KEY_COLOR: &str = "ADSK_XREC_LAYER_COLOR_OVR";
+const OVR_KEY_LINETYPE: &str = "ADSK_XREC_LAYER_LINETYPE_OVR";
+const OVR_KEY_LINEWT: &str = "ADSK_XREC_LAYER_LINEWT_OVR";
+const OVR_KEY_ALPHA: &str = "ADSK_XREC_LAYER_ALPHA_OVR";
+const OVR_KEY_PLOTSTYLE: &str = "ADSK_XREC_LAYER_PLOTSTYLE_OVR";
+
+/// One VP property override row:
+/// `(layer_handle, layer_name, property, viewport_handle, value)`.
+///
+/// `property` is one of `"color"`, `"linetype"`, `"lineweight"`,
+/// `"transparency"`, `"plot_style"`. `value` is a signed int (encoded color,
+/// linetype handle, lineweight index, transparency, or plot-style handle).
+type LayerVpOverrideRow = (u64, String, String, u64, i64);
+
+fn ovr_property_for_dict_key(key: &str) -> Option<&'static str> {
+    let k = key.to_ascii_uppercase();
+    if k == OVR_KEY_COLOR {
+        Some("color")
+    } else if k == OVR_KEY_LINETYPE {
+        Some("linetype")
+    } else if k == OVR_KEY_LINEWT {
+        Some("lineweight")
+    } else if k == OVR_KEY_ALPHA {
+        Some("transparency")
+    } else if k == OVR_KEY_PLOTSTYLE {
+        Some("plot_style")
+    } else {
+        None
+    }
+}
+
+fn xdata_i64(value: &objects::XDataValue) -> Option<i64> {
+    use objects::XDataValue::*;
+    match value {
+        Int16(v) => Some(*v as i64),
+        Int32(v) => Some(*v as i64),
+        Int64(v) => Some(*v),
+        Handle(href) => Some(href.value as i64),
+        Real(v) => Some(*v as i64),
+        _ => None,
+    }
+}
+
+fn xdata_handle_u64(value: &objects::XDataValue) -> Option<u64> {
+    use objects::XDataValue::*;
+    match value {
+        Handle(href) => Some(href.value as u64),
+        Int32(v) if *v >= 0 => Some(*v as u64),
+        Int64(v) if *v >= 0 => Some(*v as u64),
+        _ => None,
+    }
+}
+
+/// Parse one override XRECORD into `(viewport_handle, value)` pairs.
+fn parse_ovr_xrecord_groups(
+    groups: &[objects::XDataGroup],
+    property: &str,
+) -> Vec<(u64, i64)> {
+    // Value group codes per property (ezdxf / LibreDWG observations).
+    let value_codes: &[i16] = match property {
+        "color" => &[420, 62],
+        "linetype" => &[343, 6],
+        "lineweight" => &[370, 371],
+        "transparency" => &[440],
+        "plot_style" => &[390, 1],
+        _ => &[],
+    };
+
+    let mut out: Vec<(u64, i64)> = Vec::new();
+    let mut in_block = false;
+    let mut vp: Option<u64> = None;
+    let mut val: Option<i64> = None;
+
+    for g in groups {
+        match g.code {
+            102 => {
+                if let objects::XDataValue::String(s) = &g.value {
+                    if s.starts_with('{') {
+                        in_block = true;
+                        vp = None;
+                        val = None;
+                    } else if s.starts_with('}') {
+                        if in_block {
+                            if let (Some(vph), Some(v)) = (vp, val) {
+                                out.push((vph, v));
+                            }
+                        }
+                        in_block = false;
+                        vp = None;
+                        val = None;
+                    }
+                }
+            }
+            335 if in_block => {
+                if let Some(h) = xdata_handle_u64(&g.value) {
+                    vp = Some(h);
+                }
+            }
+            code if in_block && value_codes.contains(&code) => {
+                if val.is_none() {
+                    val = xdata_i64(&g.value);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Trailing block without closing "}"
+    if in_block {
+        if let (Some(vph), Some(v)) = (vp, val) {
+            out.push((vph, v));
+        }
+    }
+    out
+}
+
+/// Decode all LAYER xdict viewport property overrides in `path`.
+///
+/// Returns rows `(layer_handle, layer_name, property, viewport_handle, value)`.
+/// Empty when the drawing has no ADSK override XRECORDs.
+#[pyfunction]
+pub fn decode_layer_vp_overrides(path: &str) -> PyResult<Vec<LayerVpOverrideRow>> {
+    let records = get_all_layer_records(path)?;
+    let bytes = file_open::read_file(path).map_err(to_py_err)?;
+    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let best_effort = is_best_effort_compat_version(&decoder);
+    let index = decoder.build_object_index().map_err(to_py_err)?;
+
+    let mut by_handle: HashMap<u64, usize> = HashMap::new();
+    for (i, obj) in index.objects.iter().enumerate() {
+        by_handle.insert(obj.handle.0, i);
+    }
+
+    let mut rows: Vec<LayerVpOverrideRow> = Vec::new();
+
+    for rec in records.iter() {
+        let Some(xdic_h) = rec.xdic_handle.filter(|&h| h != 0) else {
+            continue;
+        };
+        let Some(&xdic_idx) = by_handle.get(&xdic_h) else {
+            continue;
+        };
+        let Some(dict) =
+            decode_one_dictionary(&decoder, &index.objects[xdic_idx], best_effort)
+        else {
+            continue;
+        };
+
+        let layer_name = rec.name.clone().unwrap_or_default();
+        for entry in &dict.entries {
+            let Some(prop) = ovr_property_for_dict_key(&entry.name) else {
+                continue;
+            };
+            let Some(xr_h) = entry.value_handle else {
+                continue;
+            };
+            let Some(&xr_idx) = by_handle.get(&xr_h.0) else {
+                continue;
+            };
+            let Some(xr) =
+                decode_one_xrecord(&decoder, &index.objects[xr_idx], best_effort)
+            else {
+                continue;
+            };
+            for (vp_h, value) in parse_ovr_xrecord_groups(&xr.groups, prop) {
+                rows.push((
+                    rec.handle,
+                    layer_name.clone(),
+                    prop.to_string(),
+                    vp_h,
+                    value,
+                ));
+            }
+        }
+    }
+
+    Ok(rows)
 }
 

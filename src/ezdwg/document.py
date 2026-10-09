@@ -266,6 +266,17 @@ class Document:
         return build_layer_state_table(self.decode_path or self.path)
 
     @cached_property
+    def viewport_overrides(self):
+        """Live VP Freeze + LAYER xdict property overrides (mutable in memory).
+
+        Mutated by ``LayerState.apply(..., viewport=…)``; never written back
+        to the DWG. See ``ezdwg_vplayer_scope.md`` V2a/V2b/V3-C.
+        """
+        from .layer_states import build_viewport_override_table
+
+        return build_viewport_override_table(self.decode_path or self.path)
+
+    @cached_property
     def layer_filters(self) -> LayerFilterTable:
         """Named property layer filters (ACAD_LAYERFILTERS), immutable snapshot."""
         return build_layer_filter_table(self.decode_path or self.path)

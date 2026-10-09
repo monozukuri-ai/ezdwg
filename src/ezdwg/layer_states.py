@@ -8,8 +8,9 @@ XRECORD group schema (explicit constants — not inferred from one file)
 State-level (once, before first layer block):
   GROUP_MASK (91)          LayerStateMasks bitfield (prefer over 90)
   GROUP_DESCRIPTION (301)  description string
-  GROUP_CURRENT_VP (290)   boolean (current-vp / related)
-  GROUP_VIEWPORT_CODE (302) filter / viewport code string (optional)
+  GROUP_CURRENT_VP (290)   boolean — True means "saved with a viewport current"
+                           (typically False on stock samples; see module docs)
+  GROUP_VIEWPORT_CODE (302) opaque context string (opaque context; not necessarily a filter/layout name)
 
 Per-layer block (repeats; starts at GROUP_LAYER_HANDLE (330) or GROUP_LAYER_NAME (8)):
   GROUP_LAYER_HANDLE (330) soft-pointer to LAYER object
@@ -18,19 +19,17 @@ Per-layer block (repeats; starts at GROUP_LAYER_HANDLE (330) or GROUP_LAYER_NAME
                              1=Off, 2=Frozen, 4=Locked, 8=NoPlot, 16=FrozenInNewViewports
                              (distinct from state-level LayerStateMasks / group 91)
   GROUP_COLOR (62)         ACI color
-  GROUP_TRUE_COLOR (420)   24-bit true color (optional; not exercised by multi-page AC1032 maps)
+  GROUP_TRUE_COLOR (420)   24-bit true color (optional)
   GROUP_LINEWEIGHT (370)   lineweight enum index
   GROUP_LINETYPE (331)     soft-pointer (linetype / related)
   GROUP_PLOTSTYLE (1)      plot-style / extra name string (e.g. "Farbe_2")
   GROUP_TRANSPARENCY (440) transparency raw (AcCmTransparency family)
 
-Layer *names* on multi-page AC1032 maps are resolved via 330 → decode_layer_names (group 8 is
+Layer *names* are resolved via 330 → decode_layer_names (group 8 is
 absent there; group 1 holds plot-style names, not layer names).
 
-Fixture constants (multi-page AC1032 maps / LibreDWG) — pinned in tests
+Schema notes (AC1032 layer-state XRECORD)
 -------------------------------------------------------
-- LAS_DICT_ENTRIES = 12 dictionary keys under ACAD_LAYERSTATES
-- LAS_GROUPS_PER_LIVE_STATE = 2454 XDATA groups per live state (exact parse)
 - LAS_BLOCKS_PER_LIVE_STATE ≈ 350 per-layer blocks
 - LAS_FULL_MASK = 2047 (0x7FF) — all six live states use the full mask
 """
@@ -38,7 +37,7 @@ Fixture constants (multi-page AC1032 maps / LibreDWG) — pinned in tests
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import IntFlag
 from typing import Any, Iterator, Mapping, Optional
 
@@ -69,9 +68,7 @@ FLAG_LOCKED = 4
 FLAG_NO_PLOT = 8
 FLAG_FROZEN_IN_NEW_VIEWPORTS = 16
 
-# Pinned multi-page AC1032 maps fixture expectations (tests assert these exactly)
-LAS_DICT_ENTRIES = 12
-LAS_GROUPS_PER_LIVE_STATE = 2454
+# (No pinned fixture counts — tests use in-repo acadsharp samples.)
 LAS_MIN_BLOCKS_PER_LIVE_STATE = 300
 LAS_FULL_MASK = 0x7FF  # 2047
 
@@ -167,7 +164,15 @@ class LayerStateDiffEntry:
 
 @dataclass(frozen=True)
 class LayerStateDiff:
-    """Result of LayerState.diff(document)."""
+    """Result of LayerState.diff(document) / apply.
+
+    ``summary`` counts entry statuses. Extra keys may appear:
+
+    - ``viewport_overrides_skipped`` (0 or 1): mask includes
+      ``CURRENT_VIEWPORT`` but per-viewport freeze **and** LAYER xdict
+      property overrides (VP Color/Ltype/…) are not restored; global layer
+      properties were still compared/applied as usual.
+    """
 
     state_name: str
     mask: LayerStateMasks
@@ -255,6 +260,129 @@ def _values_differ(a: Any, b: Any, *, prop: str = "") -> bool:
     return a != b
 
 
+def _document_viewport_overrides(document: Any) -> "ViewportOverrideTable":
+    """Return (and cache) a mutable ViewportOverrideTable on *document*."""
+    existing = getattr(document, "viewport_overrides", None)
+    if isinstance(existing, ViewportOverrideTable):
+        return existing
+    path = getattr(document, "decode_path", None) or getattr(document, "path", None)
+    table = build_viewport_override_table(str(path)) if path else ViewportOverrideTable()
+    try:
+        object.__setattr__(document, "viewport_overrides", table)
+    except Exception:
+        try:
+            document.viewport_overrides = table  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    return table
+
+
+def _vp_live_prop(
+    vp_table: "ViewportOverrideTable",
+    layer: Any,
+    layer_handle: int,
+    viewport_handle: int,
+    prop: str,
+    *,
+    plotstyle_names: Optional[Mapping[int, str]] = None,
+) -> Any:
+    """Effective value of *prop* for *layer* inside *viewport_handle*."""
+    if prop == "frozen":
+        return vp_table.is_frozen(viewport_handle, layer_handle)
+    if prop == "color":
+        v = vp_table.get_property(layer_handle, viewport_handle, "color")
+        return v if v is not None else _live_prop(layer, "color", plotstyle_names=plotstyle_names)
+    if prop == "true_color":
+        v = vp_table.get_property(layer_handle, viewport_handle, "true_color")
+        return v if v is not None else _live_prop(layer, "true_color", plotstyle_names=plotstyle_names)
+    if prop == "lineweight_index":
+        v = vp_table.get_property(layer_handle, viewport_handle, "lineweight")
+        return v if v is not None else _live_prop(
+            layer, "lineweight_index", plotstyle_names=plotstyle_names
+        )
+    if prop in ("linetype_handle", "linetype"):
+        v = vp_table.get_property(layer_handle, viewport_handle, "linetype")
+        if v is not None:
+            return int(v) if prop == "linetype_handle" else v
+        return _live_prop(layer, prop, plotstyle_names=plotstyle_names)
+    if prop == "transparency":
+        v = vp_table.get_property(layer_handle, viewport_handle, "transparency")
+        return v if v is not None else _live_prop(
+            layer, "transparency", plotstyle_names=plotstyle_names
+        )
+    if prop == "plot_style":
+        v = vp_table.get_property(layer_handle, viewport_handle, "plot_style")
+        if v is not None and plotstyle_names is not None:
+            return plotstyle_names.get(int(v), v)
+        if v is not None:
+            return v
+        return _live_prop(layer, "plot_style", plotstyle_names=plotstyle_names)
+    return _live_prop(layer, prop, plotstyle_names=plotstyle_names)
+
+
+@dataclass
+class ViewportOverrideTable:
+    """Mutable in-memory VP Freeze + property overrides (V2a/V2b + V3-C).
+
+    Loaded from the live drawing; ``LayerState.apply(..., viewport=…)`` mutates
+    this table only (does not write DWG bytes or global ``Layer`` rows for the
+    VP-targeted channels).
+    """
+
+    #: viewport_handle → set of layer handles frozen in that VP
+    frozen_by_vp: dict[int, set[int]] = field(default_factory=dict)
+    #: (layer_handle, viewport_handle) → {property: value}
+    properties: dict[tuple[int, int], dict[str, Any]] = field(default_factory=dict)
+
+    def is_frozen(self, viewport_handle: int, layer_handle: int) -> bool:
+        return int(layer_handle) in self.frozen_by_vp.get(int(viewport_handle), set())
+
+    def get_property(
+        self, layer_handle: int, viewport_handle: int, prop: str
+    ) -> Any:
+        return self.properties.get((int(layer_handle), int(viewport_handle)), {}).get(prop)
+
+    def set_frozen(
+        self, viewport_handle: int, layer_handle: int, frozen: bool
+    ) -> None:
+        vp = int(viewport_handle)
+        lh = int(layer_handle)
+        bucket = self.frozen_by_vp.setdefault(vp, set())
+        if frozen:
+            bucket.add(lh)
+        else:
+            bucket.discard(lh)
+
+    def set_property(
+        self, layer_handle: int, viewport_handle: int, prop: str, value: Any
+    ) -> None:
+        key = (int(layer_handle), int(viewport_handle))
+        self.properties.setdefault(key, {})[prop] = value
+
+    def stats(self) -> dict[str, int]:
+        return {
+            "viewports_with_freeze": sum(1 for s in self.frozen_by_vp.values() if s),
+            "frozen_pairs": sum(len(s) for s in self.frozen_by_vp.values()),
+            "property_pairs": len(self.properties),
+            "property_cells": sum(len(d) for d in self.properties.values()),
+        }
+
+
+def build_viewport_override_table(path: str) -> ViewportOverrideTable:
+    """Load live VP freeze lists + LAYER xdict property overrides."""
+    table = ViewportOverrideTable()
+    for vp_h, handles in read_viewport_frozen_layers(path).items():
+        table.frozen_by_vp[int(vp_h)] = set(int(h) for h in handles)
+    for row in read_layer_vp_overrides(path):
+        table.set_property(
+            row["layer_handle"],
+            row["viewport_handle"],
+            row["property"],
+            row["value"],
+        )
+    return table
+
+
 @dataclass(frozen=True)
 class LayerState:
     name: str
@@ -264,8 +392,12 @@ class LayerState:
     entries: tuple[LayerStateEntry, ...]
     raw_header_groups: tuple[tuple[int, Any], ...]
     #: Group 290 when present (viewport-related flag from XRECORD header).
+    #: When False, restore is treated as global (not viewport-scoped). Calibrated as
+    #: "saved while a viewport was current" only when True is observed on a
+    #: fixture; see ``ezdwg_vplayer_scope.md``.
     current_viewport: Optional[bool] = None
-    #: Group 302 when present (filter / viewport code string).
+    #: Group 302 when present — opaque context string (not a filter name or
+    #: layout name). May be AEC layer-key style codes.
     viewport_code: Optional[str] = None
 
     def get(self, layer_name: str) -> Optional[LayerStateEntry]:
@@ -274,14 +406,36 @@ class LayerState:
                 return e
         return None
 
+    @property
+    def scope(self) -> str:
+        """Best-effort save scope from header group 290 only.
+
+        Returns
+        -------
+        ``\"viewport\"``
+            Group 290 is True.
+        ``\"global\"``
+            Group 290 is False.
+        ``\"unknown\"``
+            Group 290 absent.
+
+        Group 302 is **not** used for classification (opaque on current fixtures).
+        """
+        if self.current_viewport is True:
+            return "viewport"
+        if self.current_viewport is False:
+            return "global"
+        return "unknown"
+
     def diff(
         self,
         document: Any,
         *,
         properties: Optional[LayerStateMasks] = None,
         include_missing_in_state: bool = False,
+        viewport: Optional[int] = None,
     ) -> LayerStateDiff:
-        """Compare this state to ``document.layers``.
+        """Compare this state to ``document.layers`` (and optional VP overrides).
 
         Parameters
         ----------
@@ -292,6 +446,11 @@ class LayerState:
         include_missing_in_state:
             If True, live layers with no state entry are listed as
             ``missing_in_state`` (default off).
+        viewport:
+            When set to a viewport entity handle, freeze / color / linetype /
+            lineweight / transparency / plot_style are compared against
+            ``document.viewport_overrides`` for that VP (V3-C). Other flags
+            still compare to the global ``Layer`` table.
         """
         mask = properties if properties is not None else self.mask
         layers = document.layers
@@ -300,6 +459,22 @@ class LayerState:
         # Handle → name for live plot-style comparison (CTB often only "Normal").
         _doc_path = getattr(document, "decode_path", None) or getattr(document, "path", None)
         plotstyle_names = _plotstyle_handle_to_name_map(_doc_path)
+        vp_h = int(viewport) if viewport is not None else None
+        vp_table: Optional[ViewportOverrideTable] = None
+        if vp_h is not None:
+            vp_table = _document_viewport_overrides(document)
+
+        # Properties compared against VP override table when viewport= is set.
+        _VP_PROPS = {
+            "frozen",
+            "color",
+            "true_color",
+            "lineweight_index",
+            "linetype_handle",
+            "linetype",
+            "transparency",
+            "plot_style",
+        }
 
         for entry in self.entries:
             if entry.name is None:
@@ -327,14 +502,24 @@ class LayerState:
                 continue
 
             changes: dict[str, tuple[Any, Any]] = {}
+            layer_h = int(getattr(live, "handle", 0) or entry.layer_handle or 0)
             for prop, bit in _DIFF_PROP_MASK:
                 if not (mask & bit):
                     continue
                 if prop == "flags":
-                    # Raw state flags only — live Layer has no matching word.
                     continue
                 sv = _state_prop(entry, prop)
-                lv = _live_prop(live, prop, plotstyle_names=plotstyle_names)
+                if (
+                    vp_table is not None
+                    and vp_h is not None
+                    and prop in _VP_PROPS
+                    and layer_h
+                ):
+                    lv = _vp_live_prop(
+                        vp_table, live, layer_h, vp_h, prop, plotstyle_names=plotstyle_names
+                    )
+                else:
+                    lv = _live_prop(live, prop, plotstyle_names=plotstyle_names)
                 if _values_differ(sv, lv, prop=prop):
                     changes[prop] = (sv, lv)
 
@@ -368,6 +553,13 @@ class LayerState:
         }
         for de in diff_entries:
             summary[de.status] = summary.get(de.status, 0) + 1
+        # V3-B/C: skipped only when CURRENT_VIEWPORT is masked and no target VP.
+        summary["viewport_overrides_skipped"] = (
+            1
+            if (mask & LayerStateMasks.CURRENT_VIEWPORT) and vp_h is None
+            else 0
+        )
+        summary["viewport_overrides_applied"] = 1 if vp_h is not None else 0
 
         return LayerStateDiff(
             state_name=self.name,
@@ -383,8 +575,9 @@ class LayerState:
         properties: Optional[LayerStateMasks] = None,
         skip_missing: bool = True,
         dry_run: bool = False,
+        viewport: Optional[int] = None,
     ) -> LayerStateDiff:
-        """Restore masked properties onto ``document.layers`` (in memory only).
+        """Restore masked properties in memory (global layers and/or one VP).
 
         Does **not** write DWG/DXF bytes.
 
@@ -399,22 +592,33 @@ class LayerState:
         dry_run:
             If True, do not mutate; return the current ``diff`` under the
             same mask (preview of what would change).
+        viewport:
+            Viewport entity handle. When set (V3-C), freeze + color / linetype
+            / lineweight / transparency / plot_style are written into
+            ``document.viewport_overrides`` for that VP only. Global-only
+            flags (on, locked, plot, frozen_in_new_viewports) still update
+            ``document.layers``. When omitted and the mask includes
+            ``CURRENT_VIEWPORT``, those VP channels are skipped
+            (``viewport_overrides_skipped=1``).
 
         Returns
         -------
         LayerStateDiff
-            After a real apply, the post-apply diff (ideally few/no
-            ``changed`` rows for properties that had state values).
+            Post-apply diff under the same mask and ``viewport`` argument.
         """
         mask = properties if properties is not None else self.mask
         if dry_run:
-            return self.diff(document, properties=mask)
+            return self.diff(document, properties=mask, viewport=viewport)
 
-        from .layers import Layer  # local import: avoid cycles at module load
         from . import lineweight as _lineweight
 
         layers = document.layers
         plotstyle_by_name: Optional[dict[str, int]] = None
+        vp_h = int(viewport) if viewport is not None else None
+        vp_table: Optional[ViewportOverrideTable] = None
+        if vp_h is not None:
+            vp_table = _document_viewport_overrides(document)
+
         for entry in self.entries:
             if entry.name is None:
                 if skip_missing:
@@ -426,30 +630,97 @@ class LayerState:
                     continue
                 continue
 
+            layer_h = int(getattr(live, "handle", 0) or entry.layer_handle or 0)
+
+            # --- V3-C: VP-targeted channels ---
+            if vp_table is not None and vp_h is not None and layer_h:
+                if (mask & LayerStateMasks.FROZEN) and entry.frozen is not None:
+                    vp_table.set_frozen(vp_h, layer_h, bool(entry.frozen))
+                if (mask & LayerStateMasks.COLOR) and entry.color is not None:
+                    # Store ACI as positive; true color separate if present.
+                    vp_table.set_property(layer_h, vp_h, "color", abs(int(entry.color)))
+                if (mask & LayerStateMasks.COLOR) and entry.true_color is not None:
+                    vp_table.set_property(layer_h, vp_h, "true_color", int(entry.true_color))
+                if (mask & LayerStateMasks.LINE_TYPE) and entry.linetype_handle is not None:
+                    vp_table.set_property(
+                        layer_h, vp_h, "linetype", int(entry.linetype_handle)
+                    )
+                if (mask & LayerStateMasks.LINE_WEIGHT) and entry.lineweight_index is not None:
+                    idx = int(entry.lineweight_index)
+                    if idx == -3:
+                        idx = 31
+                    vp_table.set_property(layer_h, vp_h, "lineweight", idx)
+                if (mask & LayerStateMasks.TRANSPARENCY) and entry.transparency is not None:
+                    vp_table.set_property(
+                        layer_h, vp_h, "transparency", int(entry.transparency)
+                    )
+                if (mask & LayerStateMasks.PLOT_STYLE) and entry.plot_style is not None:
+                    if plotstyle_by_name is None:
+                        plotstyle_by_name = _plotstyle_name_to_handle_map(
+                            getattr(document, "decode_path", None)
+                            or getattr(document, "path", None)
+                        )
+                    h = plotstyle_by_name.get(entry.plot_style)
+                    if h is None:
+                        h = next(
+                            (
+                                v
+                                for k, v in plotstyle_by_name.items()
+                                if k.lower() == entry.plot_style.lower()
+                            ),
+                            None,
+                        )
+                    if h is not None and h != 0:
+                        vp_table.set_property(layer_h, vp_h, "plot_style", int(h))
+
+            # --- Global Layer updates (always for non-VP flags; only when no VP for VP channels) ---
             updates: dict[str, Any] = {}
             if (mask & LayerStateMasks.ON) and entry.on is not None:
                 updates["on"] = entry.on
-            if (mask & LayerStateMasks.FROZEN) and entry.frozen is not None:
+            if (
+                vp_table is None
+                and (mask & LayerStateMasks.FROZEN)
+                and entry.frozen is not None
+            ):
                 updates["frozen"] = entry.frozen
             if (mask & LayerStateMasks.LOCKED) and entry.locked is not None:
                 updates["locked"] = entry.locked
             if (mask & LayerStateMasks.PLOT) and entry.plot is not None:
                 updates["plot"] = entry.plot
-            if (mask & LayerStateMasks.COLOR) and entry.color is not None:
+            if (
+                vp_table is None
+                and (mask & LayerStateMasks.COLOR)
+                and entry.color is not None
+            ):
                 updates["color"] = abs(int(entry.color))
-            if (mask & LayerStateMasks.COLOR) and entry.true_color is not None:
+            if (
+                vp_table is None
+                and (mask & LayerStateMasks.COLOR)
+                and entry.true_color is not None
+            ):
                 tc = int(entry.true_color)
                 updates["true_color"] = tc
                 updates["rgb"] = ((tc >> 16) & 0xFF, (tc >> 8) & 0xFF, tc & 0xFF)
             if (mask & LayerStateMasks.NEW_VIEWPORT) and entry.frozen_in_new_viewports is not None:
                 updates["frozen_in_new_viewports"] = entry.frozen_in_new_viewports
-            if (mask & LayerStateMasks.LINE_TYPE) and entry.linetype_handle is not None:
+            if (
+                vp_table is None
+                and (mask & LayerStateMasks.LINE_TYPE)
+                and entry.linetype_handle is not None
+            ):
                 updates["ltype_handle"] = entry.linetype_handle
-            if (mask & LayerStateMasks.TRANSPARENCY) and entry.transparency is not None:
+            if (
+                vp_table is None
+                and (mask & LayerStateMasks.TRANSPARENCY)
+                and entry.transparency is not None
+            ):
                 updates["transparency"] = entry.transparency
-            if (mask & LayerStateMasks.LINE_WEIGHT) and entry.lineweight_index is not None:
+            if (
+                vp_table is None
+                and (mask & LayerStateMasks.LINE_WEIGHT)
+                and entry.lineweight_index is not None
+            ):
                 idx = int(entry.lineweight_index)
-                # Normalize default sentinels to table index 31 when needed
                 if idx == -3:
                     idx = 31
                 updates["lineweight_index"] = idx
@@ -459,15 +730,17 @@ class LayerState:
                     updates["lineweight_index_out_of_range"] = oob
                 except Exception:
                     pass
-            if (mask & LayerStateMasks.PLOT_STYLE) and entry.plot_style is not None:
-                # Resolve state plot-style string → live handle; skip if unknown.
+            if (
+                vp_table is None
+                and (mask & LayerStateMasks.PLOT_STYLE)
+                and entry.plot_style is not None
+            ):
                 if plotstyle_by_name is None:
                     plotstyle_by_name = _plotstyle_name_to_handle_map(
                         getattr(document, "decode_path", None) or getattr(document, "path", None)
                     )
                 h = plotstyle_by_name.get(entry.plot_style)
                 if h is None:
-                    # Case-insensitive fallback (AutoCAD names are usually exact)
                     h = next(
                         (
                             v
@@ -484,7 +757,7 @@ class LayerState:
             new_layer = replace(live, **updates)
             layers.replace_layer(new_layer)
 
-        return self.diff(document, properties=mask)
+        return self.diff(document, properties=mask, viewport=viewport)
 
     def resolution_stats(self) -> dict[str, int]:
         """Count named vs handle-only entries (live LAYER table only)."""
@@ -506,6 +779,7 @@ class LayerState:
             "description": self.description,
             "current_viewport": self.current_viewport,
             "viewport_code": self.viewport_code,
+            "scope": self.scope,
             "entries": [e.to_dict() for e in self.entries],
         }
 
@@ -541,6 +815,35 @@ class LayerStateTable:
             "unnamed": entries - named,
         }
 
+    def viewport_header_stats(self) -> dict[str, int]:
+        """Counts for groups 290/302 and derived ``scope`` (V1 dump aid)."""
+        scope_counts = {"global": 0, "viewport": 0, "unknown": 0}
+        vp290_true = vp290_false = vp290_none = 0
+        code_nonempty = 0
+        for s in self.states:
+            scope_counts[s.scope] = scope_counts.get(s.scope, 0) + 1
+            if s.current_viewport is True:
+                vp290_true += 1
+            elif s.current_viewport is False:
+                vp290_false += 1
+            else:
+                vp290_none += 1
+            if s.viewport_code and s.viewport_code not in ("", "0"):
+                code_nonempty += 1
+        return {
+            "states": len(self.states),
+            "group_290_true": vp290_true,
+            "group_290_false": vp290_false,
+            "group_290_absent": vp290_none,
+            "group_302_nonempty": code_nonempty,
+            "scope_global": scope_counts["global"],
+            "scope_viewport": scope_counts["viewport"],
+            "scope_unknown": scope_counts["unknown"],
+            "mask_current_viewport": sum(
+                1 for s in self.states if s.mask & LayerStateMasks.CURRENT_VIEWPORT
+            ),
+        }
+
     def __len__(self) -> int:
         return len(self.states)
 
@@ -569,7 +872,7 @@ def _decode_flags(
     When *flags* is None, all five values are None.
 
     Visibility is flags-only: negative ACI is a LAYER-table / DXF convention
-    and is **not** used here (never observed in state group 62 on ``multi-page AC1032 maps``).
+    and is **not** used here for state group 62 in current samples.
 
     Note: state-level ``LayerStateMasks`` (group 91) uses different bit
     meanings (which properties to restore), not this encoding.
@@ -754,7 +1057,7 @@ def build_layer_state_table(path: str) -> LayerStateTable:
     One ``LayerState`` per dictionary name that has a decoded XRECORD body.
     Order follows ``raw.decode_layer_state_names`` (dictionary order). Names
     present only in the dictionary with no resolvable body are skipped (after
-    fix-03 / feature-05 this does not occur on ``multi-page AC1032 maps``).
+    object-map fixes this does not occur on well-formed multi-page maps).
     """
     layer_names = _build_layer_name_map(path)
     linetype_names = _build_linetype_name_map(path)
@@ -787,3 +1090,74 @@ def build_layer_state_table(path: str) -> LayerStateTable:
             )
         )
     return LayerStateTable(states=tuple(states))
+
+
+
+def read_layer_vp_overrides(path: str) -> list[dict[str, Any]]:
+    """Decode LAYER xdict viewport property overrides (V2b).
+
+    Each row is a dict::
+
+        {
+          "layer_handle": int,
+          "layer_name": str,
+          "property": "color"|"linetype"|"lineweight"|"transparency"|"plot_style",
+          "viewport_handle": int,
+          "value": int,  # encoded color, ltype handle, lw index, alpha, or plotstyle handle
+        }
+
+    Source: ``ADSK_XREC_LAYER_*_OVR`` XRECORDs under each LAYER extension
+    dictionary (see ``ezdwg_vplayer_scope.md`` §13). Independent of layer
+    states; combine with ``read_viewport_frozen_layers`` for full live VP
+    visibility + display state.
+    """
+    fn = getattr(raw, "decode_layer_vp_overrides", None)
+    if fn is None:
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        for layer_h, layer_name, prop, vp_h, value in fn(str(path)):
+            rows.append(
+                {
+                    "layer_handle": int(layer_h),
+                    "layer_name": str(layer_name) if layer_name is not None else "",
+                    "property": str(prop),
+                    "viewport_handle": int(vp_h),
+                    "value": int(value),
+                }
+            )
+    except Exception:
+        return []
+    return rows
+
+
+def read_viewport_frozen_layers(path: str) -> dict[int, tuple[int, ...]]:
+    """Map viewport handle → frozen layer handles (live VPLAYER data).
+
+    Uses ``raw.decode_viewport_details`` field ``frozen_layer_handles``
+    (LibreDWG ``frozen_layers`` / DXF soft-pointers). Independent of layer
+    states; for state→viewport linking see V3-C in ``ezdwg_vplayer_scope.md``.
+
+    Returns
+    -------
+    dict
+        ``{viewport_handle: (layer_handle, ...)}`` — only viewports with a
+        non-empty freeze list are included when the list is empty we still
+        omit them to keep the map compact; call ``decode_viewport_details``
+        directly if empty lists matter.
+    """
+    out: dict[int, tuple[int, ...]] = {}
+    try:
+        for row in raw.decode_viewport_details(str(path)):
+            if not row:
+                continue
+            vp_h = int(row[0])
+            frozen = row[5] if len(row) > 5 else None
+            if not frozen:
+                continue
+            handles = tuple(int(h) for h in frozen if h)
+            if handles:
+                out[vp_h] = handles
+    except Exception:
+        pass
+    return out
