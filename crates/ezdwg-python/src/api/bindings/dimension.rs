@@ -178,7 +178,7 @@ fn decode_dimension_typed_row(
             spec.decode_entity,
         ) {
             Ok(entity) => entity,
-            Err(err) if best_effort => return Ok(None),
+            Err(_err) if best_effort => return Ok(None),
             Err(err) => return Err(to_py_err(err)),
         };
         match decode_dimension_style_and_block_handles(record, version, header) {

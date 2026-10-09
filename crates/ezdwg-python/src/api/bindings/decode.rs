@@ -216,12 +216,12 @@ pub fn list_object_headers(path: &str, limit: Option<usize>) -> PyResult<Vec<Obj
     for obj in index.objects.iter() {
         let record = match decoder.parse_object_record(obj.offset) {
             Ok(record) => record,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         let header = match parse_object_header_for_version(&record, decoder.version()) {
             Ok(header) => header,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         result.push((obj.handle.0, obj.offset, header.data_size, header.type_code));
@@ -249,12 +249,12 @@ pub fn list_object_headers_with_type(
     for obj in index.objects.iter() {
         let record = match decoder.parse_object_record(obj.offset) {
             Ok(record) => record,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         let header = match parse_object_header_for_version(&record, decoder.version()) {
             Ok(header) => header,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         let type_name = resolved_type_name(header.type_code, &dynamic_types);
@@ -909,12 +909,12 @@ pub fn list_object_headers_by_type(
     for obj in index.objects.iter() {
         let record = match decoder.parse_object_record(obj.offset) {
             Ok(record) => record,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         let header = match parse_object_header_for_version(&record, decoder.version()) {
             Ok(header) => header,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         let type_name = resolved_type_name(header.type_code, &dynamic_types);
@@ -3557,7 +3557,7 @@ pub fn decode_line_arc_circle_entities(
                 obj.handle.0,
             ) {
                 Ok(entity) => entity,
-                Err(err) if best_effort => continue,
+                Err(_err) if best_effort => continue,
                 Err(err) => return Err(to_py_err(err)),
             };
             lines.push((
@@ -3575,7 +3575,7 @@ pub fn decode_line_arc_circle_entities(
                 match decode_arc_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
                 {
                     Ok(entity) => entity,
-                    Err(err) if best_effort => continue,
+                    Err(_err) if best_effort => continue,
                     Err(err) => return Err(to_py_err(err)),
                 };
             arcs.push((
@@ -3596,7 +3596,7 @@ pub fn decode_line_arc_circle_entities(
                 obj.handle.0,
             ) {
                 Ok(entity) => entity,
-                Err(err) if best_effort => continue,
+                Err(_err) if best_effort => continue,
                 Err(err) => return Err(to_py_err(err)),
             };
             circles.push((
@@ -3712,7 +3712,7 @@ pub fn decode_text_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<Te
         let mut entity =
             match decode_text_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
                 Ok(entity) => entity,
-                Err(err) if best_effort => continue,
+                Err(_err) if best_effort => continue,
                 Err(err) => return Err(to_py_err(err)),
             };
         if is_r2010_plus_version(decoder.version()) {
@@ -4355,7 +4355,7 @@ pub fn decode_region_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
             obj.handle.0,
         ) {
             Ok(entity) => entity,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         let layer_handle = entity.layer_handle;
@@ -4410,7 +4410,7 @@ pub fn decode_3dsolid_entities(
             match decode_3dsolid_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
             {
                 Ok(entity) => entity,
-                Err(err) if best_effort => continue,
+                Err(_err) if best_effort => continue,
                 Err(err) => return Err(to_py_err(err)),
             };
         let layer_handle = entity.layer_handle;
@@ -4461,7 +4461,7 @@ pub fn decode_body_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<Bo
         let entity =
             match decode_body_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
                 Ok(entity) => entity,
-                Err(err) if best_effort => continue,
+                Err(_err) if best_effort => continue,
                 Err(err) => return Err(to_py_err(err)),
             };
         let layer_handle = entity.layer_handle;

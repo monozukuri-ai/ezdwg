@@ -196,7 +196,7 @@ fn decode_insert_entities_with_state(
             obj.handle.0,
         ) {
             Ok(entity) => entity,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         let resolved_block_handle = recover_insert_block_header_handle_r2010_plus(
@@ -405,7 +405,7 @@ fn decode_minsert_entities_with_state(
             debug_minsert,
         ) {
             Ok(entity) => entity,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         if let Some(reason) = _minsert_reasonableness_failure(&entity) {
@@ -673,7 +673,7 @@ fn decode_insert_owner_handles_impl(
             obj.handle.0,
         ) {
             Ok(entity) => entity,
-            Err(err) if best_effort => continue,
+            Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
         let resolved_block_handle = recover_insert_block_header_handle_r2010_plus(
