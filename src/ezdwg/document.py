@@ -5,10 +5,12 @@ import math
 import re
 from functools import lru_cache, cached_property
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Mapping
 
 from . import raw
 from .entity import Entity
+from .layer_states import LayerStateTable, build_layer_state_table
+from .layer_filters import LayerFilterTable, LayerFilterTree, build_layer_filter_table, build_layer_filter_tree
 from .layers import LayerTable, build_layer_table
 
 if TYPE_CHECKING:
@@ -151,11 +153,11 @@ _HEADER_VARIABLE_KEYS = (
 )
 
 
-def read(path: str) -> "Document":
+def read(path: str, lineweight_table: Mapping[int, int] | None = None) -> "Document":
     version = raw.detect_version(path)
     if version not in SUPPORTED_VERSIONS:
         raise ValueError(f"unsupported DWG version: {version}")
-    return Document(path=path, version=version)
+    return Document(path=path, version=version, lineweight_table=lineweight_table)
 
 
 def clear_decode_caches() -> None:
@@ -165,7 +167,18 @@ def clear_decode_caches() -> None:
     ``Document`` methods reuse the same native decoder results. Long-running
     batch converters can call this after finishing a document so those cached
     collections do not keep the complete source model alive.
+
+    Clears both:
+      - pure-Python ``@lru_cache`` helpers defined in this module (legacy;
+        do not add new ones -- prefer the shared Rust path-keyed cache in
+        ``bindings/cache.rs``), and
+      - the native decode cache exposed as ``raw.clear_decode_cache``
+        (LAYER table FIFO today; future tables share the same entry point).
     """
+    try:
+        raw.clear_decode_cache()
+    except Exception:
+        pass
     seen: set[int] = set()
     for value in tuple(globals().values()):
         cache_clear = getattr(value, "cache_clear", None)
@@ -181,6 +194,7 @@ class Document:
     version: str
     decode_path: str | None = None
     decode_version: str | None = None
+    lineweight_table: Mapping[int, int] | None = None
 
     def __post_init__(self) -> None:
         if self.decode_path is None:
@@ -242,11 +256,55 @@ class Document:
     def raw(self):
         return raw
 
-
     @cached_property
     def layers(self) -> LayerTable:
         return build_layer_table(self.decode_path or self.path, self.lineweight_table)
 
+    @cached_property
+    def layer_states(self) -> LayerStateTable:
+        """Named layer states (ACAD_LAYERSTATES), immutable snapshot."""
+        return build_layer_state_table(self.decode_path or self.path)
+
+    @cached_property
+    def layer_filters(self) -> LayerFilterTable:
+        """Named property layer filters (ACAD_LAYERFILTERS), immutable snapshot."""
+        return build_layer_filter_table(self.decode_path or self.path)
+
+    @cached_property
+    def layer_filter_tree(self) -> LayerFilterTree:
+        """Nested AcLy layer filters (ACLYDICTIONARY), immutable snapshot."""
+        return build_layer_filter_tree(self.decode_path or self.path)
+
+    def layer_filter(self, name: str):
+        """Return one property layer filter by name, or ``None``."""
+        return self.layer_filters.get(name)
+
+    def layer_state(self, name: str):
+        """Return one layer state by name, or ``None``."""
+        return self.layer_states.get(name)
+
+    def diff_layer_state(self, name: str, **kwargs):
+        """Compare a named layer state to this document's live layers.
+
+        Keyword arguments are forwarded to ``LayerState.diff``.
+        Raises ``KeyError`` if the state name is missing.
+        """
+        st = self.layer_states.get(name)
+        if st is None:
+            raise KeyError(name)
+        return st.diff(self, **kwargs)
+
+    def apply_layer_state(self, name: str, **kwargs):
+        """Apply a named layer state to this document's layers (in memory).
+
+        Keyword arguments are forwarded to ``LayerState.apply``.
+        Raises ``KeyError`` if the state name is missing.
+        Does not write DWG bytes.
+        """
+        st = self.layer_states.get(name)
+        if st is None:
+            raise KeyError(name)
+        return st.apply(self, **kwargs)
 
     def graph(self, limit: int | None = None) -> "DocumentGraph":
         from .graph import read_graph
@@ -2463,6 +2521,15 @@ def _build_dimension_common_dxf(
         "anonymous_block_handle": anonymous_block_handle,
     }
 
+
+# ---------------------------------------------------------------------------
+# Legacy path-keyed maps (pure Python @lru_cache).
+#
+# Do not add new @lru_cache helpers here. New table/entity metadata should
+# go through the shared Rust FileKey / PathFifoCache in bindings/cache.rs
+# (and raw.clear_decode_cache) so invalidation and clear_decode_caches() stay
+# consistent. These helpers remain until their maps are migrated.
+# ---------------------------------------------------------------------------
 
 @lru_cache(maxsize=32)
 def _present_supported_types(
