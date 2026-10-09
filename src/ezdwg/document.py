@@ -3,12 +3,13 @@ from __future__ import annotations
 import fnmatch
 import math
 import re
-from functools import lru_cache
+from functools import lru_cache, cached_property
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator
 
 from . import raw
 from .entity import Entity
+from .layers import LayerTable, build_layer_table
 
 if TYPE_CHECKING:
     from .graph import DocumentGraph
@@ -241,6 +242,12 @@ class Document:
     def raw(self):
         return raw
 
+
+    @cached_property
+    def layers(self) -> LayerTable:
+        return build_layer_table(self.decode_path or self.path, self.lineweight_table)
+
+
     def graph(self, limit: int | None = None) -> "DocumentGraph":
         from .graph import read_graph
 
@@ -279,38 +286,6 @@ class Document:
                     "dashes": list(dashes),
                 },
             )
-        return table
-
-    def layers(self) -> dict[str, dict[str, Any]]:
-        """Layer table by name.
-
-        Each entry holds ``handle``, ``color_index``, ``true_color`` and
-        ``linetype`` (the linetype name, ``None`` when it cannot be read).
-        A layer whose name cannot be read is listed as ``LAYER_<handle>``.
-
-        When the state of the layer can be read, the entry also holds
-        ``frozen``, ``off``, ``locked`` and ``plot`` (booleans) and
-        ``lineweight`` (DXF group 370: hundredths of a millimetre, -3 for the
-        default lineweight). A frozen or off layer is not displayed; ``plot`` is
-        ``False`` for a layer that is displayed but not plotted.
-        """
-        path = self.decode_path or self.path
-        colors = _layer_color_map(path)
-        linetype_names, layer_linetypes = _linetype_tables(path)
-        states = _layer_state_map(path)
-        table: dict[str, dict[str, Any]] = {}
-        for handle, name in _layer_names_by_handle(path).items():
-            index, true_color = colors.get(handle, (None, None))
-            entry = {
-                "handle": handle,
-                "color_index": index,
-                "true_color": true_color,
-                "linetype": linetype_names.get(layer_linetypes.get(handle)),
-            }
-            state = states.get(handle)
-            if state is not None:
-                entry.update(state)
-            table.setdefault(name or f"LAYER_{handle:X}", entry)
         return table
 
     def dimstyles(self) -> dict[str, dict[str, Any]]:
