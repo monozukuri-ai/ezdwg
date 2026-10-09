@@ -80,8 +80,11 @@ fn parse_object_map(bytes: &[u8], _config: &ParseConfig) -> Result<ObjectIndex> 
     let mut reader = ByteReader::new(bytes);
     let mut objects = Vec::new();
 
-    let mut last_handle: i64 = 0;
-    let mut last_offset: i64 = 0;
+    // Assigned at each Handles-page boundary before first use (absolute first
+    // handleoff/offset). Leave uninitialised so rustc does not warn about a
+    // dead initial write that is always overwritten.
+    let mut last_handle: i64;
+    let mut last_offset: i64;
     loop {
         if reader.remaining() < 2 {
             break;
@@ -105,10 +108,17 @@ fn parse_object_map(bytes: &[u8], _config: &ParseConfig) -> Result<ObjectIndex> 
         }
 
         let start = reader.tell();
-        if !_config.strict {
-            last_handle = 0;
-            last_offset = 0;
-        }
+        // Each Handles page encodes the first handleoff as an *absolute*
+        // handle (and the first offset as absolute). LibreDWG seeks by
+        // offset and then reads the body handle; when we materialise the
+        // map itself we must restart the handle accumulator at 0 per page
+        // or page-start absolute handleoffs are added on top of the
+        // previous page's last handle (observed on AC1032 multi-page AC1032 maps: from
+        // object 548 onward every map handle was wrong while offsets
+        // stayed exact).
+        last_handle = 0;
+        last_offset = 0;
+        let _ = _config;
 
         while (reader.tell() - start) < (section_size as u64 - 2) {
             let delta_handle = read_unsigned_modular_char(&mut reader)?;
@@ -230,26 +240,33 @@ mod tests {
     }
 
     #[test]
-    fn parse_multiblock_object_map_keeps_running_deltas() {
+    fn parse_multiblock_object_map_handle_and_offset_reset_per_block() {
+        // Each Handles page (≈2032 bytes) encodes the first handleoff as an
+        // absolute handle and the first offset as absolute. Within a page,
+        // both accumulate as signed/unsigned modular-char deltas. Verified
+        // against LibreDWG -v5 dumps of AC1032 multi-page AC1032 maps: continuing the handle
+        // accumulator across pages doubled absolute page-start handleoffs
+        // onto the previous page's last handle (object 548+).
         let bytes = vec![
             0x00, 0x06, // block 1: 2-byte header + 4-byte payload
             0x01, 0x0A, // +1, +10
             0x02, 0x04, // +2, +4
             0x00, 0x00, // crc
-            0x00, 0x06, // block 2: continue from previous handle/offset
-            0x07, 0x08, // +7, +8
+            0x00, 0x06, // block 2: handle + offset both restart at 0
+            0x07, 0x08, // abs 7, +8
             0x02, 0x03, // +2, +3
             0x00, 0x00, // crc
             0x00, 0x02, // terminator block
         ];
-        let mut config = ParseConfig::default();
-        config.strict = true;
+        let config = ParseConfig::default();
         let index = parse_object_map(&bytes, &config).expect("index");
         let refs: Vec<(u64, u32)> = index
             .objects
             .iter()
             .map(|obj| (obj.handle.0, obj.offset))
             .collect();
-        assert_eq!(refs, vec![(1, 10), (3, 14), (10, 22), (12, 25)]);
+        // handle: 1, 3, then reset -> 7, 9
+        // offset: 10, 14, then reset -> 8, 11
+        assert_eq!(refs, vec![(1, 10), (3, 14), (7, 8), (9, 11)]);
     }
 }

@@ -288,10 +288,10 @@ impl BitWriter {
         } else {
             ((64 - value.leading_zeros() as usize) + 7) / 8
         };
-        if counter > 4 {
+        if counter > 8 {
             return Err(DwgError::new(
                 ErrorKind::Unsupported,
-                format!("handle value exceeds 4-byte payload: {value}"),
+                format!("handle value exceeds 8-byte payload: {value}"),
             ));
         }
 
