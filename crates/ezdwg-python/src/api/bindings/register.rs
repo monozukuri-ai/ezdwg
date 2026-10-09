@@ -1,5 +1,6 @@
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(detect_version, module)?)?;
+    module.add_function(wrap_pyfunction!(clear_decode_cache, module)?)?;
     module.add_function(wrap_pyfunction!(write_ac1015_dwg, module)?)?;
     module.add_function(wrap_pyfunction!(write_ac1015_line_dwg, module)?)?;
     module.add_function(wrap_pyfunction!(list_section_locators, module)?)?;
@@ -21,7 +22,13 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_entity_styles, module)?)?;
     module.add_function(wrap_pyfunction!(decode_entity_placements, module)?)?;
     module.add_function(wrap_pyfunction!(decode_layer_colors, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_layer_flags, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_layer_color_details, module)?)?;
     module.add_function(wrap_pyfunction!(decode_layer_names, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_layer_handles, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_layer_eed, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_layer_state_names, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_layer_state_xrecords, module)?)?;
     module.add_function(wrap_pyfunction!(decode_linetypes, module)?)?;
     module.add_function(wrap_pyfunction!(decode_layer_linetypes, module)?)?;
     module.add_function(wrap_pyfunction!(decode_entity_linetypes, module)?)?;

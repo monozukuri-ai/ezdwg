@@ -1,10 +1,17 @@
 from functools import lru_cache
 
 from ._core import (
+    clear_decode_cache,
     decode_entity_placements,
     decode_entity_styles,
     decode_layer_colors,
+    decode_layer_flags,
+    decode_layer_color_details,
     decode_layer_names,
+    decode_layer_handles,
+    decode_layer_eed,
+    decode_layer_state_names,
+    decode_layer_state_xrecords,
     decode_linetypes,
     decode_layer_linetypes,
     decode_entity_linetypes,
@@ -104,6 +111,7 @@ from ._core import (
 from ._embedded_text import collect_unknown_embedded_text_entities
 
 __all__ = [
+    "clear_decode_cache",
     "decode_header_variables",
     "detect_version",
     "list_section_locators",
@@ -125,7 +133,13 @@ __all__ = [
     "decode_entity_placements",
     "decode_entity_styles",
     "decode_layer_colors",
+    "decode_layer_flags",
+    "decode_layer_color_details",
     "decode_layer_names",
+    "decode_layer_handles",
+    "decode_layer_eed",
+    "decode_layer_state_names",
+    "decode_layer_state_xrecords",
     "decode_linetypes",
     "decode_layer_linetypes",
     "decode_entity_linetypes",

@@ -1,9 +1,12 @@
+#![allow(dead_code)] // recovery helpers retained for parity with upstream layer paths
 #![allow(clippy::useless_conversion)] // Triggered by PyO3 #[pyfunction] wrapper expansion.
 
 include!("bindings/shared.rs");
+include!("bindings/cache.rs");
 include!("bindings/write.rs");
 include!("bindings/decode.rs");
 include!("bindings/layer.rs");
+include!("bindings/layer_states.rs");
 include!("bindings/linetype.rs");
 include!("bindings/dimension.rs");
 include!("bindings/polyline.rs");
