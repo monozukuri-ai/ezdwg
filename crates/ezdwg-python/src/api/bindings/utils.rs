@@ -1253,14 +1253,6 @@ fn normalize_recovered_mtext_text(text: String) -> String {
 }
 
 
-// Still used by the existing layer-color decoder until the full-record path lands.
-#[derive(Clone, Copy)]
-struct LayerColorParseVariant {
-    pre_flag_bits: u8,
-    post_flag_bits: u8,
-    pre_values_bits: u8,
-}
-
 fn skip_eed(reader: &mut BitReader<'_>) -> crate::core::result::Result<()> {
     let mut ext_size = reader.read_bs()?;
     while ext_size > 0 {
