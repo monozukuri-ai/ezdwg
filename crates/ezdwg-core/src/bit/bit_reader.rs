@@ -8,7 +8,7 @@ pub enum Endian {
     Big,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HandleRef {
     pub code: u8,
     pub counter: u8,
@@ -369,7 +369,10 @@ impl<'a> BitReader<'a> {
         let mut code = self.read_rc()?;
         let counter = code & 0x0F;
         code = (code & 0xF0) >> 4;
-        if counter > 4 {
+        // DWG handle payload is 0..=8 bytes (LibreDWG / ODA). Older ezdwg
+        // capped at 4, which rejects valid absolute refs on large-handle
+        // drawings (observed: "invalid handle counter 8" on AC1032 DICTIONARY).
+        if counter > 8 {
             return Err(DwgError::new(
                 ErrorKind::Format,
                 format!("invalid handle counter {counter}"),

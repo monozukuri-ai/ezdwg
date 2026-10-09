@@ -190,17 +190,19 @@ pub fn build_object_index(bytes: &[u8], config: &ParseConfig) -> Result<ObjectIn
                 valid_objects.push(object);
             }
         }
-        return Ok(ObjectIndex::from_objects(valid_objects));
+        let rebound = rebind_object_refs_to_body_handles(&objects_data, valid_objects, &version);
+        return Ok(ObjectIndex::from_objects(rebound));
     }
 
-    // Performance path for permissive mode: keep object-index construction linear
-    // and avoid eagerly reparsing every record here.
+    // Permissive path: filter by in-range offset, rebind map handles to body
+    // handles (hybrid identity), then R2010+ duplicate-handle selection.
     let max_offset = objects_data.len();
-    let objects = index
+    let objects: Vec<ObjectRef> = index
         .objects
         .into_iter()
         .filter(|object| (object.offset as usize) < max_offset)
         .collect();
+    let objects = rebind_object_refs_to_body_handles(&objects_data, objects, &version);
     let objects = match version {
         DwgVersion::R2010 | DwgVersion::R2013 | DwgVersion::R2018 => {
             select_best_r21_duplicate_handle_candidates(&objects_data, objects, version)
@@ -208,6 +210,68 @@ pub fn build_object_index(bytes: &[u8], config: &ParseConfig) -> Result<ObjectIn
         _ => objects,
     };
     Ok(ObjectIndex::from_objects(objects))
+}
+
+
+/// Read the absolute object handle from the body at `offset`.
+///
+/// Deterministic only: object-record framing, type code, then the leading
+/// handle field (`H`) that both common object data and common entity data
+/// place immediately after the type prefix on R2004+. No candidate scoring,
+/// no recovery scan. Returns `None` when framing/type/handle cannot be read
+/// or the handle is not an absolute (code 0) non-zero value — caller keeps
+/// the map handle in that case.
+pub(crate) fn peek_body_handle(objects_data: &[u8], offset: u32, version: &DwgVersion) -> Option<u64> {
+    let record = parse_object_record_owned(objects_data, offset).ok()?;
+    let mut reader = record.bit_reader();
+    match version {
+        DwgVersion::R2010 | DwgVersion::R2013 | DwgVersion::R2018 => {
+            let _handle_stream_size = reader.read_umc().ok()?;
+            let type_code = reader.read_ot_r2010().ok()?;
+            if type_code == 0 {
+                return None;
+            }
+            let href = reader.read_h().ok()?;
+            if href.code != 0 || href.value == 0 {
+                return None;
+            }
+            Some(href.value)
+        }
+        DwgVersion::R2004 | DwgVersion::R2007 => {
+            // R2000–R2007: BS type, RL bitsize, then object H.
+            let type_code = reader.read_bs().ok()?;
+            if type_code == 0 {
+                return None;
+            }
+            let _bitsize = reader.read_rl(Endian::Little).ok()?;
+            let href = reader.read_h().ok()?;
+            if href.code != 0 || href.value == 0 {
+                return None;
+            }
+            Some(href.value)
+        }
+        _ => None,
+    }
+}
+
+/// Replace each map-provisional handle with the body handle when the body
+/// yields a deterministic absolute H. Offsets are unchanged. This is the
+/// hybrid index: Handles section locates bytes; body H is the identity key.
+pub(crate) fn rebind_object_refs_to_body_handles(
+    objects_data: &[u8],
+    objects: Vec<ObjectRef>,
+    version: &DwgVersion,
+) -> Vec<ObjectRef> {
+    objects
+        .into_iter()
+        .map(|obj| match peek_body_handle(objects_data, obj.offset, version) {
+            Some(body) => ObjectRef {
+                handle: Handle(body),
+                offset: obj.offset,
+            },
+            None => obj,
+        })
+        .collect()
 }
 
 fn select_best_r21_duplicate_handle_candidates(
@@ -233,6 +297,8 @@ fn select_best_r21_duplicate_handle_candidates(
         }
     }
 
+    // Deterministic pick: total order on (parsed_ok, handle_match, type_ok,
+    // data_size_ok, lowest offset). No neighbor scoring, no max-offset bias.
     let mut selected_offsets: HashMap<u64, u32> = HashMap::with_capacity(grouped.len());
     for (handle, candidates) in grouped.iter() {
         if candidates.len() == 1 {
@@ -240,24 +306,26 @@ fn select_best_r21_duplicate_handle_candidates(
             continue;
         }
 
-        let mut best_score = i32::MIN;
-        let mut best_offset = candidates
+        let mut ranked: Vec<(R21DuplicateRank, u32)> = candidates
             .iter()
-            .map(|candidate| candidate.offset)
-            .max()
-            .unwrap_or(0);
-        for candidate in candidates.iter().copied() {
-            let score = score_r21_duplicate_handle_candidate(
-                candidate,
-                grouped.get(&(handle.saturating_sub(1))),
-                grouped.get(&(handle.saturating_add(1))),
-                &candidate_infos,
-            );
-            if score > best_score || (score == best_score && candidate.offset > best_offset) {
-                best_score = score;
-                best_offset = candidate.offset;
-            }
-        }
+            .copied()
+            .map(|candidate| {
+                let info = candidate_infos
+                    .get(&(candidate.handle.0, candidate.offset))
+                    .copied()
+                    .unwrap_or_default();
+                (
+                    r21_duplicate_rank(candidate, &info),
+                    candidate.offset,
+                )
+            })
+            .collect();
+        // Best rank first; within equal rank, lowest offset wins (stable).
+        ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let best_offset = ranked[0].1;
+
+        // Multiples: pick is fully determined by R21DuplicateRank + lowest offset.
+        let _ = ranked.len();
         selected_offsets.insert(*handle, best_offset);
     }
 
@@ -274,12 +342,36 @@ fn select_best_r21_duplicate_handle_candidates(
     out
 }
 
+/// Lexicographic rank for duplicate object-map rows. Higher is better.
+/// Tie-break is applied separately as lowest file offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct R21DuplicateRank {
+    parsed_ok: bool,
+    /// Decoded entity handle matches map handle (strong signal for entities).
+    handle_matches: bool,
+    /// Header type code is non-zero.
+    type_ok: bool,
+    /// Declared data_size is non-zero (consistent header).
+    data_size_ok: bool,
+}
+
+fn r21_duplicate_rank(object: ObjectRef, info: &R21DuplicateCandidateInfo) -> R21DuplicateRank {
+    let handle_matches = info
+        .decoded_common_entity_handle
+        .is_some_and(|h| h == object.handle.0);
+    R21DuplicateRank {
+        parsed_ok: info.parsed_ok,
+        handle_matches,
+        type_ok: info.parsed_ok && info.type_code != 0,
+        data_size_ok: info.parsed_ok && info.data_size > 0,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct R21DuplicateCandidateInfo {
     parsed_ok: bool,
     type_code: u16,
     data_size: u32,
-    class: ObjectClass,
     decoded_common_entity_handle: Option<u64>,
 }
 
@@ -289,7 +381,6 @@ impl Default for R21DuplicateCandidateInfo {
             parsed_ok: false,
             type_code: 0,
             data_size: 0,
-            class: ObjectClass::Unused,
             decoded_common_entity_handle: None,
         }
     }
@@ -313,105 +404,12 @@ fn inspect_r21_duplicate_handle_candidate(
         parsed_ok: true,
         type_code: header.type_code,
         data_size: header.data_size,
-        class: crate::objects::object_type_info(header.type_code).class,
         decoded_common_entity_handle: decode_r21_candidate_common_entity_handle(
             &record, &header, version,
         ),
     }
 }
 
-fn score_r21_duplicate_handle_candidate(
-    object: ObjectRef,
-    prev_candidates: Option<&Vec<ObjectRef>>,
-    next_candidates: Option<&Vec<ObjectRef>>,
-    candidate_infos: &HashMap<(u64, u32), R21DuplicateCandidateInfo>,
-) -> i32 {
-    let Some(info) = candidate_infos
-        .get(&(object.handle.0, object.offset))
-        .copied()
-    else {
-        return i32::MIN / 8;
-    };
-    if !info.parsed_ok {
-        return i32::MIN / 4;
-    }
-    let mut score = 0i32;
-    if info.type_code != 0 {
-        score += 32;
-    }
-    if info.data_size > 0 {
-        score += 8;
-    }
-
-    match info.class {
-        ObjectClass::Entity => score += 16,
-        ObjectClass::Object => score -= 8,
-        ObjectClass::Unused => {}
-    }
-
-    if let Some(decoded_handle) = info.decoded_common_entity_handle {
-        if decoded_handle == object.handle.0 {
-            score += 10_000;
-        } else if decoded_handle != 0 {
-            score -= 5_000;
-        }
-    }
-
-    score += score_r21_contiguous_layer_table_bonus(
-        object,
-        info.type_code,
-        prev_candidates,
-        next_candidates,
-        candidate_infos,
-    );
-
-    score
-}
-
-fn score_r21_contiguous_layer_table_bonus(
-    object: ObjectRef,
-    type_code: u16,
-    prev_candidates: Option<&Vec<ObjectRef>>,
-    next_candidates: Option<&Vec<ObjectRef>>,
-    candidate_infos: &HashMap<(u64, u32), R21DuplicateCandidateInfo>,
-) -> i32 {
-    if type_code != 0x33 {
-        return 0;
-    }
-
-    let mut matching_neighbors = 0;
-    if has_nearby_same_type_candidate(object.offset, type_code, prev_candidates, candidate_infos) {
-        matching_neighbors += 1;
-    }
-    if has_nearby_same_type_candidate(object.offset, type_code, next_candidates, candidate_infos) {
-        matching_neighbors += 1;
-    }
-
-    match matching_neighbors {
-        2 => 12_000,
-        1 => 6_000,
-        _ => 0,
-    }
-}
-
-fn has_nearby_same_type_candidate(
-    offset: u32,
-    type_code: u16,
-    candidates: Option<&Vec<ObjectRef>>,
-    candidate_infos: &HashMap<(u64, u32), R21DuplicateCandidateInfo>,
-) -> bool {
-    candidates.is_some_and(|rows| {
-        rows.iter().any(|candidate| {
-            candidate_infos
-                .get(&(candidate.handle.0, candidate.offset))
-                .is_some_and(|info| {
-                    info.parsed_ok
-                        && info.type_code == type_code
-                        && candidate.offset.abs_diff(offset) <= 256
-                })
-        })
-    })
-}
 
 fn decode_r21_candidate_common_entity_handle(
     record: &ObjectRecord<'_>,
@@ -1484,8 +1482,10 @@ fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<Object
     let mut reader = ByteReader::new(bytes);
     let mut objects = Vec::new();
 
-    let mut last_handle: i64 = 0;
-    let mut last_offset: i64 = 0;
+    // Set at each Handles-page boundary before first use (absolute first
+    // handleoff/offset). Uninitialised until then avoids unused_assignments.
+    let mut last_handle: i64;
+    let mut last_offset: i64;
     loop {
         if reader.remaining() < 2 {
             break;
@@ -1510,10 +1510,12 @@ fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<Object
         }
 
         let start = reader.tell();
-        if !config.strict {
-            last_handle = 0;
-            last_offset = 0;
-        }
+        // Each Handles page encodes the first handleoff as an *absolute*
+        // handle and the first offset as absolute. Reset both accumulators
+        // at the page boundary (AC1032 multi-page AC1032 maps: continuing the handle across
+        // pages doubled page-start absolute handleoffs from object 548 on).
+        last_handle = 0;
+        last_offset = 0;
 
         while (reader.tell() - start) < (section_size as u64 - 2) {
             let prev_handle = last_handle;
@@ -1543,7 +1545,9 @@ fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<Object
                     )
                     .with_offset(reader.tell()));
                 }
-                last_handle = prev_handle;
+                // A >4GB single jump is implausible for a real file rather
+                // than an ordinary signed-delta artifact, so this one is
+                // still skipped rather than pushed with a wrapped value.
                 last_offset = prev_offset;
                 continue;
             }
@@ -1621,6 +1625,14 @@ fn read_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
 
     Ok(value)
 }
+
+// Unsigned modular char (UMC) -- per LibreDWG's reference decoder
+// (src/decode.c:2572, read_2004_section_handles), the handle delta in each
+// object-map entry is read with this encoding, not the signed one below.
+// No sign bit: every byte's top bit is purely a continuation flag, and all
+// 7 remaining bits are magnitude, including in the final byte. Mirrors the
+// already-proven bit-level BitReader::read_umc (bit_reader.rs:322) at the
+// byte level.
 
 fn decompress_r18(src: &[u8], dst_size: usize) -> Result<Vec<u8>> {
     let mut dst = vec![0u8; dst_size];
@@ -2256,14 +2268,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_object_map_handles_keeps_running_deltas_across_blocks() {
+    fn parse_object_map_handles_resets_handle_and_offset_per_block() {
         let bytes = vec![
             0x00, 0x06, // block 1: 2-byte header + 4-byte payload
             0x01, 0x0A, // +1, +10
             0x02, 0x04, // +2, +4
             0x00, 0x00, // crc
-            0x00, 0x06, // block 2: continue from previous handle/offset
-            0x07, 0x08, // +7, +8
+            0x00, 0x06, // block 2: handle + offset both restart at 0
+            0x07, 0x08, // abs 7, +8
             0x02, 0x03, // +2, +3
             0x00, 0x00, // crc
             0x00, 0x02, // terminator section
@@ -2276,118 +2288,57 @@ mod tests {
             .iter()
             .map(|obj| (obj.handle.0, obj.offset))
             .collect();
-        assert_eq!(refs, vec![(1, 10), (3, 14), (10, 22), (12, 25)]);
+        // Handle and offset both reset per Handles page.
+        assert_eq!(refs, vec![(1, 10), (3, 14), (7, 8), (9, 11)]);
     }
 
     #[test]
-    fn contiguous_layer_candidates_receive_large_bonus() {
-        let prev = vec![ObjectRef {
-            handle: Handle(129),
-            offset: 40_275,
-        }];
-        let next = vec![ObjectRef {
-            handle: Handle(131),
-            offset: 40_393,
-        }];
-        let current = ObjectRef {
+    fn r21_duplicate_rank_prefers_parsed_and_handle_match() {
+        let object = ObjectRef {
             handle: Handle(130),
-            offset: 40_340,
+            offset: 100,
         };
-        let infos = HashMap::from([
-            (
-                (129, 40_275),
-                R21DuplicateCandidateInfo {
-                    parsed_ok: true,
-                    type_code: 0x33,
-                    data_size: 60,
-                    class: ObjectClass::Object,
-                    decoded_common_entity_handle: None,
-                },
-            ),
-            (
-                (130, 40_340),
-                R21DuplicateCandidateInfo {
-                    parsed_ok: true,
-                    type_code: 0x33,
-                    data_size: 48,
-                    class: ObjectClass::Object,
-                    decoded_common_entity_handle: None,
-                },
-            ),
-            (
-                (131, 40_393),
-                R21DuplicateCandidateInfo {
-                    parsed_ok: true,
-                    type_code: 0x33,
-                    data_size: 58,
-                    class: ObjectClass::Object,
-                    decoded_common_entity_handle: None,
-                },
-            ),
-        ]);
-
-        assert_eq!(
-            score_r21_contiguous_layer_table_bonus(current, 0x33, Some(&prev), Some(&next), &infos,),
-            12_000
-        );
+        let bad = R21DuplicateCandidateInfo::default();
+        let ok_no_match = R21DuplicateCandidateInfo {
+            parsed_ok: true,
+            type_code: 0x1F2,
+            data_size: 50,
+            decoded_common_entity_handle: Some(999),
+        };
+        let ok_match = R21DuplicateCandidateInfo {
+            parsed_ok: true,
+            type_code: 0x1F2,
+            data_size: 50,
+            decoded_common_entity_handle: Some(130),
+        };
+        assert!(r21_duplicate_rank(object, &ok_match) > r21_duplicate_rank(object, &ok_no_match));
+        assert!(r21_duplicate_rank(object, &ok_no_match) > r21_duplicate_rank(object, &bad));
     }
 
     #[test]
-    fn non_layer_candidates_do_not_receive_layer_table_bonus() {
-        let prev = vec![ObjectRef {
-            handle: Handle(129),
-            offset: 40_275,
-        }];
-        let next = vec![ObjectRef {
-            handle: Handle(131),
-            offset: 40_393,
-        }];
-        let current = ObjectRef {
-            handle: Handle(130),
-            offset: 40_340,
+    fn r21_duplicate_rank_tie_breaks_to_lowest_offset_via_sort() {
+        let a = ObjectRef {
+            handle: Handle(10),
+            offset: 200,
         };
-        let infos = HashMap::from([
-            (
-                (129, 40_275),
-                R21DuplicateCandidateInfo {
-                    parsed_ok: true,
-                    type_code: 0x33,
-                    data_size: 60,
-                    class: ObjectClass::Object,
-                    decoded_common_entity_handle: None,
-                },
-            ),
-            (
-                (130, 40_340),
-                R21DuplicateCandidateInfo {
-                    parsed_ok: true,
-                    type_code: 0x1F2,
-                    data_size: 685,
-                    class: ObjectClass::Entity,
-                    decoded_common_entity_handle: Some(130),
-                },
-            ),
-            (
-                (131, 40_393),
-                R21DuplicateCandidateInfo {
-                    parsed_ok: true,
-                    type_code: 0x33,
-                    data_size: 58,
-                    class: ObjectClass::Object,
-                    decoded_common_entity_handle: None,
-                },
-            ),
-        ]);
-
-        assert_eq!(
-            score_r21_contiguous_layer_table_bonus(
-                current,
-                0x1F2,
-                Some(&prev),
-                Some(&next),
-                &infos,
-            ),
-            0
-        );
+        let b = ObjectRef {
+            handle: Handle(10),
+            offset: 100,
+        };
+        let info = R21DuplicateCandidateInfo {
+            parsed_ok: true,
+            type_code: 0x33,
+            data_size: 40,
+            decoded_common_entity_handle: None,
+        };
+        assert_eq!(r21_duplicate_rank(a, &info), r21_duplicate_rank(b, &info));
+        // Selection sort order: equal rank → lower offset first when using
+        // b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)) after ranking best-first.
+        let mut ranked = vec![
+            (r21_duplicate_rank(a, &info), a.offset),
+            (r21_duplicate_rank(b, &info), b.offset),
+        ];
+        ranked.sort_by(|x, y| y.0.cmp(&x.0).then_with(|| x.1.cmp(&y.1)));
+        assert_eq!(ranked[0].1, 100);
     }
 }

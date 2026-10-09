@@ -155,6 +155,7 @@ pub fn build_object_index(bytes: &[u8], config: &ParseConfig) -> Result<ObjectIn
     let handles_data = load_named_section_data(bytes, config, "AcDb:Handles")?;
     let objects_data = load_objects_section_data(bytes, config)?;
     let index = parse_object_map_handles(&handles_data, config)?;
+    let version = crate::dwg::version::detect_version(bytes)?;
 
     if config.strict {
         let mut valid_objects = Vec::with_capacity(index.objects.len());
@@ -168,18 +169,20 @@ pub fn build_object_index(bytes: &[u8], config: &ParseConfig) -> Result<ObjectIn
                 valid_objects.push(object);
             }
         }
-        return Ok(ObjectIndex::from_objects(valid_objects));
+        let rebound =
+            crate::dwg::r2004::rebind_object_refs_to_body_handles(&objects_data, valid_objects, &version);
+        return Ok(ObjectIndex::from_objects(rebound));
     }
 
-    // Performance path for permissive mode: keep object-index construction linear
-    // and avoid eagerly reparsing every record here.
     let max_offset = objects_data.len();
-    let objects = index
+    let objects: Vec<_> = index
         .objects
         .into_iter()
         .filter(|object| (object.offset as usize) < max_offset)
         .collect();
-    Ok(ObjectIndex::from_objects(objects))
+    let rebound =
+        crate::dwg::r2004::rebind_object_refs_to_body_handles(&objects_data, objects, &version);
+    Ok(ObjectIndex::from_objects(rebound))
 }
 
 pub fn load_objects_section_data(bytes: &[u8], config: &ParseConfig) -> Result<Vec<u8>> {
@@ -513,7 +516,8 @@ fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<Object
     let mut objects = Vec::new();
 
     let mut last_handle: i64 = 0;
-    let mut last_offset: i64 = 0;
+    // Offset accumulator is reset every page before first use.
+    let mut last_offset: i64;
     loop {
         if reader.remaining() < 2 {
             break;
@@ -538,10 +542,8 @@ fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<Object
         }
 
         let start = reader.tell();
-        if !config.strict {
-            last_handle = 0;
-            last_offset = 0;
-        }
+        // Only offset resets at block boundary; handle counter is global.
+        last_offset = 0;
 
         while (reader.tell() - start) < (section_size as u64 - 2) {
             let prev_handle = last_handle;
@@ -571,7 +573,6 @@ fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<Object
                     )
                     .with_offset(reader.tell()));
                 }
-                last_handle = prev_handle;
                 last_offset = prev_offset;
                 continue;
             }
@@ -649,6 +650,7 @@ fn read_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
 
     Ok(value)
 }
+
 
 fn read_header_data(bytes: &[u8]) -> Result<HeaderData> {
     if bytes.len() < SECOND_HEADER_OFFSET + SECOND_HEADER_RS_SIZE {
@@ -1416,7 +1418,7 @@ fn copy_bytes_direct(
 }
 
 fn decode_utf16_string(bytes: &[u8]) -> Result<String> {
-    if !bytes.len().is_multiple_of(2) {
+    if bytes.len() % 2 != 0 {
         return Err(DwgError::new(
             ErrorKind::Format,
             "R2007 UTF-16 section name has odd byte length",
@@ -1758,6 +1760,8 @@ mod tests {
             .iter()
             .map(|obj| (obj.handle.0, obj.offset))
             .collect();
-        assert_eq!(refs, vec![(1, 10), (3, 14), (10, 22), (12, 25)]);
+        // Handle deltas continue across blocks; offset accumulator resets per block
+        // (LibreDWG read_*_section_handles).
+        assert_eq!(refs, vec![(1, 10), (3, 14), (10, 8), (12, 11)]);
     }
 }
