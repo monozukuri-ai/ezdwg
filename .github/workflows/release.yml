@@ -59,6 +59,10 @@ jobs:
             python-version: "3.10"
             manylinux: 2014
             artifact: linux
+          - os: ubuntu-24.04-arm
+            python-version: "3.10"
+            manylinux: 2014
+            artifact: linux-aarch64
           - os: windows-latest
             python-version: "3.10"
             manylinux: auto
@@ -85,6 +89,18 @@ jobs:
           command: build
           args: --release --out dist --compatibility pypi
           manylinux: ${{ matrix.manylinux }}
+      - name: Smoke test Linux aarch64 wheel
+        # verify-python runs on x86_64 only; check the native aarch64 wheel here.
+        if: matrix.artifact == 'linux-aarch64'
+        run: |
+          python -m venv .venv-smoke
+          .venv-smoke/bin/python -m pip install --upgrade pip
+          .venv-smoke/bin/python -m pip install --only-binary=:all: dist/*.whl
+          .venv-smoke/bin/python -m ezdwg --version
+          .venv-smoke/bin/python -m ezdwg inspect examples/data/line_2000.dwg
+          .venv-smoke/bin/python -m ezdwg inspect test_dwg/line_2007.dwg
+          .venv-smoke/bin/python -c "import platform, ezdwg; assert platform.machine() == 'aarch64'; doc = ezdwg.read('test_dwg/line_2007.dwg'); assert doc.version == 'AC1021'; assert doc.decode_version == 'AC1021'; assert sum(1 for _ in doc.modelspace().query('LINE')) == 1; print(doc.decode_version)"
+          .venv-smoke/bin/python examples/basic_read.py
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v5
         with:
