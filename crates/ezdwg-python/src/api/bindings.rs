@@ -4,6 +4,12 @@
 include!("bindings/shared.rs");
 include!("bindings/cache.rs");
 include!("bindings/write.rs");
+include!("bindings/write_blocks.rs");
+include!("bindings/write_polylines.rs");
+include!("bindings/write_splines.rs");
+include!("bindings/write_polyline_metadata.rs");
+include!("bindings/write_metadata.rs");
+include!("bindings/write_block_metadata.rs");
 include!("bindings/decode.rs");
 include!("bindings/layer.rs");
 include!("bindings/dict_xrecord.rs");

@@ -22,7 +22,7 @@ pub struct Vertex2dEntity {
 
 pub fn decode_vertex_2d(reader: &mut BitReader<'_>) -> Result<Vertex2dEntity> {
     let header = parse_common_entity_header(reader)?;
-    decode_vertex_2d_with_header(reader, header, false, false)
+    decode_vertex_2d_with_header(reader, header, false, false, false)
 }
 
 /// R13/R14: the body is the one of R2000; only the common entity data differs.
@@ -31,12 +31,12 @@ pub fn decode_vertex_2d_r14(
     object_handle: u64,
 ) -> Result<Vertex2dEntity> {
     let header = parse_common_entity_header_r14_with_handle(reader, object_handle)?;
-    decode_vertex_2d_with_header(reader, header, true, false)
+    decode_vertex_2d_with_header(reader, header, true, false, false)
 }
 
 pub fn decode_vertex_2d_r2007(reader: &mut BitReader<'_>) -> Result<Vertex2dEntity> {
     let header = parse_common_entity_header_r2007(reader)?;
-    decode_vertex_2d_with_header(reader, header, true, true)
+    decode_vertex_2d_with_header(reader, header, true, true, false)
 }
 
 pub fn decode_vertex_2d_r2010(
@@ -46,7 +46,7 @@ pub fn decode_vertex_2d_r2010(
 ) -> Result<Vertex2dEntity> {
     let mut header = parse_common_entity_header_r2010(reader, object_data_end_bit)?;
     header.handle = object_handle;
-    decode_vertex_2d_with_header(reader, header, true, true)
+    decode_vertex_2d_with_header(reader, header, true, true, true)
 }
 
 pub fn decode_vertex_2d_r2013(
@@ -56,7 +56,7 @@ pub fn decode_vertex_2d_r2013(
 ) -> Result<Vertex2dEntity> {
     let mut header = parse_common_entity_header_r2013(reader, object_data_end_bit)?;
     header.handle = object_handle;
-    decode_vertex_2d_with_header(reader, header, true, true)
+    decode_vertex_2d_with_header(reader, header, true, true, true)
 }
 
 fn decode_vertex_2d_with_header(
@@ -64,6 +64,7 @@ fn decode_vertex_2d_with_header(
     header: CommonEntityHeader,
     allow_handle_decode_failure: bool,
     r2007_layer_only: bool,
+    has_vertex_id: bool,
 ) -> Result<Vertex2dEntity> {
     // Flags are an "EC" (raw char, NOT bit-pair-coded) in the DWG spec for
     // VERTEX(2D), like VERTEX(3D). Reading a raw short here shifted every
@@ -80,6 +81,9 @@ fn decode_vertex_2d_with_header(
     };
 
     let bulge = reader.read_bd()?;
+    if has_vertex_id {
+        let _vertex_id = reader.read_bl()?;
+    }
     let tangent_dir = reader.read_bd()?;
 
     // Handles are stored in the handle stream at obj_size bit offset.

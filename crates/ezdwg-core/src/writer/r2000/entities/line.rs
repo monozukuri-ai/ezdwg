@@ -5,23 +5,15 @@ use super::common::{encode_entity_payload, CommonEntityEncodeInput};
 
 #[derive(Debug, Clone, Copy)]
 pub struct LineEncodeInput {
-    pub handle: u64,
-    pub owner_handle: u64,
-    pub layer_handle: u64,
-    pub color_index: u8,
+    pub common: CommonEntityEncodeInput,
     pub start: (f64, f64, f64),
     pub end: (f64, f64, f64),
 }
 
 pub fn encode_line_entity_payload(input: LineEncodeInput) -> Result<Vec<u8>> {
-    let common = CommonEntityEncodeInput {
-        handle: input.handle,
-        owner_handle: input.owner_handle,
-        layer_handle: input.layer_handle,
-        color_index: input.color_index,
-    };
+    let common = input.common;
     encode_entity_payload(0x13, common, |writer| {
-        write_line_geometry(writer, input.start, input.end)
+        write_line_geometry(writer, input.start, input.end, input)
     })
 }
 
@@ -29,6 +21,7 @@ fn write_line_geometry(
     writer: &mut BitWriter,
     start: (f64, f64, f64),
     end: (f64, f64, f64),
+    input: LineEncodeInput,
 ) -> Result<()> {
     let z_is_zero = start.2 == 0.0 && end.2 == 0.0;
     writer.write_b(if z_is_zero { 1 } else { 0 })?;
@@ -40,7 +33,11 @@ fn write_line_geometry(
         writer.write_rd(Endian::Little, start.2)?;
         writer.write_dd(start.2, end.2)?;
     }
-    writer.write_bt(0.0)?; // thickness
-    writer.write_be(0.0, 0.0, 1.0)?; // extrusion
+    writer.write_bt(input.common.formatting.thickness)?; // thickness
+    writer.write_be(
+        input.common.formatting.extrusion.0,
+        input.common.formatting.extrusion.1,
+        input.common.formatting.extrusion.2,
+    )?; // extrusion
     Ok(())
 }

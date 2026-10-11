@@ -105,7 +105,7 @@ fn decode_spline_with_header(
     is_r2013_plus: bool,
 ) -> Result<SplineEntity> {
     let data_start = reader.get_pos();
-    let scenario = reader.read_bl()?;
+    let stored_scenario = reader.read_bl()?;
     let spline_flags1 = if is_r2013_plus {
         Some(reader.read_bl()?)
     } else {
@@ -116,6 +116,9 @@ fn decode_spline_with_header(
     } else {
         None
     };
+    // R2013+ uses knot parameterization and the fit-data bit to choose the
+    // body layout; the stored scenario can still be 1 for a fit body.
+    let scenario = effective_scenario(stored_scenario, spline_flags1, knot_parameter);
     let degree = reader.read_bl()?;
 
     let prefer_mode = if scenario == 2 {
@@ -224,6 +227,14 @@ fn parse_spline_data(
     }
 }
 
+fn effective_scenario(stored: u32, flags: Option<u32>, parameter: Option<u32>) -> u32 {
+    match flags {
+        Some(flags) if flags & 8 != 0 && parameter != Some(15) => 2,
+        Some(_) => 1,
+        None => stored,
+    }
+}
+
 fn parse_spline_control_data(
     reader: &mut BitReader<'_>,
     scenario: u32,
@@ -238,7 +249,7 @@ fn parse_spline_control_data(
     let ctrl_tolerance = Some(reader.read_bd()?);
     let num_knots = bounded_count(reader.read_bl()?, "spline knots")?;
     let num_ctrl = bounded_count(reader.read_bl()?, "spline control points")?;
-    let _weight_echo = reader.read_b()?;
+    let weighted = reader.read_b()? != 0;
 
     let mut knots = Vec::with_capacity(num_knots);
     for _ in 0..num_knots {
@@ -246,14 +257,14 @@ fn parse_spline_control_data(
     }
 
     let mut control_points = Vec::with_capacity(num_ctrl);
-    let mut weights = if rational {
+    let mut weights = if weighted {
         Vec::with_capacity(num_ctrl)
     } else {
         Vec::new()
     };
     for _ in 0..num_ctrl {
         control_points.push(reader.read_3bd()?);
-        if rational {
+        if weighted {
             weights.push(reader.read_bd()?);
         }
     }
@@ -429,4 +440,42 @@ fn lerp(p0: Point3, p1: Point3, t0: f64, t1: f64, t: f64) -> Point3 {
 fn points_equal(a: Point3, b: Point3) -> bool {
     const EPS: f64 = 1e-9;
     (a.0 - b.0).abs() < EPS && (a.1 - b.1).abs() < EPS && (a.2 - b.2).abs() < EPS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bit::BitWriter;
+
+    #[test]
+    fn r2013_fit_layout_uses_flags_and_parameter_not_stored_scenario() {
+        assert_eq!(effective_scenario(1, Some(9), Some(2)), 2);
+        assert_eq!(effective_scenario(1, Some(9), Some(0)), 2);
+        assert_eq!(effective_scenario(2, Some(9), Some(15)), 1);
+        assert_eq!(effective_scenario(2, Some(0), Some(0)), 1);
+        assert_eq!(effective_scenario(2, None, None), 2);
+    }
+
+    #[test]
+    fn explicit_weight_bit_controls_weight_consumption() {
+        let mut w = BitWriter::new();
+        w.write_b(0).unwrap(); // rational and weight-present are independent bits
+        w.write_b(0).unwrap();
+        w.write_b(0).unwrap();
+        w.write_bd(1e-7).unwrap();
+        w.write_bd(1e-7).unwrap();
+        w.write_bl(0).unwrap();
+        w.write_bl(2).unwrap();
+        w.write_b(1).unwrap();
+        for (x, weight) in [(1., 0.5), (2., 2.)] {
+            w.write_3bd(x, 3., 4.).unwrap();
+            w.write_bd(weight).unwrap();
+        }
+        let bytes = w.into_bytes();
+        let mut r = BitReader::new(&bytes);
+        let data = parse_spline_control_data(&mut r, 1, None, None, 1).unwrap();
+        assert!(!data.rational);
+        assert_eq!(data.control_points, vec![(1., 3., 4.), (2., 3., 4.)]);
+        assert_eq!(data.weights, vec![0.5, 2.]);
+    }
 }

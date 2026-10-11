@@ -9,6 +9,7 @@ const MAX_COMMON_ENTITY_REACTORS: u32 = 1 << 20;
 pub struct CommonEntityColor {
     pub index: Option<u16>,
     pub true_color: Option<u32>,
+    pub transparency: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +159,8 @@ pub fn lineweight_from_index(index: u8) -> Option<i16> {
 
 #[derive(Debug, Clone)]
 pub struct CommonEntityHandles {
+    pub previous: Option<u64>,
+    pub next: Option<u64>,
     pub owner_ref: Option<u64>,
     pub reactors: Vec<u64>,
     pub xdic_obj: Option<u64>,
@@ -522,11 +525,11 @@ fn parse_common_entity_header_fields_from_entmode(
                 color.true_color = Some(reader.read_bl()?);
             }
             if flags & 0x2000 != 0 {
-                let _transparency = reader.read_bl()?;
+                color.transparency = Some(reader.read_bl()?);
             }
         }
     } else {
-        let _color_unknown = reader.read_b()?;
+        color.index = Some(if reader.read_b()? == 0 { 0 } else { 256 });
     }
 
     let ltype_scale = reader.read_bd()?;
@@ -615,6 +618,7 @@ fn parse_common_entity_header_r13_r14_spec(
         color: CommonEntityColor {
             index: Some(color_index),
             true_color: None,
+            transparency: None,
         },
         entity_mode,
         num_of_reactors,
@@ -724,6 +728,7 @@ fn read_common_entity_color_cmc(reader: &mut BitReader<'_>) -> Result<CommonEnti
     Ok(CommonEntityColor {
         index: Some(color_index),
         true_color,
+        transparency: None,
     })
 }
 
@@ -1042,10 +1047,11 @@ pub fn parse_common_entity_handles(
         None
     };
 
+    let (mut previous, mut next) = (None, None);
     let links_before_layer = header.has_legacy_entity_links && !header.legacy_links_after_layer;
     if links_before_layer {
-        let _previous = read_handle_reference(reader, header.handle)?;
-        let _next = read_handle_reference(reader, header.handle)?;
+        previous = Some(read_handle_reference(reader, header.handle)?);
+        next = Some(read_handle_reference(reader, header.handle)?);
     }
 
     if header.has_color_handle {
@@ -1061,8 +1067,8 @@ pub fn parse_common_entity_handles(
     };
 
     if header.has_legacy_entity_links && header.legacy_links_after_layer {
-        let _previous = read_handle_reference(reader, header.handle)?;
-        let _next = read_handle_reference(reader, header.handle)?;
+        previous = Some(read_handle_reference(reader, header.handle)?);
+        next = Some(read_handle_reference(reader, header.handle)?);
     }
 
     let plotstyle = if header.plotstyle_flags == 3 {
@@ -1088,6 +1094,8 @@ pub fn parse_common_entity_handles(
     }
 
     Ok(CommonEntityHandles {
+        previous,
+        next,
         owner_ref,
         reactors,
         xdic_obj,

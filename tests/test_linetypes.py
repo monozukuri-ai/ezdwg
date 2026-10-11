@@ -179,8 +179,10 @@ def test_written_r2000_entities_keep_their_layer(tmp_path: Path) -> None:
     output = tmp_path / "roundtrip.dwg"
     ezdwg.read(str(source)).export_dwg(str(output))
 
-    (line,) = ezdwg.read(str(output)).modelspace().query("LINE")
-    # The writer puts every entity on its one layer, handle 2.
-    assert line.dxf["layer_handle"] == 2
+    doc = ezdwg.read(str(output))
+    (line,) = doc.modelspace().query("LINE")
+    # Handles are allocated around preserved entity handles. The reference must
+    # resolve to the actual standard layer, rather than a hard-coded placeholder.
+    assert doc.layers.by_handle(line.dxf["layer_handle"]).name == "0"
     assert line.dxf["linetype"] == "BYLAYER"
     assert line.dxf["linetype_scale"] == 1.0

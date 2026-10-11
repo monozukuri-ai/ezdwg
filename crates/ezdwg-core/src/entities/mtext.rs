@@ -14,6 +14,9 @@ use crate::entities::common::{
 
 #[derive(Debug, Clone)]
 pub struct MTextEntity {
+    pub style_handle: Option<u64>,
+    pub line_spacing_style: u16,
+    pub line_spacing_factor: f64,
     pub handle: u64,
     pub color_index: Option<u16>,
     pub true_color: Option<u32>,
@@ -51,6 +54,8 @@ pub(crate) struct EmbeddedMTextData {
 
 #[derive(Debug, Clone)]
 struct ParsedMTextBody {
+    line_spacing_style: u16,
+    line_spacing_factor: f64,
     insertion: (f64, f64, f64),
     extrusion: (f64, f64, f64),
     x_axis_dir: (f64, f64, f64),
@@ -90,6 +95,9 @@ pub fn decode_mtext_r14(reader: &mut BitReader<'_>, object_handle: u64) -> Resul
     let common_handles = parse_common_entity_handles(reader, &header)?;
 
     Ok(MTextEntity {
+        style_handle: read_handle_reference(reader, header.handle).ok(),
+        line_spacing_style: 1,
+        line_spacing_factor: 1.,
         handle: header.handle,
         color_index: header.color.index,
         true_color: header.color.true_color,
@@ -162,9 +170,9 @@ pub fn decode_mtext_exact(
     let mut background_color_index = None;
     let mut background_true_color = None;
     let mut background_transparency = None;
+    let line_spacing_style = reader.read_bs()?;
+    let line_spacing_factor = reader.read_bd()?;
     let background = (|| -> Result<(u32, Option<BackgroundFill>)> {
-        let _linespacing_style = reader.read_bs()?;
-        let _linespacing_factor = reader.read_bd()?;
         let _unknown_bit = reader.read_b()?;
         let flags = reader.read_bl()?;
         if (flags & 0x01) == 0 && (flags & 0x10) == 0 {
@@ -204,6 +212,9 @@ pub fn decode_mtext_exact(
     };
 
     Ok(MTextEntity {
+        style_handle: read_handle_reference(reader, header.handle).ok(),
+        line_spacing_style,
+        line_spacing_factor,
         handle: header.handle,
         color_index: header.color.index,
         true_color: header.color.true_color,
@@ -292,6 +303,9 @@ fn decode_mtext_with_header(
     };
 
     Ok(MTextEntity {
+        style_handle: read_handle_reference(reader, header.handle).ok(),
+        line_spacing_style: body.line_spacing_style,
+        line_spacing_factor: body.line_spacing_factor,
         handle: header.handle,
         color_index: header.color.index,
         true_color: header.color.true_color,
@@ -370,8 +384,8 @@ fn parse_mtext_body(
     } else {
         reader.read_tv()?
     };
-    let _linespacing_style = reader.read_bs()?;
-    let _linespacing_factor = reader.read_bd()?;
+    let line_spacing_style = reader.read_bs()?;
+    let line_spacing_factor = reader.read_bd()?;
     let _unknown_bit = reader.read_b()?;
 
     let mut background_flags = 0u32;
@@ -432,6 +446,8 @@ fn parse_mtext_body(
     }
 
     Ok(ParsedMTextBody {
+        line_spacing_style,
+        line_spacing_factor,
         insertion,
         extrusion,
         x_axis_dir,

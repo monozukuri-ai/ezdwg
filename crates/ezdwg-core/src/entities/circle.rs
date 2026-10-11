@@ -12,6 +12,8 @@ static R14_CIRCLE_PREFERRED_DELTA: AtomicU32 = AtomicU32::new(64);
 
 #[derive(Debug, Clone)]
 pub struct CircleEntity {
+    pub thickness: Option<f64>,
+    pub extrusion: Option<(f64, f64, f64)>,
     pub handle: u64,
     pub color_index: Option<u16>,
     pub true_color: Option<u32>,
@@ -91,8 +93,8 @@ fn decode_circle_with_header(
 ) -> Result<CircleEntity> {
     let center = reader.read_3bd()?;
     let radius = reader.read_bd()?;
-    let _thickness = reader.read_bt()?;
-    let _extrusion = reader.read_be()?;
+    let thickness = reader.read_bt()?;
+    let extrusion = reader.read_be()?;
     let (owner_handle, layer_handle) =
         match parse_common_entity_owner_and_layer_handle(reader, &header, r2007_layer_only) {
             Ok(owner_layer) => owner_layer,
@@ -109,6 +111,8 @@ fn decode_circle_with_header(
         };
 
     Ok(CircleEntity {
+        thickness: Some(thickness),
+        extrusion: Some(extrusion),
         handle: header.handle,
         color_index: header.color.index,
         true_color: header.color.true_color,
@@ -215,6 +219,8 @@ fn consider_circle_r14_delta(
         }
 
         let candidate = CircleEntity {
+            thickness: None,
+            extrusion: None,
             handle: object_handle,
             color_index: None,
             true_color: None,

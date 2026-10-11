@@ -480,10 +480,67 @@ pub fn decode_tv_bytes(bytes: &[u8], codepage: Option<u16>) -> String {
 
     if let Some(encoding) = dwg_codepage_encoding(codepage) {
         let (decoded, _, _) = encoding.decode(bytes);
-        return decoded.into_owned();
+        return decode_legacy_text_escapes(&decoded);
     }
 
     String::from_utf8_lossy(bytes).to_string()
+}
+
+/// AutoCAD legacy Unicode/MIF escapes, also emitted by ODA when saving names
+/// and MTEXT. Invalid sequences and escaped literal backslashes stay untouched.
+fn decode_legacy_text_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut tail = text;
+    while !tail.is_empty() {
+        let b = tail.as_bytes();
+        if tail.starts_with("\\\\") {
+            out.push_str("\\\\");
+            tail = &tail[2..];
+            continue;
+        }
+        if b.len() >= 7 && b.starts_with(b"\\U+") && b[3..7].iter().all(u8::is_ascii_hexdigit) {
+            let mut value = u32::from_str_radix(&tail[3..7], 16).unwrap();
+            let mut n = 7;
+            if (0xD800..=0xDBFF).contains(&value)
+                && b.len() >= 14
+                && b[7..].starts_with(b"\\U+")
+                && b[10..14].iter().all(u8::is_ascii_hexdigit)
+            {
+                let low = u32::from_str_radix(&tail[10..14], 16).unwrap();
+                if (0xDC00..=0xDFFF).contains(&low) {
+                    value = 0x10000 + ((value - 0xD800) << 10) + low - 0xDC00;
+                    n = 14;
+                }
+            }
+            if let Some(c) = char::from_u32(value) {
+                out.push(c);
+                tail = &tail[n..];
+                continue;
+            }
+        }
+        if b.len() >= 8 && b.starts_with(b"\\M+") && b[4..8].iter().all(u8::is_ascii_hexdigit) {
+            let cp = match b[3] {
+                b'1' => 38,
+                b'2' => 41,
+                b'3' => 40,
+                b'5' => 39,
+                _ => 0,
+            };
+            if let Some(encoding) = dwg_codepage_encoding(Some(cp)) {
+                let value = u16::from_str_radix(&tail[4..8], 16).unwrap().to_be_bytes();
+                let (decoded, _, errors) = encoding.decode(&value);
+                if !errors {
+                    out.push_str(&decoded);
+                    tail = &tail[8..];
+                    continue;
+                }
+            }
+        }
+        let c = tail.chars().next().unwrap();
+        out.push(c);
+        tail = &tail[c.len_utf8()..];
+    }
+    out
 }
 
 pub(crate) fn dwg_codepage_encoding(codepage: Option<u16>) -> Option<&'static Encoding> {
@@ -527,6 +584,21 @@ pub(crate) fn dwg_codepage_encoding(codepage: Option<u16>) -> Option<&'static En
 mod tests {
     use super::{BitReader, Endian};
     use crate::bit::BitWriter;
+
+    #[test]
+    fn legacy_text_escapes_survive_external_resave() {
+        use super::decode_tv_bytes;
+        assert_eq!(
+            decode_tv_bytes(br"\M+193FA\M+1967B\M+18CEA", Some(30)),
+            "日本語"
+        );
+        assert_eq!(
+            decode_tv_bytes(br"\U+65E5\U+672C\U+8A9E", Some(30)),
+            "日本語"
+        );
+        assert_eq!(decode_tv_bytes(br"\\M+193FA", Some(30)), r"\\M+193FA");
+        assert_eq!(decode_tv_bytes(br"\M+1ZZZZ", Some(30)), r"\M+1ZZZZ");
+    }
 
     #[test]
     fn read_tu_decodes_utf16_string() {

@@ -5,10 +5,7 @@ use super::common::{encode_entity_payload, CommonEntityEncodeInput};
 
 #[derive(Debug, Clone)]
 pub struct TextEncodeInput {
-    pub handle: u64,
-    pub owner_handle: u64,
-    pub layer_handle: u64,
-    pub color_index: u8,
+    pub common: CommonEntityEncodeInput,
     pub text: String,
     pub insertion: (f64, f64, f64),
     pub height: f64,
@@ -16,45 +13,68 @@ pub struct TextEncodeInput {
 }
 
 pub fn encode_text_entity_payload(input: &TextEncodeInput) -> Result<Vec<u8>> {
-    let common = CommonEntityEncodeInput {
-        handle: input.handle,
-        owner_handle: input.owner_handle,
-        layer_handle: input.layer_handle,
-        color_index: input.color_index,
-    };
+    let common = input.common;
     encode_entity_payload(0x01, common, |writer| write_text_body(writer, input))
 }
 
-fn write_text_body(writer: &mut BitWriter, input: &TextEncodeInput) -> Result<()> {
-    let has_elevation = input.insertion.2 != 0.0;
-    let has_rotation = input.rotation != 0.0;
-    let mut data_flags: u8 = 0;
-
-    if !has_elevation {
-        data_flags |= 0x01;
+pub(super) fn write_text_body(writer: &mut BitWriter, input: &TextEncodeInput) -> Result<()> {
+    let f = input.common.formatting;
+    let mut flags = 0u8;
+    if input.insertion.2 == 0. {
+        flags |= 1;
     }
-    data_flags |= 0x02; // no alignment point
-    data_flags |= 0x04; // oblique default
-    if !has_rotation {
-        data_flags |= 0x08;
+    if f.alignment.is_none() {
+        flags |= 2;
     }
-    data_flags |= 0x10; // width factor default
-    data_flags |= 0x20; // generation default
-    data_flags |= 0x40; // horizontal alignment default
-    data_flags |= 0x80; // vertical alignment default
-
-    writer.write_rc(data_flags)?;
-    if has_elevation {
+    if f.oblique == 0. {
+        flags |= 4;
+    }
+    if input.rotation == 0. {
+        flags |= 8;
+    }
+    if f.width_factor == 1. {
+        flags |= 16;
+    }
+    if f.generation == 0 {
+        flags |= 32;
+    }
+    if f.halign == 0 {
+        flags |= 64;
+    }
+    if f.valign == 0 {
+        flags |= 128;
+    }
+    writer.write_rc(flags)?;
+    if flags & 1 == 0 {
         writer.write_rd(Endian::Little, input.insertion.2)?;
     }
     writer.write_rd(Endian::Little, input.insertion.0)?;
     writer.write_rd(Endian::Little, input.insertion.1)?;
-    writer.write_be(0.0, 0.0, 1.0)?; // extrusion
-    writer.write_bt(0.0)?; // thickness
-    if has_rotation {
+    if let Some(p) = f.alignment {
+        writer.write_dd(input.insertion.0, p.0)?;
+        writer.write_dd(input.insertion.1, p.1)?;
+    }
+    writer.write_be(f.extrusion.0, f.extrusion.1, f.extrusion.2)?;
+    writer.write_bt(f.thickness)?;
+    if flags & 4 == 0 {
+        writer.write_rd(Endian::Little, f.oblique)?;
+    }
+    if flags & 8 == 0 {
         writer.write_rd(Endian::Little, input.rotation)?;
     }
     writer.write_rd(Endian::Little, input.height)?;
+    if flags & 16 == 0 {
+        writer.write_rd(Endian::Little, f.width_factor)?;
+    }
     writer.write_tv(&input.text)?;
+    if flags & 32 == 0 {
+        writer.write_bs(f.generation)?;
+    }
+    if flags & 64 == 0 {
+        writer.write_bs(f.halign)?;
+    }
+    if flags & 128 == 0 {
+        writer.write_bs(f.valign)?;
+    }
     Ok(())
 }

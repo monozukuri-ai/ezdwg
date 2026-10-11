@@ -2,6 +2,15 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(detect_version, module)?)?;
     module.add_function(wrap_pyfunction!(clear_decode_cache, module)?)?;
     module.add_function(wrap_pyfunction!(write_ac1015_dwg, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_write_geometry, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_mtext_write_properties, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_write_tables, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_write_blocks, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_write_polylines, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_write_splines, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_attribute_links, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_insert_write_properties, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_write_property_losses, module)?)?;
     module.add_function(wrap_pyfunction!(write_ac1015_line_dwg, module)?)?;
     module.add_function(wrap_pyfunction!(list_section_locators, module)?)?;
     module.add_function(wrap_pyfunction!(read_section_bytes, module)?)?;
@@ -14,11 +23,17 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(read_object_records_by_type, module)?)?;
     module.add_function(wrap_pyfunction!(read_object_records_by_handle, module)?)?;
     module.add_function(wrap_pyfunction!(read_object_records_by_offset, module)?)?;
-    module.add_function(wrap_pyfunction!(decode_object_entity_layer_handles, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        decode_object_entity_layer_handles,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(decode_object_handle_stream_refs, module)?)?;
     module.add_function(wrap_pyfunction!(decode_acis_candidate_infos, module)?)?;
     module.add_function(wrap_pyfunction!(decode_proxy_graphic_chunk_infos, module)?)?;
-    module.add_function(wrap_pyfunction!(decode_proxy_graphic_text_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        decode_proxy_graphic_text_entities,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(decode_entity_styles, module)?)?;
     module.add_function(wrap_pyfunction!(decode_entity_placements, module)?)?;
     module.add_function(wrap_pyfunction!(decode_layer_colors, module)?)?;

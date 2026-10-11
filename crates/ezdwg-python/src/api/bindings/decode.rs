@@ -2126,7 +2126,12 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
             }
             return Err(to_py_err(err));
         }
-        if matches_type_name(header.type_code, 0x13, "LINE", &dynamic_types) {
+        if matches_type_name(header.type_code, 7, "INSERT", &dynamic_types)
+            || matches_type_name(header.type_code, 0x0f, "POLYLINE_2D", &dynamic_types) {
+            if let Some((common, handles)) = decode_common_entity_header_and_handles(&record, decoder.version(), &header) {
+                result.push((obj.handle.0, common.color.index, common.color.true_color, handles.layer));
+            }
+        } else if matches_type_name(header.type_code, 0x13, "LINE", &dynamic_types) {
             let entity = match decode_line_for_version(
                 &mut reader,
                 decoder.version(),

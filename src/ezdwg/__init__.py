@@ -1,7 +1,8 @@
 from typing import Sequence
 
-from .convert import ConvertResult, WriteResult, to_dwg, to_dxf
+from .convert import ConvertResult, WriteDiagnostic, WriteResult, to_dwg, to_dxf
 from .document import Document, Layout, clear_decode_caches, read
+from .drawing import BlockLayout, BlockTable, Drawing, EditableLayout, new
 from .entity import Entity
 from .layers import Layer, LayerTable, LayerPropertyNotImplemented
 from .layer_states import (
@@ -28,6 +29,11 @@ from .render import plot
 
 __all__ = [
     "read",
+    "new",
+    "Drawing",
+    "BlockLayout",
+    "BlockTable",
+    "EditableLayout",
     "clear_decode_caches",
     "read_graph",
     "Document",
@@ -58,6 +64,7 @@ __all__ = [
     "to_dwg",
     "ConvertResult",
     "WriteResult",
+    "WriteDiagnostic",
     "raw",
 ]
 

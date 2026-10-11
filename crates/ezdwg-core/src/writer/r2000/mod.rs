@@ -1,16 +1,20 @@
+mod checksum;
 pub mod classes;
+mod database;
 pub mod entities;
+mod header;
 pub mod object_map;
 pub mod object_record;
 pub mod sections;
 
 use self::classes::encode_minimal_classes_section;
 use self::entities::{
-    encode_arc_entity_payload, encode_circle_entity_payload, encode_line_entity_payload,
-    encode_lwpolyline_entity_payload, encode_mtext_entity_payload, encode_point_entity_payload,
-    encode_ray_entity_payload, encode_text_entity_payload, encode_xline_entity_payload,
-    ArcEncodeInput, CircleEncodeInput, LineEncodeInput, LwPolylineEncodeInput, MTextEncodeInput,
-    PointEncodeInput, RayEncodeInput, TextEncodeInput, XLineEncodeInput,
+    encode_arc_entity_payload, encode_circle_entity_payload, encode_ellipse_entity_payload,
+    encode_line_entity_payload, encode_lwpolyline_entity_payload, encode_mtext_entity_payload,
+    encode_point_entity_payload, encode_ray_entity_payload, encode_text_entity_payload,
+    encode_xline_entity_payload, ArcEncodeInput, CircleEncodeInput, EllipseEncodeInput,
+    LineEncodeInput, LwPolylineEncodeInput, MTextEncodeInput, PointEncodeInput, RayEncodeInput,
+    TextEncodeInput, XLineEncodeInput,
 };
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
@@ -37,210 +41,465 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
         ));
     }
 
+    crate::writer::validation::validate_document(doc)?;
     let classes_section = encode_minimal_classes_section()?;
-    let mut allocator = HandleAllocator::new(0x10);
+    let mut allocator = HandleAllocator::new(1);
+    if config.preserve_input_handles {
+        for entity in doc.layouts().flatten() {
+            if let Some(h) = entity.common().handle {
+                allocator.reserve(h)?;
+            }
+            if let WriterEntity::Insert(insert) = entity {
+                for attr in &insert.attributes {
+                    if let Some(h) = attr.text.common.handle {
+                        allocator.reserve(h)?;
+                    }
+                }
+            }
+        }
+    }
+    let mut allocate = |h: Option<u64>| -> Result<u64> {
+        if config.preserve_input_handles {
+            if let Some(h) = h {
+                return Ok(h);
+            }
+        }
+        allocator.allocate()
+    };
+    let layout_handles: Vec<Vec<u64>> = doc
+        .layouts()
+        .map(|entities| {
+            entities
+                .iter()
+                .map(|e| allocate(e.common().handle))
+                .collect::<Result<_>>()
+        })
+        .collect::<Result<_>>()?;
+    let mut attribute_handles = std::collections::HashMap::new();
+    let mut polyline_handles = std::collections::HashMap::new();
+    for (entities, handles) in doc.layouts().zip(&layout_handles) {
+        for (e, &h) in entities.iter().zip(handles) {
+            if let WriterEntity::Polyline2d(poly) | WriterEntity::Polyline3d(poly) = e {
+                let vertices = poly
+                    .vertices
+                    .iter()
+                    .map(|_| allocate(None))
+                    .collect::<Result<Vec<_>>>()?;
+                polyline_handles.insert(h, (vertices, allocate(None)?));
+            }
+            if let WriterEntity::Insert(insert) = e {
+                let attrs = insert
+                    .attributes
+                    .iter()
+                    .map(|a| allocate(a.text.common.handle))
+                    .collect::<Result<Vec<_>>>()?;
+                let seqend = if attrs.is_empty() { 0 } else { allocate(None)? };
+                attribute_handles.insert(h, (attrs, seqend));
+            }
+        }
+    }
+    let database = database::DatabaseHandles::allocate(&mut allocator, doc)?;
     let mut record_rows: Vec<(ObjectRef, Vec<u8>)> = Vec::new();
 
-    for entity in &doc.modelspace {
-        match entity {
-            WriterEntity::Line(line) => {
-                let handle = resolve_handle(&mut allocator, line.common.handle, config)?;
-                let payload = encode_line_entity_payload(LineEncodeInput {
-                    handle,
-                    owner_handle: 1,
-                    layer_handle: 2,
-                    color_index: line.common.color_index.unwrap_or(7) as u8,
-                    start: line.start,
-                    end: line.end,
-                })?;
-                let record = encode_object_record(&payload)?;
-                record_rows.push((
-                    ObjectRef {
-                        handle: Handle(handle),
-                        offset: 0,
-                    },
-                    record,
-                ));
-            }
-            WriterEntity::Point(point) => {
-                let handle = resolve_handle(&mut allocator, point.common.handle, config)?;
-                let payload = encode_point_entity_payload(PointEncodeInput {
-                    handle,
-                    owner_handle: 1,
-                    layer_handle: 2,
-                    color_index: point.common.color_index.unwrap_or(7) as u8,
-                    location: point.location,
-                    x_axis_angle: point.x_axis_angle,
-                })?;
-                let record = encode_object_record(&payload)?;
-                record_rows.push((
-                    ObjectRef {
-                        handle: Handle(handle),
-                        offset: 0,
-                    },
-                    record,
-                ));
-            }
-            WriterEntity::Ray(ray) => {
-                let handle = resolve_handle(&mut allocator, ray.common.handle, config)?;
-                let payload = encode_ray_entity_payload(RayEncodeInput {
-                    handle,
-                    owner_handle: 1,
-                    layer_handle: 2,
-                    color_index: ray.common.color_index.unwrap_or(7) as u8,
-                    start: ray.start,
-                    unit_vector: ray.unit_vector,
-                })?;
-                let record = encode_object_record(&payload)?;
-                record_rows.push((
-                    ObjectRef {
-                        handle: Handle(handle),
-                        offset: 0,
-                    },
-                    record,
-                ));
-            }
-            WriterEntity::XLine(xline) => {
-                let handle = resolve_handle(&mut allocator, xline.common.handle, config)?;
-                let payload = encode_xline_entity_payload(XLineEncodeInput {
-                    handle,
-                    owner_handle: 1,
-                    layer_handle: 2,
-                    color_index: xline.common.color_index.unwrap_or(7) as u8,
-                    start: xline.start,
-                    unit_vector: xline.unit_vector,
-                })?;
-                let record = encode_object_record(&payload)?;
-                record_rows.push((
-                    ObjectRef {
-                        handle: Handle(handle),
-                        offset: 0,
-                    },
-                    record,
-                ));
-            }
-            WriterEntity::Arc(arc) => {
-                let handle = resolve_handle(&mut allocator, arc.common.handle, config)?;
-                let payload = encode_arc_entity_payload(ArcEncodeInput {
-                    handle,
-                    owner_handle: 1,
-                    layer_handle: 2,
-                    color_index: arc.common.color_index.unwrap_or(7) as u8,
-                    center: arc.center,
-                    radius: arc.radius,
-                    angle_start: arc.angle_start_rad,
-                    angle_end: arc.angle_end_rad,
-                })?;
-                let record = encode_object_record(&payload)?;
-                record_rows.push((
-                    ObjectRef {
-                        handle: Handle(handle),
-                        offset: 0,
-                    },
-                    record,
-                ));
-            }
-            WriterEntity::Circle(circle) => {
-                let handle = resolve_handle(&mut allocator, circle.common.handle, config)?;
-                let payload = encode_circle_entity_payload(CircleEncodeInput {
-                    handle,
-                    owner_handle: 1,
-                    layer_handle: 2,
-                    color_index: circle.common.color_index.unwrap_or(7) as u8,
-                    center: circle.center,
-                    radius: circle.radius,
-                })?;
-                let record = encode_object_record(&payload)?;
-                record_rows.push((
-                    ObjectRef {
-                        handle: Handle(handle),
-                        offset: 0,
-                    },
-                    record,
-                ));
-            }
-            WriterEntity::LwPolyline(poly) => {
-                let handle = resolve_handle(&mut allocator, poly.common.handle, config)?;
-                let payload = encode_lwpolyline_entity_payload(LwPolylineEncodeInput {
-                    handle,
-                    owner_handle: 1,
-                    layer_handle: 2,
-                    color_index: poly.common.color_index.unwrap_or(7) as u8,
-                    flags: poly.flags,
-                    vertices: poly.vertices.clone(),
-                    const_width: poly.const_width,
-                    bulges: poly.bulges.clone(),
-                    widths: poly.widths.clone(),
-                })?;
-                let record = encode_object_record(&payload)?;
-                record_rows.push((
-                    ObjectRef {
-                        handle: Handle(handle),
-                        offset: 0,
-                    },
-                    record,
-                ));
-            }
-            WriterEntity::Text(text) => {
-                let handle = resolve_handle(&mut allocator, text.common.handle, config)?;
-                let payload = encode_text_entity_payload(&TextEncodeInput {
-                    handle,
-                    owner_handle: 1,
-                    layer_handle: 2,
-                    color_index: text.common.color_index.unwrap_or(7) as u8,
-                    text: text.text.clone(),
-                    insertion: text.insert,
-                    height: text.height,
-                    rotation: text.rotation_rad,
-                })?;
-                let record = encode_object_record(&payload)?;
-                record_rows.push((
-                    ObjectRef {
-                        handle: Handle(handle),
-                        offset: 0,
-                    },
-                    record,
-                ));
-            }
-            WriterEntity::MText(mtext) => {
-                let handle = resolve_handle(&mut allocator, mtext.common.handle, config)?;
-                let payload = encode_mtext_entity_payload(&MTextEncodeInput {
-                    handle,
-                    owner_handle: 1,
-                    layer_handle: 2,
-                    color_index: mtext.common.color_index.unwrap_or(7) as u8,
-                    text: mtext.text.clone(),
-                    insertion: mtext.insert,
-                    text_direction: mtext.text_direction,
-                    rect_width: mtext.rect_width,
-                    text_height: mtext.char_height,
-                    attachment: mtext.attachment_point,
-                    drawing_dir: mtext.drawing_direction,
-                })?;
-                let record = encode_object_record(&payload)?;
-                record_rows.push((
-                    ObjectRef {
-                        handle: Handle(handle),
-                        offset: 0,
-                    },
-                    record,
-                ));
+    for (layout_index, (entities, handles)) in doc.layouts().zip(&layout_handles).enumerate() {
+        let owner = if layout_index == 0 {
+            database.model
+        } else {
+            database.blocks[&doc.blocks[layout_index - 1].name.to_uppercase()].0
+        };
+        for (i, entity) in entities.iter().enumerate() {
+            let handle = handles[i];
+            let previous_handle = i.checked_sub(1).map(|j| handles[j]).unwrap_or(0);
+            let next_handle = handles.get(i + 1).copied().unwrap_or(0);
+            let props = entity.common();
+            let common = entities::common::CommonEntityEncodeInput {
+                handle,
+                owner_handle: owner,
+                layer_handle: database.layer_handle(&props.layer_name)?,
+                previous_handle,
+                next_handle,
+                style_handle: database.style_handle(&props.style_name)?,
+                color_index: props.color_index.unwrap_or(256),
+                linetype_flags: match props.linetype.to_uppercase().as_str() {
+                    "" | "BYLAYER" => 0,
+                    "BYBLOCK" => 1,
+                    "CONTINUOUS" => 2,
+                    _ => 3,
+                },
+                linetype_handle: database.linetype_handle(&props.linetype)?,
+                codepage: doc.metadata.codepage,
+                formatting: props.formatting,
+            };
+            match entity {
+                WriterEntity::Line(line) => {
+                    let payload = encode_line_entity_payload(LineEncodeInput {
+                        common,
+                        start: line.start,
+                        end: line.end,
+                    })?;
+                    let record = encode_object_record(&payload)?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        record,
+                    ));
+                }
+                WriterEntity::Point(point) => {
+                    let payload = encode_point_entity_payload(PointEncodeInput {
+                        common,
+                        location: point.location,
+                        x_axis_angle: point.x_axis_angle,
+                    })?;
+                    let record = encode_object_record(&payload)?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        record,
+                    ));
+                }
+                WriterEntity::Ray(ray) => {
+                    let payload = encode_ray_entity_payload(RayEncodeInput {
+                        common,
+                        start: ray.start,
+                        unit_vector: ray.unit_vector,
+                    })?;
+                    let record = encode_object_record(&payload)?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        record,
+                    ));
+                }
+                WriterEntity::XLine(xline) => {
+                    let payload = encode_xline_entity_payload(XLineEncodeInput {
+                        common,
+                        start: xline.start,
+                        unit_vector: xline.unit_vector,
+                    })?;
+                    let record = encode_object_record(&payload)?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        record,
+                    ));
+                }
+                WriterEntity::Arc(arc) => {
+                    let payload = encode_arc_entity_payload(ArcEncodeInput {
+                        common,
+                        center: arc.center,
+                        radius: arc.radius,
+                        angle_start: arc.angle_start_rad,
+                        angle_end: arc.angle_end_rad,
+                    })?;
+                    let record = encode_object_record(&payload)?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        record,
+                    ));
+                }
+                WriterEntity::Circle(circle) => {
+                    let payload = encode_circle_entity_payload(CircleEncodeInput {
+                        common,
+                        center: circle.center,
+                        radius: circle.radius,
+                    })?;
+                    let record = encode_object_record(&payload)?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        record,
+                    ));
+                }
+                WriterEntity::Ellipse(ellipse) => {
+                    let payload = encode_ellipse_entity_payload(EllipseEncodeInput {
+                        common,
+                        center: ellipse.center,
+                        major_axis: ellipse.major_axis,
+                        axis_ratio: ellipse.axis_ratio,
+                        start_param: ellipse.start_param,
+                        end_param: ellipse.end_param,
+                    })?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        encode_object_record(&payload)?,
+                    ));
+                }
+                WriterEntity::Solid(face) | WriterEntity::Trace(face) => {
+                    let payload = entities::face::encode_planar_face_entity_payload(
+                        common,
+                        face.points,
+                        matches!(entity, WriterEntity::Trace(_)),
+                    )?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        encode_object_record(&payload)?,
+                    ));
+                }
+                WriterEntity::Spline(spline) => {
+                    let payload = entities::spline::encode_spline_entity_payload(common, spline)?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        encode_object_record(&payload)?,
+                    ));
+                }
+                WriterEntity::Face3d(face) => {
+                    let payload = entities::face::encode_3dface_entity_payload(
+                        common,
+                        face.points,
+                        face.invisible_edge_flags,
+                    )?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        encode_object_record(&payload)?,
+                    ));
+                }
+                WriterEntity::Polyline2d(poly) | WriterEntity::Polyline3d(poly) => {
+                    let is_3d = matches!(entity, WriterEntity::Polyline3d(_));
+                    let (vertices, seqend) = &polyline_handles[&handle];
+                    let payload = entities::polyline::encode_polyline(
+                        common, poly, is_3d, vertices, *seqend,
+                    )?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        encode_object_record(&payload)?,
+                    ));
+                    for (j, vertex) in poly.vertices.iter().enumerate() {
+                        let child = entities::common::CommonEntityEncodeInput {
+                            handle: vertices[j],
+                            owner_handle: handle,
+                            previous_handle: j.checked_sub(1).map(|k| vertices[k]).unwrap_or(0),
+                            next_handle: vertices.get(j + 1).copied().unwrap_or(0),
+                            color_index: 256,
+                            linetype_flags: 0,
+                            linetype_handle: 0,
+                            formatting: Default::default(),
+                            ..common
+                        };
+                        let payload = entities::polyline::encode_vertex(child, vertex, is_3d)?;
+                        record_rows.push((
+                            ObjectRef {
+                                handle: Handle(vertices[j]),
+                                offset: 0,
+                            },
+                            encode_object_record(&payload)?,
+                        ));
+                    }
+                    let child = entities::common::CommonEntityEncodeInput {
+                        handle: *seqend,
+                        owner_handle: handle,
+                        previous_handle: 0,
+                        next_handle: 0,
+                        color_index: 256,
+                        linetype_flags: 0,
+                        linetype_handle: 0,
+                        formatting: Default::default(),
+                        ..common
+                    };
+                    let payload = entities::common::encode_entity_payload(6, child, |_| Ok(()))?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(*seqend),
+                            offset: 0,
+                        },
+                        encode_object_record(&payload)?,
+                    ));
+                }
+                WriterEntity::LwPolyline(poly) => {
+                    let payload = encode_lwpolyline_entity_payload(LwPolylineEncodeInput {
+                        common,
+                        flags: poly.flags,
+                        vertices: poly.vertices.clone(),
+                        const_width: poly.const_width,
+                        bulges: poly.bulges.clone(),
+                        widths: poly.widths.clone(),
+                    })?;
+                    let record = encode_object_record(&payload)?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        record,
+                    ));
+                }
+                WriterEntity::Text(text) => {
+                    let payload = encode_text_entity_payload(&TextEncodeInput {
+                        common,
+                        text: text.text.clone(),
+                        insertion: text.insert,
+                        height: text.height,
+                        rotation: text.rotation_rad,
+                    })?;
+                    let record = encode_object_record(&payload)?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        record,
+                    ));
+                }
+                WriterEntity::MText(mtext) => {
+                    let payload = encode_mtext_entity_payload(&MTextEncodeInput {
+                        common,
+                        text: mtext.text.clone(),
+                        insertion: mtext.insert,
+                        text_direction: mtext.text_direction,
+                        rect_width: mtext.rect_width,
+                        text_height: mtext.char_height,
+                        attachment: mtext.attachment_point,
+                        drawing_dir: mtext.drawing_direction,
+                    })?;
+                    let record = encode_object_record(&payload)?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        record,
+                    ));
+                }
+                WriterEntity::Attdef(attr) => {
+                    let payload = entities::block::encode_attribute(common, attr, true)?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        encode_object_record(&payload)?,
+                    ));
+                }
+                WriterEntity::Attrib(_) => {
+                    unreachable!("standalone attributes rejected by validation")
+                }
+                WriterEntity::Insert(insert) => {
+                    let (attrs, seqend) = &attribute_handles[&handle];
+                    let block = database.blocks[&insert.block_name.to_uppercase()].0;
+                    let payload =
+                        entities::block::encode_insert(common, insert, block, attrs, *seqend)?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        encode_object_record(&payload)?,
+                    ));
+                    for (i, attr) in insert.attributes.iter().enumerate() {
+                        let c = &attr.text.common;
+                        let child = entities::common::CommonEntityEncodeInput {
+                            handle: attrs[i],
+                            owner_handle: handle,
+                            previous_handle: i.checked_sub(1).map(|j| attrs[j]).unwrap_or(0),
+                            next_handle: attrs.get(i + 1).copied().unwrap_or(0),
+                            layer_handle: database.layer_handle(&c.layer_name)?,
+                            color_index: c.color_index.unwrap_or(256),
+                            style_handle: database.style_handle(&c.style_name)?,
+                            linetype_flags: match c.linetype.to_uppercase().as_str() {
+                                "" | "BYLAYER" => 0,
+                                "BYBLOCK" => 1,
+                                "CONTINUOUS" => 2,
+                                _ => 3,
+                            },
+                            linetype_handle: database.linetype_handle(&c.linetype)?,
+                            formatting: c.formatting,
+                            ..common
+                        };
+                        let payload = entities::block::encode_attribute(child, attr, false)?;
+                        record_rows.push((
+                            ObjectRef {
+                                handle: Handle(attrs[i]),
+                                offset: 0,
+                            },
+                            encode_object_record(&payload)?,
+                        ));
+                    }
+                    if *seqend != 0 {
+                        let child = entities::common::CommonEntityEncodeInput {
+                            handle: *seqend,
+                            owner_handle: handle,
+                            previous_handle: 0,
+                            next_handle: 0,
+                            layer_handle: database.layer,
+                            formatting: Default::default(),
+                            linetype_flags: 0,
+                            color_index: 256,
+                            ..common
+                        };
+                        let payload =
+                            entities::common::encode_entity_payload(6, child, |_| Ok(()))?;
+                        record_rows.push((
+                            ObjectRef {
+                                handle: Handle(*seqend),
+                                offset: 0,
+                            },
+                            encode_object_record(&payload)?,
+                        ));
+                    }
+                }
             }
         }
     }
 
+    for (handle, payload) in database.objects(&layout_handles, doc)? {
+        record_rows.push((
+            ObjectRef {
+                handle: Handle(handle),
+                offset: 0,
+            },
+            encode_object_record(&payload)?,
+        ));
+    }
+    let handseed = record_rows
+        .iter()
+        .map(|(r, _)| r.handle.0)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| DwgError::new(ErrorKind::Unsupported, "handle space exhausted"))?;
+    let header_section = header::encode_header(&database, handseed, &doc.metadata)?;
     record_rows.sort_by_key(|(obj_ref, _)| obj_ref.handle.0);
 
-    let record_count = 2usize;
+    let record_count = 3usize;
     let directory_size = 0x15usize + 4 + record_count * 9 + 2 + SECTION_DIRECTORY_SENTINEL.len();
     let mut cursor = align_up(directory_size, 4);
 
+    let header_offset = cursor;
+    cursor += header_section.len();
     let classes_offset = cursor;
-    cursor = cursor.saturating_add(classes_section.len());
+    cursor = cursor.saturating_add(classes_section.len() + 0x200); // R13C3+ padding
     cursor = align_up(cursor, 4);
 
     for (obj_ref, record) in record_rows.iter_mut() {
-        obj_ref.offset = cursor as u32;
+        obj_ref.offset = u32::try_from(cursor)
+            .map_err(|_| DwgError::new(ErrorKind::Unsupported, "AC1015 file exceeds 4 GiB"))?;
         cursor = cursor.saturating_add(record.len());
     }
     cursor = align_up(cursor, 4);
@@ -250,10 +509,25 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
     let object_map_offset = cursor;
     cursor = cursor.saturating_add(object_map_section.len());
 
+    u32::try_from(cursor)
+        .map_err(|_| DwgError::new(ErrorKind::Unsupported, "AC1015 file exceeds 4 GiB"))?;
+
     let mut bytes = vec![0u8; cursor];
     bytes[0..6].copy_from_slice(b"AC1015");
+    bytes[0x0C] = 1;
+    bytes[0x11] = 0x17;
+    bytes[0x12] = 0x0F;
+    write_u16_le(&mut bytes, 0x13, doc.metadata.codepage);
     write_u32_le(&mut bytes, 0x15, record_count as u32);
     let mut entry_off = 0x15usize + 4;
+    write_section_record(
+        &mut bytes,
+        entry_off,
+        0,
+        header_offset as u32,
+        header_section.len() as u32,
+    );
+    entry_off += 9;
 
     write_section_record(
         &mut bytes,
@@ -272,11 +546,13 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
     );
     entry_off += 9;
 
-    write_u16_le(&mut bytes, entry_off, 0);
+    let crc = checksum::crc16(0, &bytes[..entry_off]) ^ 0xA598;
+    write_u16_le(&mut bytes, entry_off, crc);
     entry_off += 2;
     bytes[entry_off..entry_off + SECTION_DIRECTORY_SENTINEL.len()]
         .copy_from_slice(&SECTION_DIRECTORY_SENTINEL);
 
+    copy_section(&mut bytes, header_offset, &header_section)?;
     copy_section(&mut bytes, classes_offset, &classes_section)?;
     for (obj_ref, record) in &record_rows {
         copy_section(&mut bytes, obj_ref.offset as usize, record)?;
@@ -284,20 +560,6 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
     copy_section(&mut bytes, object_map_offset, &object_map_section)?;
 
     Ok(bytes)
-}
-
-fn resolve_handle(
-    allocator: &mut HandleAllocator,
-    requested: Option<u64>,
-    config: &WriterConfig,
-) -> Result<u64> {
-    if config.preserve_input_handles {
-        if let Some(handle) = requested {
-            allocator.reserve(handle)?;
-            return Ok(handle);
-        }
-    }
-    allocator.allocate()
 }
 
 fn align_up(value: usize, align: usize) -> usize {
@@ -380,6 +642,7 @@ mod tests {
                     layer_name: "0".to_string(),
                     color_index: Some(7),
                     true_color: None,
+                    ..CommonEntityProps::default()
                 },
                 start: (1.0, 2.0, 0.0),
                 end: (4.5, 7.0, 0.0),
@@ -395,8 +658,9 @@ mod tests {
 
         let decoder = Decoder::new(&bytes, ParseConfig::default()).expect("decoder");
         let index = decoder.build_object_index().expect("object index");
-        assert_eq!(index.len(), 1);
-        let obj_ref = index.objects[0];
+        let obj_ref = *index
+            .get(crate::objects::Handle(0x30))
+            .expect("written LINE");
         assert_eq!(obj_ref.handle.0, 0x30);
 
         let record = decoder
@@ -414,7 +678,16 @@ mod tests {
         assert_eq!(line.start, (1.0, 2.0, 0.0));
         assert_eq!(line.end, (4.5, 7.0, 0.0));
         assert_eq!(line.color_index, Some(7));
-        assert_eq!(line.layer_handle, 2);
+        let layer_ref = index
+            .get(crate::objects::Handle(line.layer_handle))
+            .expect("referenced layer exists");
+        let layer_record = decoder.parse_object_record(layer_ref.offset).unwrap();
+        assert_eq!(
+            object_header_r2000::parse_from_record(&layer_record)
+                .unwrap()
+                .type_code,
+            0x33
+        );
     }
 
     #[test]
@@ -428,6 +701,7 @@ mod tests {
                         layer_name: "0".to_string(),
                         color_index: Some(7),
                         true_color: None,
+                        ..CommonEntityProps::default()
                     },
                     center: (2.0, 3.0, 0.0),
                     radius: 5.0,
@@ -440,6 +714,7 @@ mod tests {
                         layer_name: "0".to_string(),
                         color_index: Some(7),
                         true_color: None,
+                        ..CommonEntityProps::default()
                     },
                     center: (4.0, 5.0, 0.0),
                     radius: 2.5,
@@ -450,6 +725,7 @@ mod tests {
                         layer_name: "0".to_string(),
                         color_index: Some(7),
                         true_color: None,
+                        ..CommonEntityProps::default()
                     },
                     flags: 1,
                     vertices: vec![(0.0, 0.0), (2.0, 0.0), (2.0, 1.0)],
@@ -463,6 +739,7 @@ mod tests {
                         layer_name: "0".to_string(),
                         color_index: Some(7),
                         true_color: None,
+                        ..CommonEntityProps::default()
                     },
                     text: "HELLO".to_string(),
                     insert: (1.5, 2.5, 0.0),
@@ -475,6 +752,7 @@ mod tests {
                         layer_name: "0".to_string(),
                         color_index: Some(7),
                         true_color: None,
+                        ..CommonEntityProps::default()
                     },
                     text: "MULTI".to_string(),
                     insert: (3.0, 4.0, 0.0),
@@ -490,6 +768,7 @@ mod tests {
                         layer_name: "0".to_string(),
                         color_index: Some(7),
                         true_color: None,
+                        ..CommonEntityProps::default()
                     },
                     location: (7.0, 8.0, 0.0),
                     x_axis_angle: 0.3,
@@ -500,6 +779,7 @@ mod tests {
                         layer_name: "0".to_string(),
                         color_index: Some(7),
                         true_color: None,
+                        ..CommonEntityProps::default()
                     },
                     start: (9.0, 1.0, 0.0),
                     unit_vector: (1.0, 0.0, 0.0),
@@ -510,6 +790,7 @@ mod tests {
                         layer_name: "0".to_string(),
                         color_index: Some(7),
                         true_color: None,
+                        ..CommonEntityProps::default()
                     },
                     start: (10.0, 2.0, 0.0),
                     unit_vector: (0.0, 1.0, 0.0),
@@ -521,7 +802,7 @@ mod tests {
         let bytes = write_document(&doc, &WriterConfig::default()).expect("write_document");
         let decoder = Decoder::new(&bytes, ParseConfig::default()).expect("decoder");
         let index = decoder.build_object_index().expect("object index");
-        assert_eq!(index.len(), 8);
+        assert!(index.len() > 8); // includes the database graph
 
         let mut seen_arc = false;
         let mut seen_circle = false;
@@ -558,7 +839,7 @@ mod tests {
                     let poly = decode_lwpolyline(&mut reader).expect("decode lwpolyline");
                     assert_eq!(poly.handle, 0x42);
                     assert_eq!(poly.vertices, vec![(0.0, 0.0), (2.0, 0.0), (2.0, 1.0)]);
-                    assert!(poly.flags & 1 != 0);
+                    assert!(poly.flags & 0x200 != 0);
                     seen_lwpolyline = true;
                 }
                 0x01 => {
@@ -600,7 +881,7 @@ mod tests {
                     assert_eq!(xline.unit_vector, (0.0, 1.0, 0.0));
                     seen_xline = true;
                 }
-                other => panic!("unexpected type_code: {other:#X}"),
+                _ => {} // symbol tables, dictionaries, layouts, BLOCK/ENDBLK
             }
         }
 

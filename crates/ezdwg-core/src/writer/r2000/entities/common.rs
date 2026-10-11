@@ -7,7 +7,14 @@ pub struct CommonEntityEncodeInput {
     pub handle: u64,
     pub owner_handle: u64,
     pub layer_handle: u64,
-    pub color_index: u8,
+    pub color_index: u16,
+    pub linetype_flags: u8,
+    pub linetype_handle: u64,
+    pub codepage: u16,
+    pub formatting: crate::writer::ir::EntityFormatting,
+    pub previous_handle: u64,
+    pub next_handle: u64,
+    pub style_handle: u64,
 }
 
 pub fn encode_entity_payload<F>(
@@ -18,25 +25,45 @@ pub fn encode_entity_payload<F>(
 where
     F: FnOnce(&mut BitWriter) -> Result<()>,
 {
+    encode_entity_payload_with_handles(type_code, common, write_body, &[])
+}
+
+pub fn encode_entity_payload_with_handles<F>(
+    type_code: u16,
+    common: CommonEntityEncodeInput,
+    write_body: F,
+    extra_handles: &[(u8, u64)],
+) -> Result<Vec<u8>>
+where
+    F: FnOnce(&mut BitWriter) -> Result<()>,
+{
     validate_common_input(common)?;
 
     let mut type_prefix = BitWriter::new();
     type_prefix.write_bs(type_code)?;
 
-    let mut pre_handle = BitWriter::new();
-    write_common_header_no_obj_size(
-        &mut pre_handle,
-        common.handle,
-        u16::from(common.color_index),
-    )?;
+    let mut pre_handle = BitWriter::with_codepage(common.codepage);
+    write_common_header_no_obj_size(&mut pre_handle, common)?;
     write_body(&mut pre_handle)?;
 
     let mut handle_stream = BitWriter::new();
-    handle_stream.write_h(0x02, common.owner_handle)?;
+    handle_stream.write_h(0x04, common.owner_handle)?;
     // R2000 always stores the xdictionary handle (null here); the "XDic Missing
     // Flag" that lets later versions omit it does not exist yet.
     handle_stream.write_h(0x03, 0)?;
-    handle_stream.write_h(0x02, common.layer_handle)?;
+    handle_stream.write_h(0x04, common.previous_handle)?;
+    handle_stream.write_h(0x04, common.next_handle)?;
+    handle_stream.write_h(0x05, common.layer_handle)?;
+    if common.linetype_flags == 3 {
+        handle_stream.write_h(5, common.linetype_handle)?;
+    }
+    if matches!(type_code, 0x01 | 0x02 | 0x03 | 0x2C) {
+        handle_stream.write_h(0x05, common.style_handle)?;
+    }
+
+    for &(code, h) in extra_handles {
+        handle_stream.write_h(code, h)?;
+    }
 
     let obj_size_bits = type_prefix
         .len_bits()
@@ -75,22 +102,21 @@ fn validate_common_input(input: CommonEntityEncodeInput) -> Result<()> {
 
 fn write_common_header_no_obj_size(
     writer: &mut BitWriter,
-    handle: u64,
-    color_index: u16,
+    common: CommonEntityEncodeInput,
 ) -> Result<()> {
-    writer.write_h(0x02, handle)?;
+    writer.write_h(0x00, common.handle)?;
     writer.write_bs(0)?; // ext_size
     writer.write_b(0)?; // graphic_present_flag
     writer.write_bb(0)?; // entity_mode
     writer.write_bl(0)?; // num_of_reactors
-    writer.write_b(1)?; // nolinks: no previous/next entity handles
-    writer.write_b(0)?; // color index as a bitshort: code 01 => one byte follows
-    writer.write_b(1)?;
-    writer.write_rc((color_index & 0xFF) as u8)?;
-    writer.write_bd(1.0)?; // ltype scale
-    writer.write_bb(0)?; // ltype_flags
-    writer.write_bb(0)?; // plotstyle_flags
-    writer.write_bs(0)?; // invisibility
-    writer.write_rc(0)?; // line weight
+    writer.write_b(0)?; // explicit previous/next handles, including null endpoints
+    writer.write_bs(common.color_index)?;
+    writer.write_bd(common.formatting.linetype_scale)?;
+    writer.write_bb(common.linetype_flags)?;
+    writer.write_bb(0)?; // plotstyle BYLAYER
+    writer.write_bs(u16::from(common.formatting.invisible))?;
+    writer.write_rc(crate::writer::validation::lineweight_index(
+        common.formatting.lineweight,
+    )?)?;
     Ok(())
 }

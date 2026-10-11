@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 
 mod api;
+mod atomic_write;
 
 pub use ezdwg_core::{bit, container, core, dwg, embedded_text, entities, io, objects, writer};
 

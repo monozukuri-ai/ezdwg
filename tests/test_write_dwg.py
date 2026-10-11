@@ -8,7 +8,6 @@ import ezdwg
 import ezdwg.cli as cli_module
 import ezdwg.document as document_module
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLES = ROOT / "test_dwg"
 
@@ -172,8 +171,13 @@ def test_to_dwg_writes_arc_from_source_sample(tmp_path: Path) -> None:
     out_arc = next(out_doc.modelspace().query("ARC"))
     assert out_arc.dxf["center"] == src_arc.dxf["center"]
     assert abs(float(out_arc.dxf["radius"]) - float(src_arc.dxf["radius"])) < 1.0e-9
-    assert abs(float(out_arc.dxf["start_angle"]) - float(src_arc.dxf["start_angle"])) < 1.0e-9
-    assert abs(float(out_arc.dxf["end_angle"]) - float(src_arc.dxf["end_angle"])) < 1.0e-9
+    assert (
+        abs(float(out_arc.dxf["start_angle"]) - float(src_arc.dxf["start_angle"]))
+        < 1.0e-9
+    )
+    assert (
+        abs(float(out_arc.dxf["end_angle"]) - float(src_arc.dxf["end_angle"])) < 1.0e-9
+    )
 
 
 def test_to_dwg_writes_circle_from_source_sample(tmp_path: Path) -> None:
@@ -192,7 +196,9 @@ def test_to_dwg_writes_circle_from_source_sample(tmp_path: Path) -> None:
     out_doc = ezdwg.read(str(output))
     out_circle = next(out_doc.modelspace().query("CIRCLE"))
     assert out_circle.dxf["center"] == src_circle.dxf["center"]
-    assert abs(float(out_circle.dxf["radius"]) - float(src_circle.dxf["radius"])) < 1.0e-9
+    assert (
+        abs(float(out_circle.dxf["radius"]) - float(src_circle.dxf["radius"])) < 1.0e-9
+    )
 
 
 def test_to_dwg_writes_point_from_source_sample(tmp_path: Path) -> None:
@@ -211,7 +217,10 @@ def test_to_dwg_writes_point_from_source_sample(tmp_path: Path) -> None:
     out_doc = ezdwg.read(str(output))
     out_point = next(out_doc.modelspace().query("POINT"))
     assert out_point.dxf["location"] == src_point.dxf["location"]
-    assert abs(float(out_point.dxf["x_axis_angle"]) - float(src_point.dxf["x_axis_angle"])) < 1.0e-9
+    assert (
+        abs(float(out_point.dxf["x_axis_angle"]) - float(src_point.dxf["x_axis_angle"]))
+        < 1.0e-9
+    )
 
 
 def test_to_dwg_writes_text_from_source_sample(tmp_path: Path) -> None:
@@ -232,7 +241,9 @@ def test_to_dwg_writes_text_from_source_sample(tmp_path: Path) -> None:
     assert out_text.dxf["text"] == src_text.dxf["text"]
     assert out_text.dxf["insert"] == src_text.dxf["insert"]
     assert abs(float(out_text.dxf["height"]) - float(src_text.dxf["height"])) < 1.0e-9
-    assert abs(float(out_text.dxf["rotation"]) - float(src_text.dxf["rotation"])) < 1.0e-9
+    assert (
+        abs(float(out_text.dxf["rotation"]) - float(src_text.dxf["rotation"])) < 1.0e-9
+    )
 
 
 def test_to_dwg_writes_mtext_from_source_sample(tmp_path: Path) -> None:
@@ -252,21 +263,89 @@ def test_to_dwg_writes_mtext_from_source_sample(tmp_path: Path) -> None:
     out_mtext = next(out_doc.modelspace().query("MTEXT"))
     assert out_mtext.dxf["text"] == src_mtext.dxf["text"]
     assert out_mtext.dxf["insert"] == src_mtext.dxf["insert"]
-    assert abs(float(out_mtext.dxf["char_height"]) - float(src_mtext.dxf["char_height"])) < 1.0e-9
+    assert (
+        abs(float(out_mtext.dxf["char_height"]) - float(src_mtext.dxf["char_height"]))
+        < 1.0e-9
+    )
 
 
 def test_to_dwg_strict_rejects_unsupported_entity_type(tmp_path: Path) -> None:
-    source = SAMPLES / "insert_2004.dwg"
-    output = tmp_path / "insert_written_as_dwg.dwg"
+    source = SAMPLES / "acadsharp" / "sample_AC1015.dwg"
+    output = tmp_path / "leader_written_as_dwg.dwg"
 
-    with pytest.raises(ValueError, match="failed to write 1 entities"):
+    with pytest.raises(ValueError, match=r"failed to write 1 entities \(LEADER:1\)"):
         ezdwg.to_dwg(
             str(source),
             str(output),
-            types="INSERT",
+            types="LEADER",
             version="AC1015",
             strict=True,
         )
+
+
+@pytest.mark.parametrize("types", [None, "*", "ALL", "ELLIPSE"])
+def test_strict_inventory_includes_ellipse(tmp_path: Path, types) -> None:
+    output = tmp_path / "existing.dwg"
+    output.write_bytes(b"keep existing file")
+    result = ezdwg.to_dwg(
+        str(SAMPLES / "ellipse_2004.dwg"), str(output), types=types, strict=True
+    )
+    assert result.written_entities == 1
+    assert not result.diagnostics
+    assert len(list(ezdwg.read(str(output)).modelspace().query("ELLIPSE"))) == 1
+
+
+def test_default_export_does_not_leak_block_definition_contents(tmp_path: Path) -> None:
+    output = tmp_path / "insert.dwg"
+    result = ezdwg.to_dwg(str(SAMPLES / "insert_2004.dwg"), str(output))
+    assert result.total_entities == 2
+    assert result.written_entities == 2
+    assert result.skipped_by_type == {}
+    assert list(ezdwg.read(str(output)).modelspace().query("LINE")) == []
+
+    assert len(list(ezdwg.read(str(output)).modelspace().query("INSERT"))) == 1
+
+
+@pytest.mark.parametrize("name", ["CUSTOM_ENTITY", "LINE"])
+def test_strict_counts_unknown_and_undecoded_entities(
+    monkeypatch, tmp_path: Path, name: str
+) -> None:
+    source = str(SAMPLES / "line_2000.dwg")
+    original = ezdwg.raw.list_object_headers_with_type
+    monkeypatch.setattr(
+        ezdwg.raw,
+        "list_object_headers_with_type",
+        lambda path: [
+            *original(path),
+            (0xABCDEF, 0, 0, 0x1FF, name, "E"),
+        ],
+    )
+    output = tmp_path / "out.dwg"
+    with pytest.raises(ValueError, match=rf"failed to write 1 entities \({name}:1\)"):
+        ezdwg.to_dwg(source, str(output), strict=True)
+    assert not output.exists()
+    result = ezdwg.to_dwg(source, str(output))
+    assert result.total_entities == 2
+    assert result.written_entities == 1
+    assert result.skipped_by_type == {name: 1}
+
+
+def test_explicit_type_filter_can_exclude_unsupported_entities(
+    monkeypatch, tmp_path: Path
+) -> None:
+    source = str(SAMPLES / "line_2000.dwg")
+    original = ezdwg.raw.list_object_headers_with_type
+    monkeypatch.setattr(
+        ezdwg.raw,
+        "list_object_headers_with_type",
+        lambda path: [
+            *original(path),
+            (0xABCDEF, 0, 0, 7, "INSERT", "E"),
+        ],
+    )
+    result = ezdwg.to_dwg(source, str(tmp_path / "out.dwg"), types="LINE", strict=True)
+    assert result.total_entities == result.written_entities == 1
+    assert result.skipped_entities == 0
 
 
 def test_cli_write_writes_line(tmp_path: Path, capsys) -> None:

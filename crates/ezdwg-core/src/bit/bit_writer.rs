@@ -8,11 +8,19 @@ pub struct BitWriter {
     byte_pos: usize,
     bit_pos: u8,
     max_bit_pos: u64,
+    codepage: Option<u16>,
 }
 
 impl BitWriter {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_codepage(codepage: u16) -> Self {
+        Self {
+            codepage: Some(codepage),
+            ..Self::default()
+        }
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
@@ -21,6 +29,7 @@ impl BitWriter {
             byte_pos: 0,
             bit_pos: 0,
             max_bit_pos: 0,
+            codepage: None,
         }
     }
 
@@ -308,16 +317,18 @@ impl BitWriter {
     }
 
     pub fn write_tv(&mut self, text: &str) -> Result<()> {
-        let mut bytes = Vec::with_capacity(text.len());
-        for ch in text.bytes() {
-            let sanitized = if ch == 0x00 {
-                b' '
-            } else if ch >= 0x7F {
-                0x2A
-            } else {
-                ch
-            };
-            bytes.push(sanitized);
+        let codepage = self.codepage.unwrap_or(30);
+        let encoding = crate::bit::bit_reader::dwg_codepage_encoding(Some(codepage))
+            .ok_or_else(|| DwgError::new(ErrorKind::Unsupported, "unsupported TV codepage"))?;
+        if text.contains('\0') {
+            return Err(DwgError::new(ErrorKind::Format, "TV text contains NUL"));
+        }
+        let (bytes, _, errors) = encoding.encode(text);
+        if errors || encoding.decode(&bytes).0 != text {
+            return Err(DwgError::new(
+                ErrorKind::Unsupported,
+                format!("text is not representable in DWG codepage {codepage}"),
+            ));
         }
         if bytes.len() > u16::MAX as usize {
             return Err(DwgError::new(
@@ -412,6 +423,18 @@ fn encode_modular_char(value: i64) -> Result<Vec<u8>> {
 mod tests {
     use super::BitWriter;
     use crate::bit::{BitReader, Endian};
+
+    #[test]
+    fn tv_encoding_is_explicit_and_lossless() {
+        let mut w = BitWriter::with_codepage(38);
+        w.write_tv("日本語 ABC").unwrap();
+        let data = w.into_bytes();
+        let mut r = BitReader::new_with_codepage(&data, Some(38));
+        assert_eq!(r.read_tv().unwrap(), "日本語 ABC");
+        assert!(BitWriter::new().write_tv("日本語").is_err());
+        assert!(BitWriter::new().write_tv("nul\0text").is_err());
+        assert!(BitWriter::with_codepage(38).write_tv("😀").is_err());
+    }
 
     #[test]
     fn roundtrip_bit_and_byte_mixed_sequence() {

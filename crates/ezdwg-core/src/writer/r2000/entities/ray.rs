@@ -5,21 +5,13 @@ use super::common::{encode_entity_payload, CommonEntityEncodeInput};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RayEncodeInput {
-    pub handle: u64,
-    pub owner_handle: u64,
-    pub layer_handle: u64,
-    pub color_index: u8,
+    pub common: CommonEntityEncodeInput,
     pub start: (f64, f64, f64),
     pub unit_vector: (f64, f64, f64),
 }
 
 pub fn encode_ray_entity_payload(input: RayEncodeInput) -> Result<Vec<u8>> {
-    let common = CommonEntityEncodeInput {
-        handle: input.handle,
-        owner_handle: input.owner_handle,
-        layer_handle: input.layer_handle,
-        color_index: input.color_index,
-    };
+    let common = input.common;
     encode_entity_payload(0x28, common, |writer| write_ray_body(writer, input))
 }
 

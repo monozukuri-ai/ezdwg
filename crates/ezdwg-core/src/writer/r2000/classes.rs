@@ -1,3 +1,4 @@
+use super::checksum::crc16;
 use crate::bit::{BitWriter, Endian};
 use crate::core::result::Result;
 
@@ -9,10 +10,27 @@ const SENTINEL_CLASSES_AFTER: [u8; 16] = [
 ];
 
 pub fn encode_minimal_classes_section() -> Result<Vec<u8>> {
+    let mut data = BitWriter::new();
+    for (number, cpp, dxf) in [
+        (500, "AcDbDictionaryWithDefault", "ACDBDICTIONARYWDFLT"),
+        (501, "AcDbPlaceHolder", "ACDBPLACEHOLDER"),
+        (502, "AcDbLayout", "LAYOUT"),
+    ] {
+        data.write_bs(number)?;
+        data.write_bs(0)?;
+        data.write_tv("ObjectDBX Classes")?;
+        data.write_tv(cpp)?;
+        data.write_tv(dxf)?;
+        data.write_b(0)?;
+        data.write_bs(0x1F3)?;
+    }
+    let data = data.into_bytes();
     let mut writer = BitWriter::new();
     writer.write_rcs(&SENTINEL_CLASSES_BEFORE)?;
-    writer.write_rl(Endian::Little, 0)?; // class data size bytes
-    writer.write_crc_zero()?;
+    writer.write_rl(Endian::Little, data.len() as u32)?;
+    writer.write_rcs(&data)?;
+    let crc = crc16(0xC0C1, &writer.to_bytes()[16..]);
+    writer.write_crc(crc)?;
     writer.write_rcs(&SENTINEL_CLASSES_AFTER)?;
     Ok(writer.into_bytes())
 }

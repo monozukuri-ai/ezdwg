@@ -9,6 +9,8 @@ use crate::entities::common::{
 
 #[derive(Debug, Clone)]
 pub struct LineEntity {
+    pub thickness: Option<f64>,
+    pub extrusion: Option<(f64, f64, f64)>,
     pub handle: u64,
     pub color_index: Option<u16>,
     pub true_color: Option<u32>,
@@ -116,6 +118,8 @@ fn decode_line_r14_fallback(reader: &mut BitReader<'_>, object_handle: u64) -> R
             }
 
             let candidate = LineEntity {
+                thickness: None,
+                extrusion: None,
                 handle: object_handle,
                 color_index: None,
                 true_color: None,
@@ -345,8 +349,8 @@ fn decode_line_with_header(
         (0.0, 0.0)
     };
 
-    let _thickness = reader.read_bt()?;
-    let _extrusion = reader.read_be()?;
+    let thickness = reader.read_bt()?;
+    let extrusion = reader.read_be()?;
     let (owner_handle, layer_handle) = decode_owner_and_layer_with_common_header(
         reader,
         &header,
@@ -355,6 +359,8 @@ fn decode_line_with_header(
     )?;
 
     Ok(LineEntity {
+        thickness: Some(thickness),
+        extrusion: Some(extrusion),
         handle: header.handle,
         color_index: header.color.index,
         true_color: header.color.true_color,
@@ -373,8 +379,8 @@ fn decode_line_with_header_r14(
     // R13/R14 stores explicit 3BD start/end points.
     let start = reader.read_3bd()?;
     let end = reader.read_3bd()?;
-    let _thickness = reader.read_bt()?;
-    let _extrusion = reader.read_be()?;
+    let thickness = reader.read_bt()?;
+    let extrusion = reader.read_be()?;
     let (owner_handle, layer_handle) = decode_owner_and_layer_with_common_header(
         reader,
         &header,
@@ -383,6 +389,8 @@ fn decode_line_with_header_r14(
     )?;
 
     Ok(LineEntity {
+        thickness: Some(thickness),
+        extrusion: Some(extrusion),
         handle: header.handle,
         color_index: header.color.index,
         true_color: header.color.true_color,

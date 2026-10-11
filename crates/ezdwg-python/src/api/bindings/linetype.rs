@@ -25,6 +25,7 @@ const MAX_LINETYPE_DASHES: usize = 32;
 
 /// Fixed-layout start of a table record (LAYER, LTYPE, ...), read after the type code.
 struct TableRecordPreamble {
+    has_eed: bool,
     /// End of the object data, which is where the handle stream starts, in record-body bits.
     data_end_bit: Option<u32>,
     handle: u64,
@@ -51,6 +52,7 @@ fn read_table_record_preamble(
         data_end_bit = Some(reader.read_rl(Endian::Little)?);
     }
     let handle = reader.read_h()?.value;
+    let has_eed = reader.clone().read_bs()? != 0;
     skip_eed(reader)?;
     if r13_r14 {
         data_end_bit = Some(reader.read_rl(Endian::Little)?);
@@ -73,6 +75,7 @@ fn read_table_record_preamble(
     }
 
     Ok(TableRecordPreamble {
+        has_eed,
         data_end_bit,
         handle,
         num_reactors,
@@ -377,6 +380,17 @@ fn read_common_entity_header_and_handles<'a>(
     entities::common::CommonEntityHeader,
     entities::common::CommonEntityHandles,
 )> {
+    let (mut reader, common) = read_common_entity_body(record, version, header)?;
+    reader.set_bit_pos(common.obj_size);
+    let handles = entities::common::parse_common_entity_handles(&mut reader, &common).ok()?;
+    Some((reader, common, handles))
+}
+
+fn read_common_entity_body<'a>(
+    record: &'a objects::ObjectRecord<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+) -> Option<(BitReader<'a>, entities::common::CommonEntityHeader)> {
     let mut reader = record.bit_reader();
     skip_object_type_prefix(&mut reader, version).ok()?;
     let common = match version {
@@ -408,9 +422,7 @@ fn read_common_entity_header_and_handles<'a>(
         _ => return None,
     };
 
-    reader.set_bit_pos(common.obj_size);
-    let handles = entities::common::parse_common_entity_handles(&mut reader, &common).ok()?;
-    Some((reader, common, handles))
+    Some((reader, common))
 }
 
 /// Linetype of every entity:

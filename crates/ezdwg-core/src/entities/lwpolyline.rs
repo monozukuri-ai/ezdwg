@@ -9,6 +9,9 @@ use crate::entities::common::{
 
 #[derive(Debug, Clone)]
 pub struct LwPolylineEntity {
+    pub elevation: f64,
+    pub thickness: f64,
+    pub extrusion: (f64, f64, f64),
     pub handle: u64,
     pub color_index: Option<u16>,
     pub true_color: Option<u32>,
@@ -228,6 +231,9 @@ fn decode_lwpolyline_with_header(
     )?;
 
     Ok(LwPolylineEntity {
+        elevation: body.elevation,
+        thickness: body.thickness,
+        extrusion: body.extrusion,
         handle: header.handle,
         color_index: header.color.index,
         true_color: header.color.true_color,
@@ -393,6 +399,9 @@ fn decode_lwpolyline_r14_compact_attempt(
 
 #[derive(Debug, Clone)]
 struct LwPolylineBody {
+    elevation: f64,
+    thickness: f64,
+    extrusion: (f64, f64, f64),
     flags: u16,
     vertices: Vec<(f64, f64)>,
     const_width: Option<f64>,
@@ -410,15 +419,21 @@ fn decode_lwpolyline_body(
     } else {
         None
     };
-    if (flags & 0x08) != 0 {
-        let _elevation = reader.read_bd()?;
-    }
-    if (flags & 0x02) != 0 {
-        let _thickness = reader.read_bd()?;
-    }
-    if (flags & 0x01) != 0 {
-        let _normal = reader.read_3bd()?;
-    }
+    let elevation = if flags & 8 != 0 {
+        reader.read_bd()?
+    } else {
+        0.
+    };
+    let thickness = if flags & 2 != 0 {
+        reader.read_bd()?
+    } else {
+        0.
+    };
+    let extrusion = if flags & 1 != 0 {
+        reader.read_3bd()?
+    } else {
+        (0., 0., 1.)
+    };
 
     let num_verts = reader.read_bl()? as usize;
     validate_lwpolyline_count("vertex count", num_verts)?;
@@ -494,6 +509,9 @@ fn decode_lwpolyline_body(
     }
 
     Ok(LwPolylineBody {
+        elevation,
+        thickness,
+        extrusion,
         flags,
         vertices,
         const_width,
@@ -653,6 +671,9 @@ fn decode_lwpolyline_r14_scan_by_obj_size(
         decode_lwpolyline_owner_and_layer_handle(reader, &header, true, false)?;
 
     Ok(LwPolylineEntity {
+        elevation: body.elevation,
+        thickness: body.thickness,
+        extrusion: body.extrusion,
         handle: header.handle,
         color_index: header.color.index,
         true_color: header.color.true_color,

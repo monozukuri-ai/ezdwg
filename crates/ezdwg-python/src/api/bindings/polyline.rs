@@ -476,6 +476,20 @@ fn collect_polyline_3d_vertices(
 ) -> PyResult<(Vec<entities::Vertex3dEntity>, usize)> {
     let mut vertices = Vec::new();
 
+    if matches!(
+        decoder.version(),
+        DwgVersion::R13 | DwgVersion::R14 | DwgVersion::R2000
+    ) {
+        if let Some((handles, _)) =
+            polyline_vertex_references(decoder, sorted, poly.handle, None, 0x0b)
+        {
+            return Ok((
+                handles.iter().filter_map(|h| vertex_map.get(h).cloned()).collect(),
+                start_index + 1,
+            ));
+        }
+    }
+
     if !poly.owned_handles.is_empty() {
         for handle in &poly.owned_handles {
             if let Some(vertex) = vertex_map.get(handle) {
@@ -1552,6 +1566,20 @@ fn collect_polyline_vertices(
 ) -> PyResult<(Vec<entities::Vertex2dEntity>, usize)> {
     let mut vertices = Vec::new();
 
+    if matches!(
+        decoder.version(),
+        DwgVersion::R13 | DwgVersion::R14 | DwgVersion::R2000
+    ) {
+        if let Some((handles, _)) =
+            polyline_vertex_references(decoder, sorted, poly.handle, None, 0x0a)
+        {
+            return Ok((
+                handles.iter().filter_map(|h| vertex_map.get(h).cloned()).collect(),
+                start_index + 1,
+            ));
+        }
+    }
+
     if !poly.owned_handles.is_empty() {
         for handle in &poly.owned_handles {
             if let Some(vertex) = vertex_map.get(handle) {
@@ -1920,6 +1948,30 @@ pub fn decode_polyline_sequence_members(
         if owned_handles.is_none() && !best_effort {
             if let Some(err) = last_err {
                 return Err(to_py_err(err));
+            }
+        }
+
+        if matches!(
+            kind,
+            PolylineSequenceKind::Polyline2d | PolylineSequenceKind::Polyline3d
+        ) {
+            let legacy = matches!(
+                decoder.version(),
+                DwgVersion::R13 | DwgVersion::R14 | DwgVersion::R2000
+            );
+            let count = if legacy { None } else { owned_handles.as_ref().map(Vec::len) };
+            let code = if matches!(kind, PolylineSequenceKind::Polyline2d) { 0x0a } else { 0x0b };
+            if let Some((handles, seqend)) =
+                polyline_vertex_references(&decoder, &sorted, polyline_handle, count, code)
+            {
+                result.push((
+                    polyline_handle, kind.label().to_string(), handles, Vec::new(), Some(seqend),
+                ));
+                i += 1;
+                if limit.is_some_and(|n| result.len() >= n) {
+                    break;
+                }
+                continue;
             }
         }
 

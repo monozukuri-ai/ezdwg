@@ -2,6 +2,71 @@
 
 ## Unreleased
 
+### Native DWG writer
+- Add native SPLINE writing, `add_spline` / `add_spline_fit`, editable imports,
+  block support and keyword-only raw spline rows. Retain control points, knots,
+  rational weights, closure/periodicity, tolerances, fit points and endpoint tangents.
+  Validate knot/control/weight counts and reject incompatible mixed representations,
+  closed/non-cubic fit splines and unsupported newer fit parameterization.
+- Read spline weights using their explicit presence bit and select R2013+ spline
+  bodies using fit flags and knot parameterization. Add supplementary spline
+  metadata without changing the existing raw tuple shape. Verify ODA read/resave,
+  evaluated curves and independent AC1015/AC1018/AC1027 import/edit/export.
+- Add SOLID/TRACE/3DFACE writing, creation helpers, editable imports and block
+  support. Preserve stored corner order, planar OCS elevation/thickness/extrusion,
+  WCS 3D corners and invisible edge masks. Reject invalid corner counts, unequal
+  planar elevations and invalid edge masks before replacing output. Verify native
+  roundtrips and ODA read/resave and independent AC1015/AC1018/AC1027 edits.
+- Preserve raw-row geometry formatting when applying a partial entity attribute
+  dictionary, including SOLID/TRACE thickness and extrusion and ELLIPSE normals.
+- Add ordinary legacy POLYLINE_2D/POLYLINE_3D writing with owned VERTEX/SEQEND
+  records, `add_polyline2d` / `add_polyline3d`, editable imports and block support.
+  Retain 2D widths/bulges/elevation/extrusion/thickness and 3D WCS vertices.
+  Rebuild structural child handles; diagnose unsupported child properties, XDATA,
+  vertex IDs, fit/mesh data and missing/inconsistent references before strict saves.
+- Resolve legacy polyline vertices through first/last and next references,
+  retain the last closed-2D vertex's widths/bulge when no closure point was removed,
+  and consume the R2010+ vertex ID before reading tangent direction.
+- Add full and partial ELLIPSE writing, `EditableLayout.add_ellipse`, editable
+  imports and block-contained ellipses. Retain WCS center/major-axis vectors,
+  extrusion, axis ratio and radian parameters; validate degenerate geometry.
+  Add existing R14/R2004/R2007/R2010/R2013 fixture roundtrips and independent
+  ODA read/resave and import/edit/export checks.
+- Add static named/anonymous blocks, nested INSERT references and single-line
+  ATTDEF/ATTRIB writing, including base points, per-axis scale, normals and text
+  formatting. Preserve the ownership graph and attribute SEQEND records.
+- Add `Drawing.blocks`, block creation, `add_blockref`, `add_attdef`, `add_attrib`
+  and attribute editing/deletion. Import definitions and attached attributes into
+  independent editable snapshots; include block dependencies in filtered exports.
+- Reject undefined/cyclic references, duplicate handles/tags and invalid ownership
+  before replacing output. Include unsupported block contents in strict diagnostics.
+- Preserve ATTRIB order through legacy links and newer owned-handle arrays;
+  diagnose missing or inconsistent attribute references during editable import.
+- Read INSERT colors and normals, and follow INSERT ownership for nested attribute
+  layout membership. Add ODA nested/reflected block and independent-input regressions.
+- Add `ezdwg.new()`, independent `Document.edit()` snapshots, and `Drawing.save()`.
+  Add, update, query and delete the nine supported model-space entity types with
+  stable handles; edit layer/linetype/text-style definitions and unit settings.
+  Import diagnostics remain visible and strict saves reject known losses.
+- Write completed DWGs to synced sibling temporary files before atomic replacement;
+  clean temporary files on failure and invalidate decode caches after saving.
+  Add failure-injection, same-path edit/save and ODA edit/resave regressions.
+- Preserve referenced layers, ACI/BYLAYER/BYBLOCK, simple linetypes, lineweights,
+  visibility, units, basic text styles, text placement/spacing, and polyline
+  elevation/extrusion/thickness. Read/write Japanese legacy text without byte replacement.
+- Add `WriteResult.diagnostics` and strict rejection of detected attribute loss,
+  including TrueColor, transparency, XDATA and unresolved/unsupported references.
+  Validate finite geometry, positive radii/heights and nonzero directions before saving.
+- Extend raw writer calls with optional attribute/table/metadata keywords while
+  retaining existing positional arguments. Add styled external roundtrip/loss tests.
+- Build the minimal AC1015 database graph, header variables, standard tables,
+  dictionaries and layouts; write CRCs, explicit entity links and paged object maps.
+- Correct native LWPOLYLINE closure and TEXT/MTEXT style references.
+- Export model space by default and include unsupported/undecoded entities in
+  strict validation and skipped counts. Block definition geometry no longer leaks
+  into the output model space. Explicit type filters retain their selection scope.
+- Add an opt-in ODA read/resave regression for empty, mixed and multi-page output.
+
 ### Added
 - Structured `Document.layers` (`Layer` / `LayerTable`) with callable legacy
   `doc.layers()` access, lineweight conversion, and EED transparency/description.

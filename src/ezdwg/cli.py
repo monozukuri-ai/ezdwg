@@ -560,6 +560,8 @@ def _run_write(
     print(f"skipped_entities: {result.skipped_entities}")
     for dxftype, count in result.skipped_by_type.items():
         print(f"skipped[{dxftype}]: {count}")
+    for diagnostic in result.diagnostics:
+        print(f"warning: {diagnostic.dxftype}[{diagnostic.handle}].{diagnostic.attribute}: {diagnostic.message} ({diagnostic.action})")
     return 0
 
 

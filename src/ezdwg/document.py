@@ -14,6 +14,7 @@ from .layer_filters import LayerFilterTable, LayerFilterTree, build_layer_filter
 from .layers import LayerTable, build_layer_table
 
 if TYPE_CHECKING:
+    from .drawing import Drawing
     from .graph import DocumentGraph
 
 SUPPORTED_VERSIONS = {"AC1012", "AC1014", "AC1015", "AC1018", "AC1021", "AC1024", "AC1027", "AC1032"}
@@ -201,6 +202,16 @@ class Document:
             object.__setattr__(self, "decode_path", self.path)
         if self.decode_version is None:
             object.__setattr__(self, "decode_version", self.version)
+
+    def edit(self, *, strict: bool = True) -> "Drawing":
+        """Copy supported model-space and block data into an editable drawing.
+
+        Losses reject the copy by default. ``strict=False`` retains diagnostics
+        on the drawing, which also make a later strict save fail.
+        """
+        from .drawing import Drawing
+
+        return Drawing.from_document(self, strict=strict)
 
     def modelspace(self) -> "Layout":
         """Entities that live in model space.
@@ -516,25 +527,29 @@ class Layout:
         want_model = space == "MODELSPACE"
 
         def accepts(handle: int) -> bool:
-            placement = placements.get(int(handle))
-            if placement is None:
-                # unknown placement: keep in model space, never claim paper space
-                return want_model
-            mode, owner = placement
-            if mode == 2:
-                return want_model
-            if mode == 1:
-                return not want_model
-            if mode == 0 and owner:
-                if owner in modelspace_owners:
+            seen = set()
+            while int(handle) not in seen:
+                seen.add(int(handle))
+                placement = placements.get(int(handle))
+                if placement is None:
                     return want_model
-                if owner in paperspace_owners:
+                mode, owner = placement
+                if mode == 2:
+                    return want_model
+                if mode == 1:
                     return not want_model
-                if owner in header_names:
-                    # owned by a named block record: block definition content
-                    return False
-                # owner is not a block record we know (minimal/writer files):
-                # do not hide it
+                if mode == 0 and owner:
+                    if owner in modelspace_owners:
+                        return want_model
+                    if owner in paperspace_owners:
+                        return not want_model
+                    if owner in header_names:
+                        return False
+                    if owner in placements:
+                        # ATTRIB/SEQEND inherit their INSERT's layout; the INSERT
+                        # may itself belong to a named block rather than model space.
+                        handle = owner
+                        continue
                 return want_model
             return want_model
 
@@ -809,7 +824,7 @@ class Layout:
                         curve_type_label = str(interpreted["curve_type_label"])
 
                 closed = bool(flags_info["closed"])
-                if closed and len(points) > 1:
+                if closed and len(points) > 1 and points[0] == points[-1]:
                     points = _strip_duplicate_closure_point(points)
                     if bulges:
                         bulges.pop()
@@ -2402,9 +2417,8 @@ def _polyline_2d_flags_info(flags: int) -> dict[str, bool]:
 
 def _lwpolyline_closed(flags: int) -> bool:
     value = int(flags)
-    # Some DWG variants store LWPOLYLINE close-state in bit 9 (0x200)
-    # instead of the DXF bit-0 flag.
-    return bool((value & 0x01) or (value & 0x200))
+    # Native DWG bit 0 denotes an explicit extrusion, bit 9 denotes closure.
+    return bool(value & 0x200)
 
 
 def _polyline_2d_should_interpolate(
@@ -3804,6 +3818,16 @@ class _EntityStyleMap(dict):
 @lru_cache(maxsize=16)
 def _entity_style_map(path: str) -> dict[int, tuple[int | None, int | None, int]]:
     styles = _EntityStyleMap()
+    styles.write_geometry = {}
+    styles.mtext_write_properties = {}
+    try:
+        styles.write_geometry = {h: (thickness, extrusion, elevation) for h, thickness, extrusion, elevation in raw.decode_write_geometry(path)}
+    except Exception:
+        pass
+    try:
+        styles.mtext_write_properties = {h: (style, spacing, factor) for h, style, spacing, factor in raw.decode_mtext_write_properties(path)}
+    except Exception:
+        pass
     styles.linetypes = _entity_linetype_map(path)
     styles.common_layers = _entity_common_layer_map(path)
     styles.lineweights = _entity_lineweight_map(path)
@@ -4256,6 +4280,15 @@ def _attach_entity_color(
     dxf["layer_handle"] = layer_handle
     dxf["resolved_color_index"] = resolved_index
     dxf["resolved_true_color"] = resolved_true_color
+
+    geometry = getattr(entity_style_map, "write_geometry", {}).get(handle)
+    if geometry is not None:
+        for key, value in zip(("thickness", "extrusion", "elevation"), geometry):
+            if value is not None:
+                dxf[key] = value
+    mtext_properties = getattr(entity_style_map, "mtext_write_properties", {}).get(handle)
+    if mtext_properties is not None:
+        dxf["style_handle"], dxf["line_spacing_style"], dxf["line_spacing_factor"] = mtext_properties
 
     linetype = getattr(entity_style_map, "linetypes", {}).get(handle)
     if linetype is not None:

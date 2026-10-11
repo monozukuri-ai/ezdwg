@@ -77,6 +77,7 @@ pub struct Polyline2dEntity {
     pub width_end: f64,
     pub thickness: f64,
     pub elevation: f64,
+    pub extrusion: (f64, f64, f64),
     pub owned_handles: Vec<u64>,
 }
 
@@ -113,7 +114,7 @@ pub fn decode_polyline_2d_r14(
     let width_end = reader.read_bd()?;
     let thickness = reader.read_bd()?;
     let elevation = reader.read_bd()?;
-    let _extrusion = reader.read_3bd()?;
+    let extrusion = reader.read_3bd()?;
 
     Ok(Polyline2dEntity {
         handle: header.handle,
@@ -125,6 +126,7 @@ pub fn decode_polyline_2d_r14(
         width_end,
         thickness,
         elevation,
+        extrusion,
         owned_handles: Vec::new(),
     })
 }
@@ -183,7 +185,7 @@ fn decode_polyline_2d_with_header(
     let width_end = reader.read_bd()?;
     let thickness = reader.read_bt()?;
     let elevation = reader.read_bd()?;
-    let _extrusion = reader.read_be()?;
+    let extrusion = reader.read_be()?;
     let owned_obj_count = if has_owned_count {
         reader.read_bl()? as usize
     } else {
@@ -227,6 +229,7 @@ fn decode_polyline_2d_with_header(
         width_end,
         thickness,
         elevation,
+        extrusion,
         owned_handles,
     })
 }

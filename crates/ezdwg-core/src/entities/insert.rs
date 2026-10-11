@@ -13,8 +13,11 @@ pub struct InsertEntity {
     pub handle: u64,
     pub position: (f64, f64, f64),
     pub scale: (f64, f64, f64),
+    pub extrusion: (f64, f64, f64),
     pub rotation: f64,
     pub block_header_handle: Option<u64>,
+    /// R13-R2000: first/last endpoints; R2004+: ordered owned handles.
+    pub attribute_handles: Option<Vec<u64>>,
     pub owner_handle: Option<u64>,
 }
 
@@ -30,20 +33,33 @@ pub fn decode_insert_r14(reader: &mut BitReader<'_>, object_handle: u64) -> Resu
     let position = reader.read_3bd()?;
     let scale = reader.read_3bd()?;
     let rotation = reader.read_bd()?;
-    let _extrusion = reader.read_3bd()?;
-    let _has_attribs = reader.read_b()?;
+    let extrusion = reader.read_3bd()?;
+    let has_attribs = reader.read_b()?;
 
     reader.set_bit_pos(header.obj_size);
     let common_handles = parse_common_entity_handles(reader, &header)?;
     let block_header_handle = read_handle_reference(reader, header.handle).ok();
+    let attribute_handles = if has_attribs == 0 {
+        Some(Vec::new())
+    } else {
+        (|| -> Result<Vec<u64>> {
+            let first = read_handle_reference(reader, header.handle)?;
+            let last = read_handle_reference(reader, header.handle)?;
+            read_handle_reference(reader, header.handle)?; // SEQEND
+            Ok(vec![first, last])
+        })()
+        .ok()
+    };
 
     Ok(InsertEntity {
         handle: header.handle,
         position,
         scale,
         rotation,
+        extrusion,
         block_header_handle,
         owner_handle: common_handles.owner_ref,
+        attribute_handles,
     })
 }
 
@@ -103,7 +119,7 @@ fn decode_insert_with_header(
     };
 
     let rotation = reader.read_bd()?;
-    let _extrusion = reader.read_3bd()?;
+    let extrusion = reader.read_3bd()?;
     let has_attribs = reader.read_b()?;
     // R2004+ count the owned attributes; R2000 names the first and the last.
     let owned_obj_count = if has_attribs == 1 && !reader.pre_r2004_layout() {
@@ -113,6 +129,11 @@ fn decode_insert_with_header(
     };
 
     // INSERT keeps block and owned references in the handle stream.
+    let mut attribute_handles = if has_attribs == 0 {
+        Some(Vec::new())
+    } else {
+        None
+    };
     let mut block_header_handle = None;
     let mut owner_handle = None;
     reader.set_bit_pos(header.obj_size);
@@ -142,12 +163,20 @@ fn decode_insert_with_header(
             block_header_handle = Some(block_handle);
         }
         if has_attribs == 1 {
-            for _ in 0..owned_obj_count {
-                if read_handle_reference(reader, header.handle).is_err() {
-                    break;
+            attribute_handles = (|| -> Result<Vec<u64>> {
+                let count = if reader.pre_r2004_layout() {
+                    2
+                } else {
+                    owned_obj_count
+                };
+                let mut handles = Vec::new();
+                for _ in 0..count {
+                    handles.push(read_handle_reference(reader, header.handle)?);
                 }
-            }
-            let _ = read_handle_reference(reader, header.handle);
+                read_handle_reference(reader, header.handle)?; // SEQEND
+                Ok(handles)
+            })()
+            .ok();
         }
     }
 
@@ -156,7 +185,9 @@ fn decode_insert_with_header(
         position,
         scale: (x_scale, y_scale, z_scale),
         rotation,
+        extrusion,
         block_header_handle,
+        attribute_handles,
         owner_handle,
     })
 }

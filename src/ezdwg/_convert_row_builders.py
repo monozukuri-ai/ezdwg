@@ -89,6 +89,39 @@ def _as_arc_row(entity: Entity) -> tuple[int, float, float, float, float, float,
     )
 
 
+def _as_ellipse_row(entity: Entity) -> tuple[
+    int,
+    tuple[float, float, float],
+    tuple[float, float, float],
+    tuple[float, float, float],
+    float,
+    float,
+    float,
+]:
+    """Keep WCS coordinates and eccentric anomaly parameters in radians."""
+    d = entity.dxf
+    return (
+        int(entity.handle),
+        tuple(float(v) for v in d["center"]),
+        tuple(float(v) for v in d["major_axis"]),
+        tuple(float(v) for v in d.get("extrusion", (0.0, 0.0, 1.0))),
+        float(d["axis_ratio"]),
+        float(d["start_angle"]),
+        float(d["end_angle"]),
+    )
+
+
+def _as_legacy_polyline_row(entity: Entity) -> dict:
+    d = entity.dxf
+    is_3d = entity.dxftype == "POLYLINE_3D"
+    flags = int(d.get("flags", 8 if is_3d else 0))
+    flags = (flags & ~1) | int(bool(d.get("closed", flags & 1)))
+    row = {"handle": entity.handle, "points": d["points"], "flags": flags}
+    if not is_3d:
+        row.update({k: d[k] for k in ("width_start", "width_end", "widths", "bulges") if k in d})
+    return row
+
+
 def _as_circle_row(entity: Entity) -> tuple[int, float, float, float, float] | None:
     center = entity.dxf.get("center")
     radius = entity.dxf.get("radius")
@@ -100,6 +133,26 @@ def _as_circle_row(entity: Entity) -> tuple[int, float, float, float, float] | N
         float(center[1]),
         float(center[2]),
         float(radius),
+    )
+
+
+def _as_spline_row(entity: Entity) -> dict:
+    from ._write_spline import FIELDS
+
+    return {"handle": int(entity.handle), **{k: v for k, v in entity.dxf.items() if k in FIELDS}}
+
+
+def _as_face_row(entity: Entity) -> tuple:
+    """Prevalidated corners retain stored order; triangles repeat the last corner."""
+    d = entity.dxf
+    points = [tuple(float(v) for v in p) for p in d["points"]]
+    if len(points) == 3:
+        points.append(points[-1])
+    if entity.dxftype == "3DFACE":
+        return (int(entity.handle), *points, d.get("invisible_edge_flags", 0))
+    return (
+        int(entity.handle), *points, float(d.get("thickness", 0.0)),
+        tuple(float(v) for v in d.get("extrusion", (0.0, 0.0, 1.0))),
     )
 
 

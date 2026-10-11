@@ -1,16 +1,22 @@
 pub mod arc;
+pub mod block;
 pub mod circle;
 pub mod common;
+pub mod ellipse;
+pub mod face;
 pub mod line;
 pub mod lwpolyline;
 pub mod mtext;
 pub mod point;
+pub mod polyline;
 pub mod ray;
+pub mod spline;
 pub mod text;
 pub mod xline;
 
 pub use arc::{encode_arc_entity_payload, ArcEncodeInput};
 pub use circle::{encode_circle_entity_payload, CircleEncodeInput};
+pub use ellipse::{encode_ellipse_entity_payload, EllipseEncodeInput};
 pub use line::{encode_line_entity_payload, LineEncodeInput};
 pub use lwpolyline::{encode_lwpolyline_entity_payload, LwPolylineEncodeInput};
 pub use mtext::{encode_mtext_entity_payload, MTextEncodeInput};

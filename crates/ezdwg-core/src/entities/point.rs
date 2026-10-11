@@ -13,6 +13,8 @@ static R14_POINT_PREFERRED_DELTA: AtomicU32 = AtomicU32::new(64);
 
 #[derive(Debug, Clone)]
 pub struct PointEntity {
+    pub thickness: Option<f64>,
+    pub extrusion: Option<(f64, f64, f64)>,
     pub handle: u64,
     pub color_index: Option<u16>,
     pub true_color: Option<u32>,
@@ -78,6 +80,8 @@ fn decode_point_r14_spec(reader: &mut BitReader<'_>, object_handle: u64) -> Opti
     let common_handles = parse_common_entity_handles(reader, &header).ok()?;
 
     Some(PointEntity {
+        thickness: None,
+        extrusion: None,
         handle: header.handle,
         color_index: header.color.index,
         true_color: header.color.true_color,
@@ -206,8 +210,8 @@ fn decode_point_with_header(
     r2007_layer_only: bool,
 ) -> Result<PointEntity> {
     let location = reader.read_3bd()?;
-    let _thickness = reader.read_bt()?;
-    let _extrusion = reader.read_be()?;
+    let thickness = reader.read_bt()?;
+    let extrusion = reader.read_be()?;
     let x_axis_angle = reader.read_bd()?;
     let (owner_handle, layer_handle) =
         match parse_common_entity_owner_and_layer_handle(reader, &header, r2007_layer_only) {
@@ -225,6 +229,8 @@ fn decode_point_with_header(
         };
 
     Ok(PointEntity {
+        thickness: Some(thickness),
+        extrusion: Some(extrusion),
         handle: header.handle,
         color_index: header.color.index,
         true_color: header.color.true_color,
@@ -270,6 +276,8 @@ fn consider_point_r14_delta(
     }
 
     let candidate = PointEntity {
+        thickness: None,
+        extrusion: None,
         handle: object_handle,
         color_index: None,
         true_color: None,

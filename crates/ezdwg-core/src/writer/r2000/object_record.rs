@@ -1,4 +1,5 @@
-use crate::bit::{BitWriter, Endian};
+use super::checksum::crc16;
+use crate::bit::BitWriter;
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
 
@@ -24,9 +25,8 @@ pub fn encode_object_record(body: &[u8]) -> Result<Vec<u8>> {
 
     let mut out = encode_ms_value(body.len() as u32)?;
     out.extend_from_slice(body);
-    let mut tail = BitWriter::new();
-    tail.write_rs(Endian::Little, 0)?;
-    out.extend_from_slice(&tail.into_bytes());
+    let crc = crc16(0xC0C1, &out);
+    out.extend_from_slice(&crc.to_le_bytes());
     Ok(out)
 }
 
