@@ -11,6 +11,16 @@ permissions:
   contents: read
 
 jobs:
+  version:
+    name: Version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v7
+      - run: uv run scripts/bump_version.py --check
+      - run: uv run --no-project --python 3.11 --with pytest python -m pytest -q tests/test_versioning.py
+
   test:
     name: ${{ matrix.os }} / py${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}

@@ -70,4 +70,5 @@ nav:
     - Document & Layout: api/document.md
     - Entity: api/entity.md
     - Raw API: api/raw.md
+  - Releasing: releasing.md
   - Changelog: changelog.md

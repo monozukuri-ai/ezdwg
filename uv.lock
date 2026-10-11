@@ -314,7 +314,6 @@ wheels = [
 
 [[package]]
 name = "ezdwg"
-version = "0.13.0"
 source = { editable = "." }
 
 [package.optional-dependencies]
@@ -337,7 +336,7 @@ requires-dist = [
     { name = "ezdxf", marker = "extra == 'dxf'", specifier = ">=1.4" },
     { name = "matplotlib", marker = "extra == 'plot'", specifier = ">=3.8" },
 ]
-provides-extras = ["plot", "dxf"]
+provides-extras = ["dxf", "plot"]
 
 [package.metadata.requires-dev]
 dev = [

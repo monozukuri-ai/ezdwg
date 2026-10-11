@@ -42,6 +42,10 @@ maturin develop
 pip install -e .
 ```
 
+For release version updates, run `uv run scripts/bump_version.py <version>`.
+The root `Cargo.toml` is the single version source for Rust and Python; the
+command refreshes the lock files. See [Releasing](docs/releasing.md) for details.
+
 ## Quick Start
 ```python
 import ezdwg

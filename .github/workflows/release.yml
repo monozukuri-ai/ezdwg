@@ -10,7 +10,25 @@ permissions:
   contents: read
 
 jobs:
+  version:
+    name: Verify release version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v7
+      - name: Check versions and release tag
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            uv run scripts/bump_version.py --check --tag "${RELEASE_TAG}"
+          else
+            uv run scripts/bump_version.py --check
+          fi
+
   verify-python:
+    needs: version
     name: Verify Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     strategy:

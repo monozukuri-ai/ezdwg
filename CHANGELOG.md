@@ -32,6 +32,9 @@
 - TEXT/MTEXT regression coverage for `R2000`/`R2004` sample pairs.
 
 ### Changed
+- Centralized the Rust and Python release version in the root `Cargo.toml`, with
+  `uv run scripts/bump_version.py <version>` to refresh locks and CI checks for
+  version/tag mismatches.
 - Removed the external DWG compatibility-conversion path from `ezdwg.read`; AC10xx versions in scope now use native decode paths.
 - R2007/R2010/R2013 entity decoding now uses version-aware common header paths for:
   - `LINE`
