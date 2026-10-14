@@ -225,6 +225,39 @@ pub fn validate_document(doc: &WriterDocument) -> Result<()> {
         point(block.base_point)?;
         BitWriter::with_codepage(m.codepage).write_tv(&block.description)?;
     }
+    names.clear();
+    for def in &doc.image_defs {
+        require(
+            !def.name.is_empty() && def.name.len() <= 255,
+            "image definition name must be 1..255 bytes",
+        )?;
+        require(
+            names.insert(def.name.to_uppercase()),
+            "duplicate image definition name",
+        )?;
+        require(
+            !def.file_path.is_empty(),
+            "image definition requires a file path",
+        )?;
+        BitWriter::with_codepage(m.codepage).write_tv(&def.file_path)?;
+        finite(&[def.size.0, def.size.1, def.pixel_size.0, def.pixel_size.1])?;
+        require(
+            def.size.0 > 0. && def.size.1 > 0. && def.pixel_size.0 > 0. && def.pixel_size.1 > 0.,
+            "image definition size and pixel size must be positive",
+        )?;
+        require(
+            matches!(def.resolution_units, 0 | 2 | 5),
+            "image resolution units must be 0 (none), 2 (cm) or 5 (inch)",
+        )?;
+    }
+    for e in doc.layouts().flatten() {
+        if let WriterEntity::Image(image) = e {
+            require(
+                names.contains(&image.image_def.to_uppercase()),
+                "IMAGE references an undefined image definition",
+            )?;
+        }
+    }
     let mut incoming = vec![0usize; doc.blocks.len()];
     let mut edges = vec![Vec::new(); doc.blocks.len()];
     for (layout_index, entities) in doc.layouts().enumerate() {
@@ -234,6 +267,22 @@ pub fn validate_document(doc: &WriterDocument) -> Result<()> {
                 "ATTRIB must belong to INSERT",
             )?;
             validate_entity(e, m.codepage)?;
+            if let WriterEntity::Dimension(dim) = e {
+                let Some(&target) = blocks.get(&dim.block_name.to_uppercase()) else {
+                    return Err(DwgError::new(
+                        ErrorKind::Format,
+                        format!("undefined dimension block: {}", dim.block_name),
+                    ));
+                };
+                require(
+                    dim.dimstyle.eq_ignore_ascii_case("Standard"),
+                    "AC1015 writer supports the Standard DIMSTYLE only",
+                )?;
+                if layout_index > 0 {
+                    edges[layout_index - 1].push(target);
+                    incoming[target] += 1;
+                }
+            }
             if let WriterEntity::Insert(insert) = e {
                 let Some(&target) = blocks.get(&insert.block_name.to_uppercase()) else {
                     return Err(DwgError::new(
@@ -297,8 +346,11 @@ pub fn validate_entity(e: &WriterEntity, codepage: u16) -> Result<()> {
     direction(f.extrusion)?;
     require(f.linetype_scale > 0., "linetype scale must be positive")?;
     require(
-        matches!(e, WriterEntity::LwPolyline(_) | WriterEntity::Polyline2d(_)) || f.elevation == 0.,
-        "elevation is only supported for 2D polylines",
+        matches!(
+            e,
+            WriterEntity::LwPolyline(_) | WriterEntity::Polyline2d(_) | WriterEntity::Hatch(_)
+        ) || f.elevation == 0.,
+        "elevation is only supported for 2D polylines and hatches",
     )?;
     require(
         matches!(
@@ -338,6 +390,9 @@ pub fn validate_entity(e: &WriterEntity, codepage: u16) -> Result<()> {
                 | WriterEntity::Polyline3d(_)
                 | WriterEntity::Face3d(_)
                 | WriterEntity::Spline(_)
+                | WriterEntity::Hatch(_)
+                | WriterEntity::Dimension(_)
+                | WriterEntity::Image(_)
         ) || f.thickness == 0.,
         "thickness is not supported for this entity type",
     )?;
@@ -349,6 +404,7 @@ pub fn validate_entity(e: &WriterEntity, codepage: u16) -> Result<()> {
                 | WriterEntity::Polyline3d(_)
                 | WriterEntity::Face3d(_)
                 | WriterEntity::Spline(_)
+                | WriterEntity::Image(_)
         ) || f.extrusion == (0., 0., 1.),
         "extrusion is not supported for this entity type",
     )?;
@@ -535,6 +591,9 @@ pub fn validate_entity(e: &WriterEntity, codepage: u16) -> Result<()> {
             )?;
         }
         WriterEntity::Attdef(v) | WriterEntity::Attrib(v) => validate_attribute(v, codepage)?,
+        WriterEntity::Hatch(v) => validate_hatch(v)?,
+        WriterEntity::Dimension(v) => validate_dimension(v)?,
+        WriterEntity::Image(v) => validate_image(v)?,
         WriterEntity::MText(v) => {
             point(v.insert)?;
             direction(v.text_direction)?;
@@ -553,6 +612,333 @@ pub fn validate_entity(e: &WriterEntity, codepage: u16) -> Result<()> {
                 "invalid MTEXT line spacing",
             )?;
             BitWriter::with_codepage(codepage).write_tv(&v.text)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_image(i: &ImageEntity) -> Result<()> {
+    require(
+        !i.image_def.is_empty(),
+        "IMAGE requires an image definition name",
+    )?;
+    point(i.insert)?;
+    direction(i.u_vector)?;
+    direction(i.v_vector)?;
+    let cross = (
+        i.u_vector.1 * i.v_vector.2 - i.u_vector.2 * i.v_vector.1,
+        i.u_vector.2 * i.v_vector.0 - i.u_vector.0 * i.v_vector.2,
+        i.u_vector.0 * i.v_vector.1 - i.u_vector.1 * i.v_vector.0,
+    );
+    require(
+        cross.0 != 0. || cross.1 != 0. || cross.2 != 0.,
+        "IMAGE u/v vectors must not be parallel",
+    )?;
+    finite(&[i.size.0, i.size.1])?;
+    require(
+        i.size.0 > 0. && i.size.1 > 0.,
+        "IMAGE size must be positive",
+    )?;
+    require(
+        i.display_props <= 15,
+        "IMAGE display properties use bits 0..3",
+    )?;
+    require(
+        i.brightness <= 100 && i.contrast <= 100 && i.fade <= 100,
+        "IMAGE brightness/contrast/fade must be in 0..100",
+    )?;
+    require(
+        matches!(i.clip_type, 1 | 2),
+        "IMAGE clip type must be 1 (rect) or 2 (polygon)",
+    )?;
+    require(
+        (i.clip_type == 1 && i.clip_vertices.len() == 2)
+            || (i.clip_type == 2 && i.clip_vertices.len() >= 3),
+        "IMAGE clip boundary needs 2 corners (rect) or at least 3 vertices (polygon)",
+    )?;
+    for v in &i.clip_vertices {
+        finite(&[v.0, v.1])?;
+    }
+    Ok(())
+}
+
+fn validate_dimension(d: &DimensionEntity) -> Result<()> {
+    finite(&[
+        d.text_midpoint.0,
+        d.text_midpoint.1,
+        d.elevation,
+        d.text_rotation,
+        d.horizontal_direction,
+        d.insert_scale.0,
+        d.insert_scale.1,
+        d.insert_scale.2,
+        d.insert_rotation,
+        d.line_spacing_factor,
+        d.actual_measurement,
+        d.insert_point.0,
+        d.insert_point.1,
+    ])?;
+    require(d.flags <= 3, "dimension flags must use bits 0 and 1 only")?;
+    require(
+        (1..=9).contains(&d.attachment_point),
+        "dimension attachment point must be in 1..9",
+    )?;
+    require(
+        (1..=2).contains(&d.line_spacing_style),
+        "dimension line spacing style must be 1 or 2",
+    )?;
+    require(
+        d.line_spacing_factor >= 0.25 && d.line_spacing_factor <= 4.,
+        "dimension line spacing factor must be in 0.25..4",
+    )?;
+    require(
+        d.insert_scale.0 != 0. && d.insert_scale.1 != 0. && d.insert_scale.2 != 0.,
+        "dimension block scale must be nonzero",
+    )?;
+    require(!d.dimstyle.is_empty(), "dimension requires a DIMSTYLE name")?;
+    require(
+        d.block_name.starts_with('*') && d.block_name.len() > 1,
+        "dimension requires an anonymous block name (*D...)",
+    )?;
+    require(
+        d.user_text.len() <= 255,
+        "dimension text is limited to 255 bytes",
+    )?;
+    let points: Vec<(f64, f64, f64)> = match &d.kind {
+        DimensionKind::Linear {
+            point13,
+            point14,
+            point10,
+            ext_line_rotation,
+            dim_rotation,
+        } => {
+            finite(&[*ext_line_rotation, *dim_rotation])?;
+            vec![*point13, *point14, *point10]
+        }
+        DimensionKind::Aligned {
+            point13,
+            point14,
+            point10,
+            ext_line_rotation,
+        } => {
+            finite(&[*ext_line_rotation])?;
+            vec![*point13, *point14, *point10]
+        }
+        DimensionKind::Angular3Pt {
+            point10,
+            point13,
+            point14,
+            point15,
+        } => vec![*point10, *point13, *point14, *point15],
+        DimensionKind::Angular2Ln {
+            point16,
+            point13,
+            point14,
+            point15,
+            point10,
+        } => {
+            finite(&[point16.0, point16.1])?;
+            vec![*point13, *point14, *point15, *point10]
+        }
+        DimensionKind::Radius {
+            point10,
+            point15,
+            leader_length,
+        }
+        | DimensionKind::Diameter {
+            point15,
+            point10,
+            leader_length,
+        } => {
+            finite(&[*leader_length])?;
+            require(
+                *leader_length >= 0.,
+                "dimension leader length must not be negative",
+            )?;
+            vec![*point10, *point15]
+        }
+        DimensionKind::Ordinate {
+            point10,
+            point13,
+            point14,
+            flags2,
+        } => {
+            require(*flags2 <= 1, "ordinate dimension flags2 must be 0 or 1")?;
+            vec![*point10, *point13, *point14]
+        }
+    };
+    for p in points {
+        point(p)?;
+    }
+    Ok(())
+}
+
+fn validate_hatch(h: &HatchEntity) -> Result<()> {
+    require(
+        !h.name.is_empty() && h.name.len() <= 255,
+        "hatch pattern name must be 1..255 bytes",
+    )?;
+    require(h.style <= 2, "hatch style must be 0, 1 or 2")?;
+    require(h.pattern_type <= 2, "hatch pattern type must be 0, 1 or 2")?;
+    require(
+        !h.paths.is_empty(),
+        "hatch requires at least one boundary path",
+    )?;
+    let mut derived = false;
+    for path in &h.paths {
+        require(path.flags <= 0xFF, "hatch path flags must fit in a byte")?;
+        derived |= path.flags & 0x04 != 0;
+        match &path.data {
+            HatchPathData::Polyline {
+                vertices, bulges, ..
+            } => {
+                require(
+                    path.flags & 0x02 != 0,
+                    "polyline hatch path requires path flag 2",
+                )?;
+                require(
+                    vertices.len() >= 2,
+                    "polyline hatch path requires at least 2 vertices",
+                )?;
+                for v in vertices {
+                    finite(&[v.0, v.1])?;
+                }
+                if let Some(bulges) = bulges {
+                    require(
+                        bulges.len() == vertices.len(),
+                        "hatch path bulge count must match its vertices",
+                    )?;
+                    finite(bulges)?;
+                }
+            }
+            HatchPathData::Edges(edges) => {
+                require(
+                    path.flags & 0x02 == 0,
+                    "edge hatch path cannot carry path flag 2",
+                )?;
+                require(
+                    !edges.is_empty(),
+                    "edge hatch path requires at least one edge",
+                )?;
+                for edge in edges {
+                    match edge {
+                        HatchEdge::Line { start, end } => {
+                            finite(&[start.0, start.1, end.0, end.1])?
+                        }
+                        HatchEdge::Arc {
+                            center,
+                            radius,
+                            start_angle,
+                            end_angle,
+                            ..
+                        } => {
+                            finite(&[center.0, center.1, *radius, *start_angle, *end_angle])?;
+                            require(*radius > 0., "hatch arc edge radius must be positive")?;
+                        }
+                        HatchEdge::Ellipse {
+                            center,
+                            major_endpoint,
+                            ratio,
+                            start_angle,
+                            end_angle,
+                            ..
+                        } => {
+                            finite(&[
+                                center.0,
+                                center.1,
+                                major_endpoint.0,
+                                major_endpoint.1,
+                                *ratio,
+                                *start_angle,
+                                *end_angle,
+                            ])?;
+                            require(
+                                major_endpoint.0 != 0. || major_endpoint.1 != 0.,
+                                "hatch ellipse edge major axis must be nonzero",
+                            )?;
+                            require(
+                                *ratio > 0. && *ratio <= 1.,
+                                "hatch ellipse edge ratio must be in (0, 1]",
+                            )?;
+                        }
+                        HatchEdge::Spline {
+                            degree,
+                            rational,
+                            knots,
+                            control_points,
+                            weights,
+                            ..
+                        } => {
+                            require(
+                                (1..=10).contains(degree),
+                                "hatch spline edge degree must be in 1..10",
+                            )?;
+                            let n = control_points.len();
+                            require(
+                                n > *degree as usize && knots.len() == n + *degree as usize + 1,
+                                "hatch spline edge knot/control count does not match degree",
+                            )?;
+                            require(
+                                !*rational || weights.len() == n,
+                                "rational hatch spline edge requires one weight per control point",
+                            )?;
+                            finite(knots)?;
+                            finite(weights)?;
+                            for p in control_points {
+                                finite(&[p.0, p.1])?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(size) = h.pixel_size {
+        finite(&[size])?;
+        require(size > 0., "hatch pixel size must be positive")?;
+    }
+    require(
+        !derived || h.pixel_size.is_some(),
+        "derived hatch paths (flag 4) require a pixel size",
+    )?;
+    for seed in &h.seed_points {
+        finite(&[seed.0, seed.1])?;
+    }
+    if h.solid_fill {
+        require(
+            h.pattern.is_none(),
+            "solid hatch cannot carry a pattern definition",
+        )?;
+    } else {
+        let pattern = h.pattern.as_ref().ok_or_else(|| {
+            DwgError::new(
+                ErrorKind::Format,
+                "pattern hatch requires a pattern definition",
+            )
+        })?;
+        finite(&[pattern.angle, pattern.scale])?;
+        require(pattern.scale > 0., "hatch pattern scale must be positive")?;
+        require(
+            !pattern.lines.is_empty(),
+            "hatch pattern requires at least one definition line",
+        )?;
+        require(
+            pattern.lines.len() <= u16::MAX as usize,
+            "too many hatch pattern lines",
+        )?;
+        for line in &pattern.lines {
+            finite(&[
+                line.angle,
+                line.base.0,
+                line.base.1,
+                line.offset.0,
+                line.offset.1,
+            ])?;
+            require(
+                line.dashes.len() <= u16::MAX as usize,
+                "too many hatch dashes",
+            )?;
+            finite(&line.dashes)?;
         }
     }
     Ok(())

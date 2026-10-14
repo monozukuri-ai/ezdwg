@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import raw
+from ._aci import describe_approximation, nearest_aci
+from ._dimension import dimension_error
+from ._hatch import hatch_error
+from ._image import image_error
 from ._write_spline import FIELDS as SPLINE_FIELDS
 from ._write_spline import validate_spline
 from .entity import Entity
@@ -19,6 +23,16 @@ class WriteDiagnostic:
     attribute: str
     message: str
     action: str = "defaulted"
+
+
+#: Diagnostics that record a deliberate approximation (such as a true colour
+#: rounded to an ACI) rather than a loss; strict writes keep them informational.
+INFORMATIONAL_ACTIONS = frozenset({"approximated"})
+
+
+def strict_losses(diagnostics):
+    """The diagnostics that make a strict write or import fail."""
+    return [d for d in diagnostics if d.action not in INFORMATIONAL_ACTIONS]
 
 
 LINEWEIGHTS = {
@@ -127,6 +141,18 @@ def geometry_error(e: Entity) -> str | None:
                     raise ValueError("3DFACE cannot store thickness/extrusion")
         elif kind == "SPLINE":
             validate_spline(d, number, point)
+        elif kind == "DIMENSION":
+            dimension_error(d, number, point)
+        elif kind == "IMAGE":
+            image_error(d, number, point, direction)
+        elif kind == "HATCH":
+
+            def point2(value):
+                if not isinstance(value, (tuple, list)) or len(value) not in (2, 3):
+                    raise ValueError("expected a two-coordinate point")
+                return tuple(number(v) for v in value[:2])
+
+            hatch_error(d, number, point2)
         elif kind == "ELLIPSE":
             point(d["center"])
             axis = point(d["major_axis"])
@@ -349,6 +375,39 @@ def prepare_attributes(doc: Any, entities: list[Entity]):
             "source common attributes could not be decoded",
         )
     layer_rows, ltype_rows, style_rows, attrs = {}, {}, {}, {}
+    image_rows = {}
+    if any(e.dxftype == "IMAGE" for e in entities):
+        try:
+            defs = {row[0]: row for row in raw.decode_image_defs(path)}
+        except (OSError, ValueError, NotImplementedError):
+            defs = {}
+        for e in entities:
+            if e.dxftype != "IMAGE":
+                continue
+            row = defs.get(e.dxf.get("image_def_handle"))
+            if row is None:
+                report(
+                    int(e.handle),
+                    "IMAGE",
+                    "image_def",
+                    "image definition could not be decoded",
+                    "skipped",
+                )
+                e.dxf["image_def"] = ""
+                continue
+            name = e.dxf.get("image_def") or _image_def_name(row[1], row[0])
+            e.dxf["image_def"] = name
+            image_rows.setdefault(
+                name,
+                {
+                    "name": name,
+                    "file_path": row[1],
+                    "size": tuple(row[2]),
+                    "is_loaded": bool(row[3]),
+                    "resolution_units": int(row[4]),
+                    "pixel_size": tuple(row[5]),
+                },
+            )
 
     def linetype(name, handle, kind):
         if name is None:
@@ -537,11 +596,19 @@ def prepare_attributes(doc: Any, entities: list[Entity]):
                     "locked": layer.locked,
                     "plot": layer.plot,
                 }
-                for attr in ("true_color", "transparency", "description", "standard"):
-                    if (attr == "true_color" and layer.true_color is not None) or (
-                        attr != "true_color"
-                        and getattr(layer, attr, None) not in (None, 0, "")
-                    ):
+                if layer.true_color is not None:
+                    index = nearest_aci(layer.true_color)
+                    layer_rows[layer.name]["color_index"] = index
+                    report(
+                        layer.handle,
+                        "LAYER",
+                        "true_color",
+                        f"layer {layer.name!r}: "
+                        + describe_approximation(layer.true_color, index),
+                        "approximated",
+                    )
+                for attr in ("transparency", "description", "standard"):
+                    if getattr(layer, attr, None) not in (None, 0, ""):
                         report(
                             layer.handle,
                             "LAYER",
@@ -563,18 +630,34 @@ def prepare_attributes(doc: Any, entities: list[Entity]):
                 handle, e.dxftype, "color_index", "invalid ACI is replaced with BYLAYER"
             )
             index = 256
+        if d.get("true_color") is not None:
+            try:
+                index = nearest_aci(d["true_color"])
+            except ValueError:
+                report(
+                    handle,
+                    e.dxftype,
+                    "true_color",
+                    "invalid true color is ignored",
+                    "dropped",
+                )
+            else:
+                report(
+                    handle,
+                    e.dxftype,
+                    "true_color",
+                    describe_approximation(d["true_color"], index),
+                    "approximated",
+                )
         a["color_index"] = index
         for attr in (
-            "true_color",
             "transparency",
             "background_flags",
             "xdata",
             "extension_dict",
             "lock_position",
         ):
-            if (attr == "true_color" and d.get(attr) is not None) or (
-                attr != "true_color" and d.get(attr) not in (None, 0, "", {}, [])
-            ):
+            if d.get(attr) not in (None, 0, "", {}, []):
                 report(
                     handle,
                     e.dxftype,
@@ -651,7 +734,13 @@ def prepare_attributes(doc: Any, entities: list[Entity]):
         metadata,
         diagnostics,
         block_rows=None,
+        image_rows=image_rows,
     )
+
+
+def _image_def_name(file_path: str, handle: int) -> str:
+    stem = file_path.replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    return stem or f"IMAGE_{handle}"
 
 
 def prepare_strings(
@@ -663,6 +752,7 @@ def prepare_strings(
     metadata,
     diagnostics,
     block_rows=None,
+    image_rows=None,
 ):
     """Prepare independent copies for legacy text encoding and report losses."""
 
@@ -671,10 +761,11 @@ def prepare_strings(
 
     # Select a legacy encoding for all strings, including table and font names.
     block_rows = block_rows or {}
+    image_rows = image_rows or {}
     strings = [
         str(e.dxf.get(k, ""))
         for e in entities
-        for k in ("text", "raw_text", "tag", "prompt", "name")
+        for k in ("text", "raw_text", "tag", "prompt", "name", "image_def")
     ]
     strings += [
         v
@@ -683,6 +774,7 @@ def prepare_strings(
             *ltype_rows.values(),
             *style_rows.values(),
             *block_rows.values(),
+            *image_rows.values(),
         )
         for v in r.values()
         if isinstance(v, str)
@@ -735,6 +827,7 @@ def prepare_strings(
         (ltype_rows, "LTYPE"),
         (style_rows, "STYLE"),
         (block_rows, "BLOCK"),
+        (image_rows, "IMAGEDEF"),
     ):
         for row in rows.values():
             for key, value in row.items():
@@ -753,4 +846,5 @@ def prepare_strings(
         list(style_rows.values()),
         metadata,
         diagnostics,
+        list(image_rows.values()),
     )

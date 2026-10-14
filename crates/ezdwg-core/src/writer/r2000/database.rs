@@ -30,6 +30,12 @@ pub struct DatabaseHandles {
     pub normal_plotstyle: u64,
     pub model_layout: u64,
     pub paper_layout: u64,
+    /// The `Standard` DIMSTYLE record referenced by dimensions and the header.
+    pub dimstyle: u64,
+    /// `ACAD_IMAGE_DICT`, `ACAD_IMAGE_VARS` and the IMAGEDEF objects, when images exist.
+    pub image_dict: u64,
+    pub image_vars: u64,
+    pub image_defs: BTreeMap<String, u64>,
 }
 
 impl DatabaseHandles {
@@ -60,7 +66,20 @@ impl DatabaseHandles {
             normal_plotstyle: a.allocate()?,
             model_layout: a.allocate()?,
             paper_layout: a.allocate()?,
+            dimstyle: a.allocate()?,
+            image_dict: 0,
+            image_vars: 0,
+            image_defs: BTreeMap::new(),
         };
+        if !doc.image_defs.is_empty() {
+            result.image_dict = a.allocate()?;
+            result.image_vars = a.allocate()?;
+            for def in &doc.image_defs {
+                result
+                    .image_defs
+                    .insert(def.name.to_uppercase(), a.allocate()?);
+            }
+        }
         result.layers.insert("0".into(), result.layer);
         for layer in &doc.layers {
             if layer.name != "0" {
@@ -129,10 +148,23 @@ impl DatabaseHandles {
             .ok_or_else(|| DwgError::new(ErrorKind::Format, format!("undefined linetype: {name}")))
     }
 
+    pub fn image_def_handle(&self, name: &str) -> Result<u64> {
+        self.image_defs
+            .get(name.to_uppercase().as_str())
+            .copied()
+            .ok_or_else(|| {
+                DwgError::new(
+                    ErrorKind::Format,
+                    format!("undefined image definition: {name}"),
+                )
+            })
+    }
+
     pub fn objects(
         &self,
         layout_handles: &[Vec<u64>],
         doc: &WriterDocument,
+        image_reactors: &std::collections::HashMap<u64, u64>,
     ) -> Result<Vec<(u64, Vec<u8>)>> {
         let mut objects = Vec::new();
         // Header variable table order: BLOCK, LAYER, STYLE, LTYPE, VIEW, UCS,
@@ -149,6 +181,7 @@ impl DatabaseHandles {
                     .filter(|(n, _)| !matches!(n.as_str(), "BYLAYER" | "BYBLOCK"))
                     .map(|(_, h)| *h)
                     .collect(),
+                8 => vec![self.dimstyle],
                 _ => vec![],
             };
             let mut refs: Vec<(u8, u64)> = entries.iter().map(|h| (2, *h)).collect();
@@ -171,18 +204,28 @@ impl DatabaseHandles {
             ));
         }
         let [nod, groups, mlines, layouts, plots, styles] = self.dictionaries;
-        let names = [
+        let mut names = vec![
             "ACAD_GROUP",
             "ACAD_MLINESTYLE",
             "ACAD_LAYOUT",
             "ACAD_PLOTSETTINGS",
             "ACAD_PLOTSTYLENAME",
         ];
+        let with_images = self.image_dict != 0;
+        if with_images {
+            names.extend(["ACAD_IMAGE_DICT", "ACAD_IMAGE_VARS"]);
+        }
         for (i, &h) in self.dictionaries.iter().enumerate() {
             let mut refs: Vec<_> = match i {
-                0 => [groups, mlines, layouts, plots, styles]
-                    .map(|h| (2, h))
-                    .to_vec(),
+                0 => {
+                    let mut v = [groups, mlines, layouts, plots, styles]
+                        .map(|h| (2, h))
+                        .to_vec();
+                    if with_images {
+                        v.extend([(2, self.image_dict), (2, self.image_vars)]);
+                    }
+                    v
+                }
                 3 => vec![(2, self.model_layout), (2, self.paper_layout)],
                 5 => vec![(2, self.normal_plotstyle)],
                 _ => vec![],
@@ -204,7 +247,7 @@ impl DatabaseHandles {
                         w.write_bs(1)?; // duplicate-record cloning: keep existing
                         w.write_rc(0)?; // soft ownership
                         if i == 0 {
-                            for name in names {
+                            for name in &names {
                                 w.write_tv(name)?;
                             }
                         }
@@ -231,6 +274,74 @@ impl DatabaseHandles {
                 |_| Ok(()),
             )?,
         ));
+        if with_images {
+            use super::classes::{IMAGEDEF_CLASS, RASTERVARIABLES_CLASS};
+            use super::entities::image::{encode_image_def_object, encode_raster_variables_object};
+            let mut entries: Vec<(&str, u64)> = doc
+                .image_defs
+                .iter()
+                .map(|d| (d.name.as_str(), self.image_defs[&d.name.to_uppercase()]))
+                .collect();
+            entries.sort_by_key(|(_, h)| *h);
+            let refs: Vec<(u8, u64)> = entries.iter().map(|(_, h)| (2, *h)).collect();
+            objects.push((
+                self.image_dict,
+                object(
+                    doc.metadata.codepage,
+                    0x2A,
+                    self.image_dict,
+                    nod,
+                    &refs,
+                    |w| {
+                        w.write_bl(entries.len() as u32)?;
+                        w.write_bs(1)?;
+                        w.write_rc(0)?;
+                        for (name, _) in &entries {
+                            w.write_tv(name)?;
+                        }
+                        Ok(())
+                    },
+                )?,
+            ));
+            objects.push((
+                self.image_vars,
+                encode_raster_variables_object(
+                    doc.metadata.codepage,
+                    RASTERVARIABLES_CLASS,
+                    self.image_vars,
+                    nod,
+                )?,
+            ));
+            for def in &doc.image_defs {
+                let handle = self.image_defs[&def.name.to_uppercase()];
+                let mut reactors: Vec<u64> = doc
+                    .layouts()
+                    .zip(layout_handles)
+                    .flat_map(|(entities, handles)| {
+                        entities.iter().zip(handles).filter_map(|(e, &h)| match e {
+                            crate::writer::WriterEntity::Image(i)
+                                if i.image_def.eq_ignore_ascii_case(&def.name) =>
+                            {
+                                image_reactors.get(&h).copied()
+                            }
+                            _ => None,
+                        })
+                    })
+                    .collect();
+                reactors.sort_unstable();
+                objects.push((
+                    handle,
+                    encode_image_def_object(
+                        doc.metadata.codepage,
+                        IMAGEDEF_CLASS,
+                        handle,
+                        self.image_dict,
+                        &reactors,
+                        def,
+                    )?,
+                ));
+            }
+        }
         let default_layer = LayerDef::default();
         for layer in std::iter::once(&default_layer)
             .filter(|_| !doc.layers.iter().any(|l| l.name == "0"))
@@ -262,6 +373,17 @@ impl DatabaseHandles {
                 )?,
             ));
         }
+        objects.push((
+            self.dimstyle,
+            object(
+                doc.metadata.codepage,
+                0x45,
+                self.dimstyle,
+                self.controls[8],
+                &[(5, 0), (5, self.style), (5, 0), (5, 0), (5, 0), (5, 0)],
+                |w| dimstyle_body(w),
+            )?,
+        ));
         let default_style = TextStyleDef::default();
         for st in std::iter::once(&default_style)
             .filter(|_| {
@@ -387,6 +509,11 @@ impl DatabaseHandles {
                             {
                                 Some(handle)
                             }
+                            crate::writer::WriterEntity::Dimension(d)
+                                if d.block_name.to_uppercase() == name.to_uppercase() =>
+                            {
+                                Some(handle)
+                            }
                             _ => None,
                         })
                 })
@@ -466,6 +593,52 @@ impl DatabaseHandles {
         }
         Ok(objects)
     }
+}
+
+/// `Standard` DIMSTYLE (R2000 layout): the ISO-25 like defaults of the header
+/// dimension variables, decimal point `.` and 2 decimals.
+fn dimstyle_body(w: &mut BitWriter) -> Result<()> {
+    table_name(w, "Standard")?;
+    w.write_tv("")?; // DIMPOST
+    w.write_tv("")?; // DIMAPOST
+                     // DIMSCALE, DIMASZ, DIMEXO, DIMDLI, DIMEXE, DIMRND, DIMDLE, DIMTP, DIMTM
+    for v in [1., 2.5, 0.625, 3.75, 1.25, 0., 0., 0., 0.] {
+        w.write_bd(v)?;
+    }
+    // DIMTOL, DIMLIM, DIMTIH, DIMTOH, DIMSE1, DIMSE2
+    for v in [0, 0, 0, 0, 0, 0] {
+        w.write_b(v)?;
+    }
+    // DIMTAD, DIMZIN, DIMAZIN
+    for v in [1, 8, 0] {
+        w.write_bs(v)?;
+    }
+    // DIMTXT, DIMCEN, DIMTSZ, DIMALTF, DIMLFAC, DIMTVP, DIMTFAC, DIMGAP, DIMALTRND
+    for v in [2.5, 2.5, 0., 0.03937007874015748, 1., 0., 1., 0.625, 0.] {
+        w.write_bd(v)?;
+    }
+    w.write_b(0)?; // DIMALT
+    w.write_bs(2)?; // DIMALTD
+                    // DIMTOFL, DIMSAH, DIMTIX, DIMSOXD
+    for v in [1, 0, 0, 0] {
+        w.write_b(v)?;
+    }
+    // DIMCLRD, DIMCLRE, DIMCLRT (BYBLOCK), DIMADEC, DIMDEC, DIMTDEC, DIMALTU,
+    // DIMALTTD, DIMAUNIT, DIMFRAC, DIMLUNIT, DIMDSEP ('.'), DIMTMOVE, DIMJUST
+    for v in [0, 0, 0, 0, 2, 2, 2, 2, 0, 0, 2, 46, 0, 0] {
+        w.write_bs(v)?;
+    }
+    w.write_b(0)?; // DIMSD1
+    w.write_b(0)?; // DIMSD2
+                   // DIMTOLJ, DIMTZIN, DIMALTZ, DIMALTTZ
+    for v in [1, 0, 0, 0] {
+        w.write_bs(v)?;
+    }
+    w.write_b(0)?; // DIMUPT
+    w.write_bs(3)?; // DIMFIT
+    w.write_bs((-2i16) as u16)?; // DIMLWD BYBLOCK
+    w.write_bs((-2i16) as u16)?; // DIMLWE BYBLOCK
+    w.write_b(0) // unknown (70 bit 0)
 }
 
 fn layout_body(w: &mut BitWriter, model: bool) -> Result<()> {

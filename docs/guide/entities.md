@@ -227,6 +227,26 @@ and `dashes` is its dash pattern (positive = dash, negative = gap, empty =
 continuous). The pattern keys are absent for solid fills and for hatches whose
 definition cannot be read.
 
+### IMAGE
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `insert` | `(float, float, float)` | Insertion point (lower-left corner) |
+| `u_vector` / `v_vector` | `(float, float, float)` | Step of one pixel along the image columns / rows |
+| `size` | `(float, float)` | Image size in pixels |
+| `display_props` | `int` | Display flags (1 show, 2 show when not aligned, 4 use clipping, 8 transparency) |
+| `clipping` | `bool` | Whether the clip boundary is enabled |
+| `brightness` / `contrast` / `fade` | `int` | 0..100 |
+| `clip_type` | `int` | 1 rectangle (two corners), 2 polygon |
+| `clip_vertices` | `list[(float, float)]` | Clip boundary in pixel coordinates |
+| `image_def_handle` | `int` | Handle of the IMAGEDEF object |
+| `file_path` | `str \| None` | Image file path stored in the IMAGEDEF |
+| `image_def` | `str \| None` | Definition name used by `Document.edit()` (file stem) |
+
+`Document.image_defs()` is not provided; `ezdwg.raw.decode_image_defs(path)`
+returns the IMAGEDEF objects as `(handle, file_path, size, is_loaded,
+resolution_units, pixel_size)` tuples.
+
 ### SPLINE
 
 | Key | Type | Description |

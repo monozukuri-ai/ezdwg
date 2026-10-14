@@ -169,8 +169,11 @@ pub fn build_object_index(bytes: &[u8], config: &ParseConfig) -> Result<ObjectIn
                 valid_objects.push(object);
             }
         }
-        let rebound =
-            crate::dwg::r2004::rebind_object_refs_to_body_handles(&objects_data, valid_objects, &version);
+        let rebound = crate::dwg::r2004::rebind_object_refs_to_body_handles(
+            &objects_data,
+            valid_objects,
+            &version,
+        );
         return Ok(ObjectIndex::from_objects(rebound));
     }
 
@@ -650,7 +653,6 @@ fn read_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
 
     Ok(value)
 }
-
 
 fn read_header_data(bytes: &[u8]) -> Result<HeaderData> {
     if bytes.len() < SECOND_HEADER_OFFSET + SECOND_HEADER_RS_SIZE {

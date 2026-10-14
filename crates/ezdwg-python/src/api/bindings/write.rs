@@ -31,6 +31,10 @@ pub fn write_ac1015_line_dwg(output_path: &str, lines: Vec<LineEntityRow>) -> Py
         None,
         None,
         None,
+        None,
+        None,
+        None,
+        None,
     )
 }
 
@@ -47,7 +51,8 @@ pub fn write_ac1015_line_dwg(output_path: &str, lines: Vec<LineEntityRow>) -> Py
     xlines=None,
     *, entity_attributes=None, layers=None, linetypes=None, metadata=None, text_styles=None,
     blocks=None, inserts=None, attdefs=None, attribs=None, entity_owners=None, ellipses=None,
-    polylines2d=None, polylines3d=None, solids=None, traces=None, faces3d=None, splines=None
+    polylines2d=None, polylines3d=None, solids=None, traces=None, faces3d=None, splines=None,
+    hatches=None, dimensions=None, images=None, image_defs=None
 ))]
 pub fn write_ac1015_dwg(
     output_path: &str,
@@ -77,6 +82,10 @@ pub fn write_ac1015_dwg(
     traces: Option<Vec<TraceEntityRow>>,
     faces3d: Option<Vec<Face3dEntityRow>>,
     splines: Option<Vec<Bound<'_, PyDict>>>,
+    hatches: Option<Vec<Bound<'_, PyDict>>>,
+    dimensions: Option<Vec<Bound<'_, PyDict>>>,
+    images: Option<Vec<Bound<'_, PyDict>>>,
+    image_defs: Option<Vec<Bound<'_, PyDict>>>,
 ) -> PyResult<()> {
     let points = points.unwrap_or_default();
     let rays = rays.unwrap_or_default();
@@ -296,6 +305,9 @@ pub fn write_ac1015_dwg(
     append_write_blocks(&mut doc, blocks, inserts, attdefs, attribs)?;
     append_write_polylines(&mut doc, polylines2d, polylines3d)?;
     append_write_splines(&mut doc, splines)?;
+    append_write_hatches(&mut doc, hatches)?;
+    append_write_dimensions(&mut doc, dimensions)?;
+    append_write_images(&mut doc, images, image_defs)?;
     if let Some(mut attributes) = entity_attributes {
         for entity in &mut doc.modelspace {
             if let Some(h) = entity.common().handle {

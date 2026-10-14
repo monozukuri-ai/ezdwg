@@ -89,7 +89,8 @@ pub fn encode_header(
     }
     w.write_bs(256)?; // CECOLOR: BYLAYER
     w.write_h(0, handseed)?;
-    for handle in [h.layer, h.style, h.bylayer, 0, 0] {
+    // CLAYER, TEXTSTYLE, CELTYPE, DIMSTYLE, CMLSTYLE
+    for handle in [h.layer, h.style, h.bylayer, h.dimstyle, 0] {
         w.write_h(5, handle)?;
     }
     w.write_bd(0.)?; // PSVPSCALE
@@ -186,7 +187,8 @@ fn dimension_variables(w: &mut BitWriter, style: u64) -> Result<()> {
     for _ in 0..3 {
         w.write_bs(0)?;
     } // dimension colors BYBLOCK
-    for v in [0, 2, 2, 2, 2, 0, 0, 2, 44, 0, 0] {
+      // DIMADEC..DIMJUST with DIMDSEP '.' (46), matching the Standard DIMSTYLE.
+    for v in [0, 2, 2, 2, 2, 0, 0, 2, 46, 0, 0] {
         w.write_bs(v)?;
     }
     w.write_b(0)?;

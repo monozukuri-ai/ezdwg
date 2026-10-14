@@ -6,7 +6,13 @@ from copy import deepcopy
 from os import fspath
 
 from . import raw
-from ._write_preflight import WriteDiagnostic, geometry_error, prepare_attributes
+from ._write_preflight import (
+    WriteDiagnostic,
+    geometry_error,
+    prepare_attributes,
+    strict_losses,
+)
+from ._dimension import kind_of
 from .entity import Entity
 
 
@@ -51,8 +57,21 @@ def import_drawing(doc, *, strict=True, layout=None, types=None, all_blocks=True
             else:
                 e.dxf["_insert_undecoded"] = True
 
+    for e in all_entities.values():
+        if e.dxftype == "DIMENSION":
+            block = e.dxf.get("anonymous_block_name")
+            if isinstance(block, str) and block and "geometry" not in e.dxf:
+                e.dxf["geometry"] = block
+            if "dimtype" in e.dxf:
+                try:
+                    e.dxf["dimtype"] = kind_of(e.dxf["dimtype"])
+                except ValueError:
+                    pass
     pending = list(named.values()) if all_blocks else []
     pending += [e.dxf.get("name") for e in selected.values() if e.dxftype == "INSERT"]
+    pending += [
+        e.dxf.get("geometry") for e in selected.values() if e.dxftype == "DIMENSION"
+    ]
     imported = {}
     while pending:
         name = pending.pop()
@@ -160,9 +179,13 @@ def import_drawing(doc, *, strict=True, layout=None, types=None, all_blocks=True
         for e in source
         if e.dxftype == "ATTRIB" and e.handle not in selected
     )
-    prepared, attrs, layers, ltypes, styles, header, losses = prepare_attributes(
-        doc, list(selected.values())
+    prepared, attrs, layers, ltypes, styles, header, losses, image_defs = (
+        prepare_attributes(doc, list(selected.values()))
     )
+    for row in image_defs:
+        drawing.image_defs[row["name"]] = deepcopy(
+            {k: v for k, v in row.items() if k != "name"}
+        )
     diagnostics.extend(losses)
     for target, rows in (
         (drawing.layers, layers),
@@ -251,9 +274,10 @@ def import_drawing(doc, *, strict=True, layout=None, types=None, all_blocks=True
             )
     drawing._next_handle = max(selected, default=0) + 1
     drawing._diagnostics = tuple(diagnostics)
-    if strict and diagnostics:
+    losses = strict_losses(diagnostics)
+    if strict and losses:
         detail = "; ".join(
-            f"{d.dxftype}.{d.attribute}: {d.message}" for d in diagnostics[:8]
+            f"{d.dxftype}.{d.attribute}: {d.message}" for d in losses[:8]
         )
         raise ValueError(f"cannot create lossless editable snapshot: {detail}")
     return drawing

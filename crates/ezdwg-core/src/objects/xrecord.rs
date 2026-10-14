@@ -266,11 +266,7 @@ pub struct XRecordHandles {
 }
 
 /// Assemble the final `XRecord`.
-pub fn assemble_xrecord(
-    object_handle: u64,
-    data: XRecordData,
-    handles: XRecordHandles,
-) -> XRecord {
+pub fn assemble_xrecord(object_handle: u64, data: XRecordData, handles: XRecordHandles) -> XRecord {
     XRecord {
         handle: Handle(object_handle),
         xdata_size: data.xdata_size,
@@ -357,10 +353,7 @@ pub fn parse_xdata_groups(xdata: &[u8]) -> Result<Vec<XDataGroup>> {
 }
 
 /// Version-aware XDATA parser. See [`parse_xdata_groups`].
-pub fn parse_xdata_groups_versioned(
-    xdata: &[u8],
-    r2007_plus: bool,
-) -> Result<Vec<XDataGroup>> {
+pub fn parse_xdata_groups_versioned(xdata: &[u8], r2007_plus: bool) -> Result<Vec<XDataGroup>> {
     let detailed = parse_xdata_groups_detailed(xdata, r2007_plus);
     match detailed.stop {
         XDataParseStop::CleanEnd => Ok(detailed.groups),
@@ -385,10 +378,7 @@ pub fn parse_xdata_groups_versioned(
 
 /// Parse XDATA and always return groups + stop reason (never errors on
 /// content; only empty input yields CleanEnd with zero groups).
-pub fn parse_xdata_groups_detailed(
-    xdata: &[u8],
-    r2007_plus: bool,
-) -> XDataParseResult {
+pub fn parse_xdata_groups_detailed(xdata: &[u8], r2007_plus: bool) -> XDataParseResult {
     let mut reader = BitReader::new(xdata);
     reader.set_pos(0, 0);
 
@@ -499,22 +489,12 @@ pub fn parse_xdata_groups_detailed(
     }
 }
 
-fn read_xdata_value(
-    reader: &mut BitReader<'_>,
-    code: i16,
-    r2007_plus: bool,
-) -> Result<XDataValue> {
+fn read_xdata_value(reader: &mut BitReader<'_>, code: i16, r2007_plus: bool) -> Result<XDataValue> {
     // Ranges follow LibreDWG `dwg_resbuf_value_type` / `dwg_decode_xdata`.
     let abs = code.unsigned_abs();
     match abs {
         // Strings
-        0..=9
-        | 100..=104
-        | 300..=309
-        | 410..=419
-        | 430..=439
-        | 470..=479
-        | 999 => {
+        0..=9 | 100..=104 | 300..=309 | 410..=419 | 430..=439 | 470..=479 | 999 => {
             if r2007_plus {
                 // LibreDWG R2007+: RS length, then length × UCS-2 code units.
                 let length = reader.read_rs(crate::bit::Endian::Little)? as usize;
@@ -633,7 +613,7 @@ mod tests {
     fn parse_r2007_ucs2_german_sharp_s() {
         let mut w = BitWriter::new();
         w.write_rs(crate::bit::Endian::Little, 8).unwrap(); // layer name
-        // "Maß" = M (0x004D) a (0x0061) ß (0x00DF)
+                                                            // "Maß" = M (0x004D) a (0x0061) ß (0x00DF)
         w.write_rs(crate::bit::Endian::Little, 3).unwrap();
         for cu in [0x004Du16, 0x0061u16, 0x00DFu16] {
             w.write_rs(crate::bit::Endian::Little, cu).unwrap();

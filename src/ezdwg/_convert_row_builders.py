@@ -251,3 +251,160 @@ def _as_mtext_row(
         attachment_point,
         drawing_direction,
     )
+
+
+def _as_hatch_row(entity: Entity) -> dict:
+    """Editable HATCH dictionary -> writer row (angles in radians, 2D points)."""
+    import math
+
+    from ._hatch import EDGE_TYPES
+
+    d = entity.dxf
+    paths = []
+    for path in d["paths"]:
+        row: dict = {}
+        if "flags" in path:
+            row["flags"] = int(path["flags"])
+        if "edges" in path:
+            edges = []
+            for edge in path["edges"]:
+                kind = EDGE_TYPES[edge["type"]]
+                e: dict = {"type": kind}
+                if kind == 1:
+                    e["start"] = tuple(float(v) for v in edge["start"][:2])
+                    e["end"] = tuple(float(v) for v in edge["end"][:2])
+                elif kind in (2, 3):
+                    e["center"] = tuple(float(v) for v in edge["center"][:2])
+                    if kind == 2:
+                        e["radius"] = float(edge["radius"])
+                    else:
+                        e["major_endpoint"] = tuple(float(v) for v in edge["major_axis"][:2])
+                        e["ratio"] = float(edge.get("ratio", 1.0))
+                    e["start_angle"] = math.radians(float(edge.get("start_angle", 0.0)))
+                    e["end_angle"] = math.radians(float(edge.get("end_angle", 360.0)))
+                    e["ccw"] = bool(edge.get("ccw", True))
+                else:
+                    e.update(
+                        degree=int(edge.get("degree", 3)),
+                        rational=bool(edge.get("rational", False)),
+                        periodic=bool(edge.get("periodic", False)),
+                        knots=[float(k) for k in edge.get("knots", [])],
+                        control_points=[
+                            tuple(float(v) for v in p[:2]) for p in edge.get("control_points", [])
+                        ],
+                        weights=[float(w) for w in edge.get("weights", [])],
+                    )
+                edges.append(e)
+            row["edges"] = edges
+        else:
+            row["vertices"] = [tuple(float(v) for v in p[:2]) for p in path["points"]]
+            row["closed"] = bool(path.get("closed", True))
+            if path.get("bulges") is not None:
+                row["bulges"] = [float(b) for b in path["bulges"]]
+        paths.append(row)
+    result = {
+        "handle": int(entity.handle),
+        "name": str(d.get("pattern_name", "SOLID")),
+        "solid_fill": bool(d.get("solid_fill", True)),
+        "paths": paths,
+        "style": int(d.get("hatch_style", 0)),
+        "pattern_type": int(d.get("pattern_type", 1)),
+        "seed_points": [tuple(float(v) for v in p[:2]) for p in d.get("seed_points", [])],
+    }
+    if d.get("pixel_size") is not None:
+        result["pixel_size"] = float(d["pixel_size"])
+    if not result["solid_fill"]:
+        result["pattern"] = {
+            "angle": math.radians(float(d.get("pattern_angle", 0.0))),
+            "scale": float(d.get("pattern_scale", 1.0)),
+            "double": bool(d.get("pattern_double", False)),
+            "lines": [
+                {
+                    "angle": math.radians(float(line.get("angle", 0.0))),
+                    "base": tuple(float(v) for v in line.get("base", (0.0, 0.0))[:2]),
+                    "offset": tuple(float(v) for v in line.get("offset", (0.0, 0.0))[:2]),
+                    "dashes": [float(v) for v in line.get("dashes", [])],
+                }
+                for line in d.get("pattern_lines", [])
+            ],
+        }
+    return result
+
+
+def _as_dimension_row(entity: Entity) -> dict:
+    """Editable DIMENSION dictionary -> writer row (radians, 3D points)."""
+    import math
+
+    from ._dimension import kind_of
+
+    d = entity.dxf
+
+    def p3(key):
+        value = d.get(key, (0.0, 0.0, 0.0))
+        return (float(value[0]), float(value[1]), float(value[2]) if len(value) > 2 else 0.0)
+
+    def p2(key, default=(0.0, 0.0)):
+        value = d.get(key)
+        if value is None:
+            return default
+        return (float(value[0]), float(value[1]))
+
+    text_midpoint = d.get("text_midpoint") or (0.0, 0.0, 0.0)
+    elevation = float(d.get("elevation", text_midpoint[2] if len(text_midpoint) > 2 else 0.0))
+    scale = d.get("insert_scale", (1.0, 1.0, 1.0))
+    return {
+        "handle": int(entity.handle),
+        "kind": kind_of(d.get("dimtype", "linear")),
+        "point10": p3("defpoint"),
+        "point13": p3("defpoint2"),
+        "point14": p3("defpoint3"),
+        "point15": p3("defpoint4"),
+        "point16": p2("defpoint5"),
+        "ext_line_rotation": math.radians(float(d.get("oblique_angle", 0.0))),
+        "dim_rotation": math.radians(float(d.get("angle", 0.0))),
+        "leader_length": float(d.get("leader_length", 0.0)),
+        "flags2": 1 if d.get("ordinate_x", True) else 0,
+        "text_midpoint": p2("text_midpoint"),
+        "elevation": elevation,
+        "flags": int(d.get("dim_flags", 3)),
+        "user_text": str(d.get("text", "") or ""),
+        "text_rotation": math.radians(float(d.get("text_rotation", 0.0))),
+        "horizontal_direction": math.radians(float(d.get("horizontal_direction", 0.0))),
+        "insert_scale": (float(scale[0]), float(scale[1]), float(scale[2])),
+        "insert_rotation": math.radians(float(d.get("insert_rotation", 0.0))),
+        "attachment_point": int(d.get("attachment_point", 5)),
+        "line_spacing_style": int(d.get("line_spacing_style", 1)),
+        "line_spacing_factor": float(d.get("line_spacing_factor", 1.0)),
+        "actual_measurement": float(d.get("actual_measurement") or 0.0),
+        "insert_point": p2("insert"),
+        "dimstyle": str(d.get("dimstyle", "Standard")),
+        "block_name": str(d.get("geometry", "")),
+    }
+
+
+def _as_image_row(entity: Entity) -> dict:
+    """Editable IMAGE dictionary -> writer row."""
+    d = entity.dxf
+
+    def p3(key, default=(0.0, 0.0, 0.0)):
+        value = d.get(key, default)
+        return (float(value[0]), float(value[1]), float(value[2]) if len(value) > 2 else 0.0)
+
+    row = {
+        "handle": int(entity.handle),
+        "image_def": str(d.get("image_def", "")),
+        "insert": p3("insert"),
+        "u_vector": p3("u_vector", (1.0, 0.0, 0.0)),
+        "v_vector": p3("v_vector", (0.0, 1.0, 0.0)),
+        "size": (float(d["size"][0]), float(d["size"][1])),
+        "display_props": int(d.get("display_props", 3)),
+        "clipping": bool(d.get("clipping", False)),
+        "brightness": int(d.get("brightness", 50)),
+        "contrast": int(d.get("contrast", 50)),
+        "fade": int(d.get("fade", 0)),
+        "clip_type": int(d.get("clip_type", 1)),
+    }
+    vertices = d.get("clip_vertices")
+    if vertices:
+        row["clip_vertices"] = [(float(v[0]), float(v[1])) for v in vertices]
+    return row

@@ -9,6 +9,8 @@ pub struct WriterDocument {
     pub linetypes: Vec<LinetypeDef>,
     pub text_styles: Vec<TextStyleDef>,
     pub metadata: WriterMetadata,
+    /// Raster image definitions (`ACAD_IMAGE_DICT`) referenced by IMAGE entities.
+    pub image_defs: Vec<ImageDef>,
 }
 
 impl Default for WriterDocument {
@@ -21,8 +23,24 @@ impl Default for WriterDocument {
             linetypes: Vec::new(),
             text_styles: Vec::new(),
             metadata: WriterMetadata::default(),
+            image_defs: Vec::new(),
         }
     }
+}
+
+/// IMAGEDEF object: the external raster file of one or more IMAGE entities.
+#[derive(Debug, Clone)]
+pub struct ImageDef {
+    /// Key in `ACAD_IMAGE_DICT`.
+    pub name: String,
+    pub file_path: String,
+    /// Image size in pixels.
+    pub size: (f64, f64),
+    pub is_loaded: bool,
+    /// Resolution units: 0 none, 2 centimeters, 5 inches.
+    pub resolution_units: u8,
+    /// Size of one pixel in drawing units.
+    pub pixel_size: (f64, f64),
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +181,9 @@ pub enum WriterEntity {
     Insert(InsertEntity),
     Attdef(AttributeEntity),
     Attrib(AttributeEntity),
+    Hatch(HatchEntity),
+    Dimension(DimensionEntity),
+    Image(ImageEntity),
 }
 
 impl WriterEntity {
@@ -184,6 +205,9 @@ impl WriterEntity {
             Self::MText(e) => &e.common,
             Self::Insert(e) => &e.common,
             Self::Attdef(e) | Self::Attrib(e) => &e.text.common,
+            Self::Hatch(e) => &e.common,
+            Self::Dimension(e) => &e.common,
+            Self::Image(e) => &e.common,
         }
     }
     pub fn common_mut(&mut self) -> &mut CommonEntityProps {
@@ -204,8 +228,212 @@ impl WriterEntity {
             Self::MText(e) => &mut e.common,
             Self::Insert(e) => &mut e.common,
             Self::Attdef(e) | Self::Attrib(e) => &mut e.text.common,
+            Self::Hatch(e) => &mut e.common,
+            Self::Dimension(e) => &mut e.common,
+            Self::Image(e) => &mut e.common,
         }
     }
+}
+
+/// IMAGE entity (class `AcDbRasterImage`, ODA 20.4.80).
+#[derive(Debug, Clone)]
+pub struct ImageEntity {
+    pub common: CommonEntityProps,
+    /// Name of the `ImageDef` in `WriterDocument::image_defs`.
+    pub image_def: String,
+    pub insert: (f64, f64, f64),
+    /// Drawing-unit vectors of one pixel step along the image rows/columns.
+    pub u_vector: (f64, f64, f64),
+    pub v_vector: (f64, f64, f64),
+    /// Image size in pixels (DXF 13).
+    pub size: (f64, f64),
+    /// DXF 70: 1 show image, 2 show when not aligned, 4 use clipping, 8 transparency.
+    pub display_props: u16,
+    pub clipping: bool,
+    pub brightness: u8,
+    pub contrast: u8,
+    pub fade: u8,
+    /// DXF 71: 1 rectangular (two corners), 2 polygonal.
+    pub clip_type: u16,
+    pub clip_vertices: Vec<(f64, f64)>,
+}
+
+/// DIMENSION (types 20-26) with the common dimension data of ODA 20.4.22.
+///
+/// Angles are radians; the extrusion comes from `common.formatting`. The
+/// rendered geometry lives in the referenced anonymous block (`*D...`).
+#[derive(Debug, Clone)]
+pub struct DimensionEntity {
+    pub common: CommonEntityProps,
+    pub kind: DimensionKind,
+    /// Text midpoint (DXF 11) in OCS; its Z is `elevation`.
+    pub text_midpoint: (f64, f64),
+    pub elevation: f64,
+    /// "Flags 1" (RC): bit 0 = text at the default position, bit 1 = unique block.
+    pub flags: u8,
+    pub user_text: String,
+    pub text_rotation: f64,
+    pub horizontal_direction: f64,
+    pub insert_scale: (f64, f64, f64),
+    pub insert_rotation: f64,
+    pub attachment_point: u16,
+    pub line_spacing_style: u16,
+    pub line_spacing_factor: f64,
+    pub actual_measurement: f64,
+    /// Insertion point of the anonymous block (DXF 12), OCS.
+    pub insert_point: (f64, f64),
+    pub dimstyle: String,
+    pub block_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum DimensionKind {
+    Linear {
+        point13: (f64, f64, f64),
+        point14: (f64, f64, f64),
+        point10: (f64, f64, f64),
+        ext_line_rotation: f64,
+        dim_rotation: f64,
+    },
+    Aligned {
+        point13: (f64, f64, f64),
+        point14: (f64, f64, f64),
+        point10: (f64, f64, f64),
+        ext_line_rotation: f64,
+    },
+    Angular3Pt {
+        point10: (f64, f64, f64),
+        point13: (f64, f64, f64),
+        point14: (f64, f64, f64),
+        point15: (f64, f64, f64),
+    },
+    Angular2Ln {
+        point16: (f64, f64),
+        point13: (f64, f64, f64),
+        point14: (f64, f64, f64),
+        point15: (f64, f64, f64),
+        point10: (f64, f64, f64),
+    },
+    Radius {
+        point10: (f64, f64, f64),
+        point15: (f64, f64, f64),
+        leader_length: f64,
+    },
+    Diameter {
+        point15: (f64, f64, f64),
+        point10: (f64, f64, f64),
+        leader_length: f64,
+    },
+    Ordinate {
+        point10: (f64, f64, f64),
+        point13: (f64, f64, f64),
+        point14: (f64, f64, f64),
+        /// "Flags 2" (RC): bit 0 set for an X-datum ordinate.
+        flags2: u8,
+    },
+}
+
+impl DimensionKind {
+    /// Internal DWG type code (ODA 20.4.23-20.4.29).
+    pub fn type_code(&self) -> u16 {
+        match self {
+            Self::Ordinate { .. } => 20,
+            Self::Linear { .. } => 21,
+            Self::Aligned { .. } => 22,
+            Self::Angular3Pt { .. } => 23,
+            Self::Angular2Ln { .. } => 24,
+            Self::Radius { .. } => 25,
+            Self::Diameter { .. } => 26,
+        }
+    }
+}
+
+/// HATCH boundary and pattern definition in OCS coordinates (ODA 20.4.75).
+///
+/// The elevation and extrusion come from `common.formatting`. Angles are radians.
+#[derive(Debug, Clone)]
+pub struct HatchEntity {
+    pub common: CommonEntityProps,
+    /// Pattern name (DXF 2); `SOLID` for solid fills.
+    pub name: String,
+    pub solid_fill: bool,
+    pub paths: Vec<HatchPathDef>,
+    /// Hatch style (DXF 75): 0 odd parity, 1 outermost, 2 whole area.
+    pub style: u16,
+    /// Pattern type (DXF 76): 0 user-defined, 1 predefined, 2 custom.
+    pub pattern_type: u16,
+    /// Required for pattern fills, ignored for solid fills.
+    pub pattern: Option<HatchPatternDef>,
+    /// Written when any path carries the derived flag (DXF 92 bit 4).
+    pub pixel_size: Option<f64>,
+    pub seed_points: Vec<(f64, f64)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HatchPathDef {
+    /// Boundary path type flags (DXF 92): 1 external, 2 polyline, 4 derived,
+    /// 8 textbox, 16 outermost. Bit 2 selects the polyline layout.
+    pub flags: u32,
+    pub data: HatchPathData,
+}
+
+#[derive(Debug, Clone)]
+pub enum HatchPathData {
+    Polyline {
+        closed: bool,
+        vertices: Vec<(f64, f64)>,
+        bulges: Option<Vec<f64>>,
+    },
+    Edges(Vec<HatchEdge>),
+}
+
+#[derive(Debug, Clone)]
+pub enum HatchEdge {
+    Line {
+        start: (f64, f64),
+        end: (f64, f64),
+    },
+    Arc {
+        center: (f64, f64),
+        radius: f64,
+        start_angle: f64,
+        end_angle: f64,
+        ccw: bool,
+    },
+    Ellipse {
+        center: (f64, f64),
+        /// Endpoint of the major axis relative to the center.
+        major_endpoint: (f64, f64),
+        ratio: f64,
+        start_angle: f64,
+        end_angle: f64,
+        ccw: bool,
+    },
+    Spline {
+        degree: u32,
+        rational: bool,
+        periodic: bool,
+        knots: Vec<f64>,
+        control_points: Vec<(f64, f64)>,
+        weights: Vec<f64>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct HatchPatternDef {
+    pub angle: f64,
+    pub scale: f64,
+    pub double: bool,
+    pub lines: Vec<HatchPatternLineDef>,
+}
+
+/// One family of pattern lines, already rotated and scaled (as stored in DWG).
+#[derive(Debug, Clone)]
+pub struct HatchPatternLineDef {
+    pub angle: f64,
+    pub base: (f64, f64),
+    pub offset: (f64, f64),
+    pub dashes: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Default)]

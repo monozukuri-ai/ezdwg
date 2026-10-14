@@ -55,6 +55,7 @@ SUPPORTED_ENTITY_TYPES = (
     "MTEXT",
     "LEADER",
     "HATCH",
+    "IMAGE",
     "TOLERANCE",
     "MLINE",
     "BLOCK",
@@ -2210,6 +2211,11 @@ _SIMPLE_ENTITY_REGISTRY: dict[str, _SimpleEntitySpec] = {
         rows_fn=lambda p: raw.decode_ray_entities(p),
         build_dxf=lambda row, _: (row[0], {"start": row[1], "unit_vector": row[2]}),
     ),
+    "IMAGE": _SimpleEntitySpec(
+        rows_fn=lambda p: raw.decode_image_entities(p),
+        build_dxf=lambda row, defs: _image_dxf(row, defs),
+        setup=lambda p: _image_defs_by_handle(p),
+    ),
     "XLINE": _SimpleEntitySpec(
         rows_fn=lambda p: raw.decode_xline_entities(p),
         build_dxf=lambda row, _: (row[0], {"start": row[1], "unit_vector": row[2]}),
@@ -2508,6 +2514,63 @@ def _polyline_2d_interpolated_points_map(
             points3d = _strip_duplicate_closure_point(points3d)
         interpolated[handle_key] = points3d
     return interpolated
+
+
+def _image_defs_by_handle(path: str) -> dict[int, dict[str, Any]]:
+    try:
+        rows = raw.decode_image_defs(path)
+    except Exception:
+        return {}
+    result = {}
+    for handle, file_path, size, is_loaded, units, pixel_size in rows:
+        stem = file_path.replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        result[int(handle)] = {
+            "image_def": stem or f"IMAGE_{int(handle)}",
+            "file_path": file_path,
+            "def_size": tuple(size),
+            "is_loaded": bool(is_loaded),
+            "resolution_units": int(units),
+            "pixel_size": tuple(pixel_size),
+        }
+    return result
+
+
+def _image_dxf(row: tuple, defs: dict[int, dict[str, Any]]) -> tuple[int, dict]:
+    (
+        handle,
+        insert,
+        u_vector,
+        v_vector,
+        size,
+        display_props,
+        clipping,
+        (brightness, contrast, fade),
+        clip_type,
+        clip_vertices,
+        image_def_handle,
+        reactor_handle,
+    ) = row
+    definition = defs.get(int(image_def_handle), {})
+    return (
+        handle,
+        {
+            "insert": insert,
+            "u_vector": u_vector,
+            "v_vector": v_vector,
+            "size": tuple(size),
+            "display_props": int(display_props),
+            "clipping": bool(clipping),
+            "brightness": int(brightness),
+            "contrast": int(contrast),
+            "fade": int(fade),
+            "clip_type": int(clip_type),
+            "clip_vertices": [tuple(v) for v in clip_vertices],
+            "image_def_handle": int(image_def_handle),
+            "reactor_handle": int(reactor_handle),
+            "image_def": definition.get("image_def"),
+            "file_path": definition.get("file_path"),
+        },
+    )
 
 
 def _build_dimension_common_dxf(

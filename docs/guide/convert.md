@@ -126,8 +126,10 @@ doc.export_dwg("output.dwg", version="AC1015")
 Current native writer scope:
 
 - Version: `AC1015` only
-- Entities: `LINE`, `RAY`, `XLINE`, `POINT`, `ARC`, `CIRCLE`, `ELLIPSE`, `SPLINE`, `SOLID`, `TRACE`, `3DFACE`, `LWPOLYLINE`, `POLYLINE_2D`, `POLYLINE_3D`, `TEXT`, `MTEXT`, `INSERT`, `ATTDEF`, `ATTRIB`
+- Entities: `LINE`, `RAY`, `XLINE`, `POINT`, `ARC`, `CIRCLE`, `ELLIPSE`, `SPLINE`, `SOLID`, `TRACE`, `3DFACE`, `LWPOLYLINE`, `POLYLINE_2D`, `POLYLINE_3D`, `TEXT`, `MTEXT`, `INSERT`, `ATTDEF`, `ATTRIB`, `HATCH`, `DIMENSION` (all seven kinds), `IMAGE`
 - Named/anonymous static block definitions, including nested INSERTs and attached attributes
+- Raster image definitions (`IMAGEDEF`, `IMAGEDEF_REACTOR`, `RASTERVARIABLES`, `ACAD_IMAGE_DICT`) and a `Standard` DIMSTYLE
+- True colours are rounded to the nearest ACI (R2000 stores ACI only) and reported as `approximated`
 
 A file path or `Document` exports **model space**. It does not export block
 definitions as loose geometry. An explicitly supplied `Layout` selects that
@@ -158,6 +160,12 @@ entity export. It preserves the following decoded attributes:
   3DFACE WCS corners and invisible edge flags.
 - SPLINE control points, knots, rational weights, closed/periodic flags and
   tolerances; open cubic fit points, fit tolerance and endpoint tangents.
+- HATCH boundary paths (polyline with bulges, or line/arc/ellipse/spline edges),
+  solid or pattern fill with its definition lines, style, elevation and extrusion.
+- DIMENSION definition points, text override, measurement, attachment and the
+  anonymous block that holds the rendered graphics; the `Standard` DIMSTYLE.
+- IMAGE placement (insertion, pixel vectors, size, display properties, brightness,
+  contrast, fade, clip boundary) with its IMAGEDEF file path and pixel size.
 
 The high-level writer chooses Windows-1252 or Windows-932 for the whole drawing,
 including layer/style names. Japanese text is supported. Characters that cannot
@@ -258,7 +266,10 @@ Convenience methods cover `add_line`, `add_point`, `add_ray`, `add_xline`,
 `add_arc`, `add_circle`, `add_ellipse`, `add_lwpolyline`, `add_text`, and `add_mtext`.
 Legacy polyline helpers are `add_polyline2d` and `add_polyline3d`.
 Face helpers are `add_solid`, `add_trace` and `add_3dface`.
-Spline helpers are `add_spline` and `add_spline_fit`.
+Spline helpers are `add_spline` and `add_spline_fit`. `add_hatch`, the dimension
+helpers (`add_linear_dim`, `add_aligned_dim`, `add_radius_dim`,
+`add_diameter_dim`, `add_angular_dim`, `add_ordinate_dim`, `add_dimension`) and
+`add_image` are described in their own sections below.
 `add_entity("LINE", {"start": (0, 0), "end": (1, 1)}, handle=100)` accepts an
 explicit handle; duplicates, zero, negatives and values outside unsigned 64-bit
 range are rejected. Automatic handles are not reused after deletion.
@@ -547,6 +558,103 @@ the extra data automatically and keeps it after the source file is removed.
 Tests use existing AC1014 through AC1032 samples (including strict loss rejection),
 independent AC1015/AC1018/AC1027 inputs and ODA direct read/resave. These are local
 and ODA checks; they do not establish native AutoCAD UI behavior.
+
+## True colours
+
+AC1015 stores colours as ACI only. An entity or layer `true_color`
+(`0xRRGGBB`) is accepted by the editable API and by `Document.edit()`; on save
+it is rounded to the nearest of the 255 palette entries (pure black and white
+map to 7, the foreground colour) and reported as a `WriteDiagnostic` with action
+`approximated`. Approximations do not fail strict saves or strict imports; the
+drawing keeps the requested `true_color` so a later writer can use it.
+
+```python
+drawing.layers["塗"] = {"true_color": 0x73B9FF}
+msp.add_line((0, 0), (10, 0), true_color=0xFF0000)  # written as ACI 1
+```
+
+`ezdwg._aci.nearest_aci(rgb)` and `aci_palette()` expose the palette.
+
+## Hatches
+
+```python
+msp.add_hatch([[(0, 0), (10, 0), (10, 5), (0, 5)]], color_index=1)  # solid fill
+msp.add_hatch(
+    [{"edges": [
+        {"type": "line", "start": (0, 0), "end": (4, 0)},
+        {"type": "arc", "center": (4, 2), "radius": 2, "start_angle": -90, "end_angle": 90},
+        {"type": "line", "start": (4, 4), "end": (0, 4)},
+        {"type": "line", "start": (0, 4), "end": (0, 0)},
+    ]}],
+    pattern="ANSI31", pattern_angle=30, pattern_scale=25.4,
+)
+```
+
+A path is a point list (a closed polyline), a dictionary with `points`
+(optional `bulges`, `closed`, `flags`), or a dictionary with `edges` (line, arc,
+ellipse with `major_axis`/`ratio`, or spline with control points and knots;
+angles in degrees). Without `pattern` the hatch is a solid fill. `pattern` is a
+name of the built-in definitions (`ANSI31`, `ANSI32`, `ANSI33`, `ANSI37`, `DOTS`,
+`LINE`, `NET`, in inches) or `acad.pat` rows `(angle, base_x, base_y, dx, dy,
+dashes)`; it is rotated by `pattern_angle`, scaled by `pattern_scale` and stored
+as `pattern_lines` (offsets in the OCS orientation, as AutoCAD stores them).
+`hatch_style` (0 odd parity, 1 outermost, 2 whole area), `elevation`,
+`extrusion` and `pixel_size`/`seed_points` are accepted. The writer stores
+non-associative hatches. The reader returns tessellated path points; an edited
+import keeps those as polyline paths.
+
+## Dimensions
+
+AutoCAD does not regenerate dimension graphics when it opens a drawing, so each
+DIMENSION references an anonymous block (`*D1`, ...) with its lines, arrowheads
+(filled `SOLID`s) and measurement `TEXT`. The helpers render that block with the
+`Standard` DIMSTYLE the writer stores (ISO-25 like: arrow 2.5, text 2.5, gap
+0.625, extension offset 0.625 / extension 1.25, two decimals, `.` separator):
+
+```python
+msp.add_linear_dim((0, 10), (0, 0), (50, 0))            # base on the dimension line
+msp.add_aligned_dim((0, 20), (30, 40), distance=5)
+msp.add_radius_dim((80, 10), radius=12, angle=30)
+msp.add_diameter_dim((80, 40), radius=10)
+msp.add_angular_dim((120, 0), (140, 0), (120, 20), radius=15)
+msp.add_ordinate_dim((150, 10), (150, 25))              # X datum, origin (0, 0)
+msp.add_dimension(                                      # two-line angular
+    "angular2ln",
+    defpoint2=(0, 100), defpoint3=(40, 100),            # first line
+    defpoint4=(0, 100), defpoint=(0, 140),              # second line
+    defpoint5=(20, 120),                                # point on the arc
+)
+```
+
+`text` overrides the measurement (`"<>"` inserts it, `" "` suppresses it).
+`update()` of a rendered dimension renders its block again; pass
+`geometry="*D9"` to use a block you built yourself (nothing is rendered then).
+Definition points follow the DXF names `defpoint` (10), `defpoint2` (13),
+`defpoint3` (14), `defpoint4` (15), `defpoint5` (16); `angle`, `oblique_angle`,
+`text_rotation` and `horizontal_direction` are degrees. Only the `Standard`
+DIMSTYLE can be referenced. `Document.edit()` imports the dimensions of a file
+with their existing blocks; `to_dwg()` carries them through a re-export.
+
+## Raster images
+
+```python
+drawing.image_defs["logo"] = {"file_path": "images/logo.png", "size": (640, 480)}
+msp.add_image("logo", (10, 20), width=64)             # keeps the pixel aspect ratio
+msp.add_image("logo", (100, 20), width=32, height=32, rotation=90, clipping=True)
+```
+
+`image_defs` maps a name to `file_path`, `size` (pixels), optional
+`pixel_size` (drawing units per pixel, default 1), `resolution_units` (0 none,
+2 centimeters, 5 inches) and `is_loaded`. `add_image` derives the pixel step
+vectors (`u_vector`, `v_vector`) from `width`/`height`/`rotation`, or takes them
+explicitly. `display_props`, `brightness`, `contrast`, `fade`, `clipping` and a
+rectangular (`clip_type=1`, two corners) or polygonal (`clip_type=2`) clip
+boundary in pixel coordinates are stored. The writer adds the `IMAGE`,
+`IMAGEDEF`, `IMAGEDEF_REACTOR` and `RASTERVARIABLES` classes, the
+`ACAD_IMAGE_DICT`/`ACAD_IMAGE_VARS` dictionary entries and one reactor per
+image. The image file itself is not embedded; the path is stored as given. The
+reader exposes `IMAGE` entities with `file_path` and `image_def` (the file stem)
+resolved from their IMAGEDEF, and `Document.edit()` recreates `image_defs`.
 
 ## Blocks and Attributes
 

@@ -7,7 +7,7 @@ pub mod object_map;
 pub mod object_record;
 pub mod sections;
 
-use self::classes::encode_minimal_classes_section;
+use self::classes::{encode_classes_section, IMAGEDEF_REACTOR_CLASS, IMAGE_CLASS};
 use self::entities::{
     encode_arc_entity_payload, encode_circle_entity_payload, encode_ellipse_entity_payload,
     encode_line_entity_payload, encode_lwpolyline_entity_payload, encode_mtext_entity_payload,
@@ -42,7 +42,8 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
     }
 
     crate::writer::validation::validate_document(doc)?;
-    let classes_section = encode_minimal_classes_section()?;
+    let with_images = !doc.image_defs.is_empty();
+    let classes_section = encode_classes_section(with_images)?;
     let mut allocator = HandleAllocator::new(1);
     if config.preserve_input_handles {
         for entity in doc.layouts().flatten() {
@@ -77,6 +78,7 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
         .collect::<Result<_>>()?;
     let mut attribute_handles = std::collections::HashMap::new();
     let mut polyline_handles = std::collections::HashMap::new();
+    let mut image_reactors = std::collections::HashMap::new();
     for (entities, handles) in doc.layouts().zip(&layout_handles) {
         for (e, &h) in entities.iter().zip(handles) {
             if let WriterEntity::Polyline2d(poly) | WriterEntity::Polyline3d(poly) = e {
@@ -95,6 +97,9 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
                     .collect::<Result<Vec<_>>>()?;
                 let seqend = if attrs.is_empty() { 0 } else { allocate(None)? };
                 attribute_handles.insert(h, (attrs, seqend));
+            }
+            if let WriterEntity::Image(_) = e {
+                image_reactors.insert(h, allocate(None)?);
             }
         }
     }
@@ -387,6 +392,72 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
                         record,
                     ));
                 }
+                WriterEntity::Dimension(dim) => {
+                    let block = database
+                        .blocks
+                        .get(&dim.block_name.to_uppercase())
+                        .map(|b| b.0)
+                        .ok_or_else(|| {
+                            DwgError::new(
+                                ErrorKind::Format,
+                                format!("undefined dimension block: {}", dim.block_name),
+                            )
+                        })?;
+                    let payload = entities::dimension::encode_dimension_entity_payload(
+                        common,
+                        dim,
+                        database.dimstyle,
+                        block,
+                    )?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        encode_object_record(&payload)?,
+                    ));
+                }
+                WriterEntity::Image(image) => {
+                    let reactor = image_reactors[&handle];
+                    let def = database.image_def_handle(&image.image_def)?;
+                    let payload = entities::image::encode_image_entity_payload(
+                        IMAGE_CLASS,
+                        common,
+                        image,
+                        def,
+                        reactor,
+                    )?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        encode_object_record(&payload)?,
+                    ));
+                    let reactor_payload = entities::image::encode_image_def_reactor_object(
+                        doc.metadata.codepage,
+                        IMAGEDEF_REACTOR_CLASS,
+                        reactor,
+                        handle,
+                    )?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(reactor),
+                            offset: 0,
+                        },
+                        encode_object_record(&reactor_payload)?,
+                    ));
+                }
+                WriterEntity::Hatch(hatch) => {
+                    let payload = entities::hatch::encode_hatch_entity_payload(common, hatch)?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        encode_object_record(&payload)?,
+                    ));
+                }
                 WriterEntity::Attdef(attr) => {
                     let payload = entities::block::encode_attribute(common, attr, true)?;
                     record_rows.push((
@@ -468,7 +539,7 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
         }
     }
 
-    for (handle, payload) in database.objects(&layout_handles, doc)? {
+    for (handle, payload) in database.objects(&layout_handles, doc, &image_reactors)? {
         record_rows.push((
             ObjectRef {
                 handle: Handle(handle),

@@ -23,7 +23,12 @@ from .document import (
     _present_supported_types,
     read,
 )
-from ._write_preflight import WriteDiagnostic, geometry_error, prepare_attributes
+from ._write_preflight import (
+    WriteDiagnostic,
+    geometry_error,
+    prepare_attributes,
+    strict_losses,
+)
 from .entity import Entity
 from ._convert_utils import (
     _MAX_COORD_ABS,
@@ -48,7 +53,10 @@ from ._convert_row_builders import (
     _as_arc_row,
     _as_circle_row,
     _as_ellipse_row,
+    _as_dimension_row,
     _as_face_row,
+    _as_hatch_row,
+    _as_image_row,
     _as_legacy_polyline_row,
     _as_line_row,
     _as_lwpolyline_row,
@@ -166,6 +174,9 @@ _DWG_WRITABLE_ENTITY_TYPES = {
     "TEXT",
     "MTEXT",
     "INSERT", "ATTDEF", "ATTRIB",
+    "HATCH",
+    "DIMENSION",
+    "IMAGE",
 }
 _BLOCK_INSERT_SAFETY_CACHE: weakref.WeakKeyDictionary[Any, dict[str, tuple[bool, bool, float | None]]] = weakref.WeakKeyDictionary()
 _BLOCK_LAYOUT_METRICS_CACHE: weakref.WeakKeyDictionary[Any, dict[str, tuple[int, int, float | None]]] = weakref.WeakKeyDictionary()
@@ -251,7 +262,9 @@ def to_dwg(
             doc = source if isinstance(source, Document) else read(source)
             source_path, layout = doc.path, doc.modelspace()
         entities = _resolve_dwg_export_entities(layout, types)
-        if any(e.dxftype in {"INSERT", "ATTDEF", "ATTRIB"} for e in entities):
+        if any(
+            e.dxftype in {"INSERT", "ATTDEF", "ATTRIB", "DIMENSION"} for e in entities
+        ):
             from ._drawing_import import import_drawing
 
             drawing = import_drawing(
@@ -271,6 +284,7 @@ def to_dwg(
         text_styles,
         metadata,
         diagnostics,
+        image_defs,
     ) = prepared
 
     total = 0
@@ -288,6 +302,9 @@ def to_dwg(
     circle_rows: list[tuple[int, float, float, float, float]] = []
     ellipse_rows = []
     spline_rows = []
+    hatch_rows: list[dict] = []
+    dimension_rows: list[dict] = []
+    image_rows: list[dict] = []
     solid_rows, trace_rows, face3d_rows = [], [], []
     polyline2d_rows, polyline3d_rows = [], []
     lwpolyline_rows: list[
@@ -323,6 +340,9 @@ def to_dwg(
         "CIRCLE": (_as_circle_row, circle_rows),
         "ELLIPSE": (_as_ellipse_row, ellipse_rows),
         "SPLINE": (_as_spline_row, spline_rows),
+        "HATCH": (_as_hatch_row, hatch_rows),
+        "DIMENSION": (_as_dimension_row, dimension_rows),
+        "IMAGE": (_as_image_row, image_rows),
         "SOLID": (_as_face_row, solid_rows),
         "TRACE": (_as_face_row, trace_rows),
         "3DFACE": (_as_face_row, face3d_rows),
@@ -412,14 +432,15 @@ def to_dwg(
         )
 
     skipped = total - written
-    if strict and (skipped or diagnostics):
+    strict_diagnostics = strict_losses(diagnostics)
+    if strict and (skipped or strict_diagnostics):
         summary = ", ".join(f"{t}:{n}" for t, n in sorted(skipped_by_type.items()))
         losses = "; ".join(
             f"{d.dxftype}[{d.handle}].{d.attribute}: {d.message}"
-            for d in diagnostics[:8]
+            for d in strict_diagnostics[:8]
         )
         raise ValueError(
-            f"failed to write {skipped} entities ({summary}); {len(diagnostics)} diagnostics: {losses}"
+            f"failed to write {skipped} entities ({summary}); {len(strict_diagnostics)} diagnostics: {losses}"
         )
 
     out_path = Path(output_path)
@@ -456,6 +477,14 @@ def to_dwg(
         traces=trace_rows,
         faces3d=face3d_rows,
         splines=spline_rows,
+        hatches=hatch_rows,
+        dimensions=dimension_rows,
+        images=image_rows,
+        image_defs=[
+            d
+            for d in image_defs
+            if any(r["image_def"] == d["name"] for r in image_rows)
+        ],
     )
 
     # Python query caches are path-based; an atomic same-path replacement must

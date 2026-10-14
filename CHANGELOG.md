@@ -3,6 +3,35 @@
 ## Unreleased
 
 ### Native DWG writer
+- Add native HATCH writing: `add_hatch` with polyline paths (bulges) or
+  line/arc/ellipse/spline edge paths, solid fills and pattern fills with their
+  definition lines (built-in `ANSI31`/`ANSI32`/`ANSI33`/`ANSI37`/`DOTS`/`LINE`/
+  `NET` or `acad.pat` rows, rotated and scaled on insertion), hatch style,
+  elevation, extrusion, pixel size and seed points. Editable imports keep the
+  tessellated boundaries of a read hatch; `to_dwg` carries HATCH through a
+  re-export. Verified by reader roundtrips and ODA read/resave.
+- Add native DIMENSION writing for linear, aligned, radius, diameter, angular
+  (3-point and 2-line) and ordinate dimensions with the common dimension data,
+  a `Standard` DIMSTYLE record (ISO-25 like defaults, `.` decimal separator,
+  header `DIMSTYLE` handle) and an anonymous block (`*D1`, ...) rendered from
+  the definition points: extension lines, dimension line, filled arrowheads and
+  measurement text. Helpers `add_linear_dim`, `add_aligned_dim`,
+  `add_radius_dim`, `add_diameter_dim`, `add_angular_dim`, `add_ordinate_dim`
+  and `add_dimension`; `update()` renders the block again; `geometry` selects a
+  user-built block. Editable imports and re-exports keep existing dimension
+  blocks. Verified by reader roundtrips and ODA read/resave.
+- Add native IMAGE writing (`AcDbRasterImage` class) with `Drawing.image_defs`
+  and `add_image`: insertion, pixel step vectors, size, display properties,
+  brightness/contrast/fade, rectangular or polygonal clip boundary, plus the
+  IMAGEDEF, IMAGEDEF_REACTOR and RASTERVARIABLES objects, the `IMAGE` classes
+  and the `ACAD_IMAGE_DICT`/`ACAD_IMAGE_VARS` dictionary entries. The reader
+  decodes IMAGE entities (`decode_image_entities`, `decode_image_defs`) and
+  `Document.edit()` recreates `image_defs`. Verified by ODA read/resave.
+- Accept `true_color` (`0xRRGGBB`) on entities, layers and imported documents:
+  AC1015 stores ACI only, so the nearest of the 255 palette entries is written
+  (black and white map to 7) and reported with action `approximated`, which no
+  longer fails strict saves or strict `Document.edit()` imports.
+- The DWG header now writes `DIMDSEP` as `.` (46) instead of `,`.
 - Add native SPLINE writing, `add_spline` / `add_spline_fit`, editable imports,
   block support and keyword-only raw spline rows. Retain control points, knots,
   rational weights, closure/periodicity, tolerances, fit points and endpoint tangents.

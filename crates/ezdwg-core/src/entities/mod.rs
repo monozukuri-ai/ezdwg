@@ -10,6 +10,7 @@ pub mod dim_radius;
 pub mod ellipse;
 pub mod face3d;
 pub mod hatch;
+pub mod image;
 pub mod insert;
 pub mod leader;
 pub mod line;
@@ -82,6 +83,9 @@ pub use face3d::{
 pub use hatch::{
     decode_hatch, decode_hatch_r14, decode_hatch_r2004, decode_hatch_r2007, decode_hatch_r2010,
     decode_hatch_r2013, HatchEntity, HatchPath, HatchPattern, HatchPatternLine,
+};
+pub use image::{
+    decode_image, decode_image_r2007, decode_image_r2010, decode_image_r2013, ImageEntity,
 };
 pub use insert::{
     decode_insert, decode_insert_r14, decode_insert_r2007, decode_insert_r2010,

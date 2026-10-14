@@ -171,22 +171,32 @@ def test_attribute_loss_rejects_in_strict_and_reports_in_normal(monkeypatch, tmp
     ezdwg.raw.write_ac1015_line_dwg(str(source), [(10, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0)])
     doc = ezdwg.read(str(source))
     entity = next(doc.modelspace().query())
-    entity.dxf["true_color"] = 0x123456
+    entity.dxf["transparency"] = 0.5
+    entity.dxf["true_color"] = 0xFF0000
     monkeypatch.setattr(
         convert_module, "_resolve_dwg_export_entities", lambda *args: [entity]
     )
     out = tmp_path / "out.dwg"
     out.write_bytes(b"keep")
-    with pytest.raises(ValueError, match="true_color"):
+    with pytest.raises(ValueError, match="transparency"):
         ezdwg.to_dwg(doc, str(out), strict=True)
     assert out.read_bytes() == b"keep"
     result = ezdwg.to_dwg(doc, str(out))
     assert result.written_entities == 1
     assert result.skipped_entities == 0
     assert any(
-        d.attribute == "true_color" and d.action == "dropped"
+        d.attribute == "transparency" and d.action == "dropped"
         for d in result.diagnostics
     )
+    # AC1015 keeps the nearest ACI of a true colour and reports the rounding.
+    assert any(
+        d.attribute == "true_color" and d.action == "approximated"
+        for d in result.diagnostics
+    )
+    (written,) = ezdwg.read(str(out)).modelspace().query("LINE")
+    assert written.dxf["color_index"] == 1
+    del entity.dxf["transparency"]
+    assert ezdwg.to_dwg(doc, str(out), strict=True).written_entities == 1
 
 
 @pytest.mark.parametrize(

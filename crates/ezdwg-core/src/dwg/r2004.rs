@@ -212,7 +212,6 @@ pub fn build_object_index(bytes: &[u8], config: &ParseConfig) -> Result<ObjectIn
     Ok(ObjectIndex::from_objects(objects))
 }
 
-
 /// Read the absolute object handle from the body at `offset`.
 ///
 /// Deterministic only: object-record framing, type code, then the leading
@@ -221,7 +220,11 @@ pub fn build_object_index(bytes: &[u8], config: &ParseConfig) -> Result<ObjectIn
 /// no recovery scan. Returns `None` when framing/type/handle cannot be read
 /// or the handle is not an absolute (code 0) non-zero value — caller keeps
 /// the map handle in that case.
-pub(crate) fn peek_body_handle(objects_data: &[u8], offset: u32, version: &DwgVersion) -> Option<u64> {
+pub(crate) fn peek_body_handle(
+    objects_data: &[u8],
+    offset: u32,
+    version: &DwgVersion,
+) -> Option<u64> {
     let record = parse_object_record_owned(objects_data, offset).ok()?;
     let mut reader = record.bit_reader();
     match version {
@@ -264,13 +267,15 @@ pub(crate) fn rebind_object_refs_to_body_handles(
 ) -> Vec<ObjectRef> {
     objects
         .into_iter()
-        .map(|obj| match peek_body_handle(objects_data, obj.offset, version) {
-            Some(body) => ObjectRef {
-                handle: Handle(body),
-                offset: obj.offset,
+        .map(
+            |obj| match peek_body_handle(objects_data, obj.offset, version) {
+                Some(body) => ObjectRef {
+                    handle: Handle(body),
+                    offset: obj.offset,
+                },
+                None => obj,
             },
-            None => obj,
-        })
+        )
         .collect()
 }
 
@@ -314,10 +319,7 @@ fn select_best_r21_duplicate_handle_candidates(
                     .get(&(candidate.handle.0, candidate.offset))
                     .copied()
                     .unwrap_or_default();
-                (
-                    r21_duplicate_rank(candidate, &info),
-                    candidate.offset,
-                )
+                (r21_duplicate_rank(candidate, &info), candidate.offset)
             })
             .collect();
         // Best rank first; within equal rank, lowest offset wins (stable).
@@ -409,7 +411,6 @@ fn inspect_r21_duplicate_handle_candidate(
         ),
     }
 }
-
 
 fn decode_r21_candidate_common_entity_handle(
     record: &ObjectRecord<'_>,

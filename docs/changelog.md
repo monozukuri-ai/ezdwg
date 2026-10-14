@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Native DWG writer
+- HATCH writing (`add_hatch`): polyline or edge boundary paths, solid and
+  pattern fills with built-in or `acad.pat` definitions.
+- DIMENSION writing for all seven kinds with a `Standard` DIMSTYLE and a
+  rendered anonymous block; helpers `add_linear_dim`, `add_aligned_dim`,
+  `add_radius_dim`, `add_diameter_dim`, `add_angular_dim`, `add_ordinate_dim`.
+- IMAGE writing with `Drawing.image_defs`/`add_image`, the raster classes and
+  dictionary entries; the reader decodes IMAGE entities and their IMAGEDEF.
+- `true_color` on entities and layers is rounded to the nearest ACI and reported
+  as `approximated` (informational in strict mode).
+- The header `DIMDSEP` is now `.`.
+
 ### Added
 - Layouts. `Document.layouts()` returns the layout table: the model tab and
   the paper-space sheets with their name, tab order, block record, paper size,

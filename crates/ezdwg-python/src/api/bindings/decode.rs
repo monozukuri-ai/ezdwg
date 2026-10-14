@@ -2476,6 +2476,35 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
+        } else if matches_type_name(header.type_code, 0, "IMAGE", &dynamic_types) {
+            let entity = match decode_image_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
+            let layer_handle = layer_handle_remap
+                .get(&layer_handle)
+                .copied()
+                .unwrap_or(layer_handle);
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                layer_handle,
+            ));
         } else if matches_type_name(header.type_code, 0x2E, "TOLERANCE", &dynamic_types) {
             let entity = match decode_tolerance_for_version(
                 &mut reader,
@@ -4494,6 +4523,26 @@ pub fn decode_ray_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<Ray
 }
 
 #[pyfunction(signature = (path, limit=None))]
+pub fn decode_image_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<ImageEntityRow>> {
+    collect_entity_rows(path, limit, 0, "IMAGE", decode_image_for_version, |e| {
+        (
+            e.handle,
+            e.insert,
+            e.u_vector,
+            e.v_vector,
+            e.size,
+            e.display_props,
+            e.clipping,
+            (e.brightness, e.contrast, e.fade),
+            e.clip_type,
+            e.clip_vertices,
+            e.image_def_handle,
+            e.reactor_handle,
+        )
+    })
+}
+
+#[pyfunction(signature = (path, limit=None))]
 pub fn decode_xline_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<XLineEntityRow>> {
     collect_entity_rows(
         path,
@@ -5416,6 +5465,15 @@ impl_version_dispatch! {
     r2013: entities::decode_ray_r2013;
     r2007: entities::decode_ray_r2007;
     default: entities::decode_ray;
+}
+
+impl_version_dispatch! {
+    no_r14;
+    fn decode_image_for_version -> entities::ImageEntity;
+    r2010: entities::decode_image_r2010;
+    r2013: entities::decode_image_r2013;
+    r2007: entities::decode_image_r2007;
+    default: entities::decode_image;
 }
 
 impl_version_dispatch! {

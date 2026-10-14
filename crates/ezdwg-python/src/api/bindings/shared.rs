@@ -270,6 +270,20 @@ type RegionEntityRow = (u64, Vec<u64>);
 type Solid3dEntityRow = (u64, Vec<u64>);
 type BodyEntityRow = (u64, Vec<u64>);
 type RayEntityRow = (u64, Point3, Point3);
+type ImageEntityRow = (
+    u64,
+    Point3,
+    Point3,
+    Point3,
+    (f64, f64),
+    u16,
+    bool,
+    (u8, u8, u8),
+    u16,
+    Vec<(f64, f64)>,
+    u64,
+    u64,
+);
 type XLineEntityRow = (u64, Point3, Point3);
 type PolylineVerticesRow = (u64, u16, Vec<Point3>);
 type PolylineInterpolatedRow = (u64, u16, bool, Vec<Point3>);

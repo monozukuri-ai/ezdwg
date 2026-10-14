@@ -211,7 +211,7 @@ def test_invalid_handles(handle):
         {"color_index": 300},
         {"lineweight": 123},
         {"center": (float("inf"), 0, 0)},
-        {"true_color": 0},
+        {"true_color": -1},
     ],
 )
 def test_invalid_direct_mutation_preserves_output(tmp_path, change):
@@ -239,10 +239,10 @@ def test_unknown_attributes_and_versions_reject():
 
 def test_unsupported_direct_attribute_reports_in_non_strict(tmp_path):
     doc = ezdwg.new()
-    doc.modelspace().add_point((0, 0)).dxf["true_color"] = 0
+    doc.modelspace().add_point((0, 0)).dxf["transparency"] = 0.5
     result = doc.save(tmp_path / "out.dwg", strict=False)
     assert result.written_entities == 1
-    assert any(d.attribute == "true_color" for d in result.diagnostics)
+    assert any(d.attribute == "transparency" for d in result.diagnostics)
 
 
 def test_failed_replacement_keeps_state_and_cleans_temporary(tmp_path):

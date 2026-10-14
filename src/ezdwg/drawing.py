@@ -10,6 +10,11 @@ from copy import deepcopy
 from os import PathLike, fspath
 from typing import TYPE_CHECKING, Any
 
+from ._aci import describe_approximation, nearest_aci, true_color_to_rgb
+from ._dimension import FIELDS as DIMENSION_FIELDS
+from ._dimension import kind_of, render_dimension
+from ._image import FIELDS as IMAGE_FIELDS
+from ._image import image_def_error
 from ._write_preflight import (
     ATTRIBUTES,
     WriteDiagnostic,
@@ -27,6 +32,7 @@ _TABLE_KINDS = {"DOCUMENT", "HEADER", "LAYER", "LTYPE", "STYLE", "BLOCK"}
 _COMMON = {
     "layer",
     "color_index",
+    "true_color",
     "linetype",
     "linetype_scale",
     "lineweight",
@@ -90,6 +96,24 @@ _FIELDS = {
         "style",
     },
 }
+_FIELDS["HATCH"] = {
+    "paths",
+    "solid_fill",
+    "associative",
+    "pattern_name",
+    "pattern_angle",
+    "pattern_scale",
+    "pattern_double",
+    "pattern_lines",
+    "hatch_style",
+    "pattern_type",
+    "pixel_size",
+    "seed_points",
+    "elevation",
+    "extrusion",
+}
+_FIELDS["DIMENSION"] = set(DIMENSION_FIELDS)
+_FIELDS["IMAGE"] = set(IMAGE_FIELDS)
 _FIELDS["INSERT"] = {
     "name",
     "insert",
@@ -113,7 +137,22 @@ _FIELDS["POLYLINE_2D"] = {
     "elevation",
 } | _NORMAL
 _FIELDS["POLYLINE_3D"] = {"points", "flags", "closed", "curve_type"}
-_POINTS = {"start", "end", "location", "center", "insert", "align_point"}
+_POINTS = {
+    "start",
+    "end",
+    "location",
+    "center",
+    "insert",
+    "align_point",
+    "u_vector",
+    "v_vector",
+    "defpoint",
+    "defpoint2",
+    "defpoint3",
+    "defpoint4",
+    "defpoint5",
+    "text_midpoint",
+}
 _VECTORS = {
     "extrusion",
     "unit_vector",
@@ -156,6 +195,8 @@ def _check_entity(entity: Entity) -> None:
     error = geometry_error(entity)
     if error:
         raise ValueError(f"{entity.dxftype}: {error}")
+    if entity.dxf.get("true_color") is not None:
+        true_color_to_rgb(entity.dxf["true_color"])
     if entity.dxftype == "LWPOLYLINE":
         if any(len(p) != 2 for p in entity.dxf["points"]):
             raise ValueError(
@@ -184,6 +225,8 @@ class Drawing:
         self.layers: dict[str, dict[str, Any]] = {"0": {"color_index": 7}}
         self.linetypes: dict[str, dict[str, Any]] = {}
         self.text_styles: dict[str, dict[str, Any]] = {"Standard": {"font": "txt"}}
+        #: Raster image definitions: name -> {"file_path", "size", "pixel_size", ...}.
+        self.image_defs: dict[str, dict[str, Any]] = {}
         self.header: dict[str, Any] = {
             "insunits": 0,
             "lunits": 2,
@@ -197,6 +240,38 @@ class Drawing:
         self.blocks = BlockTable(self)
         self._layout = EditableLayout(self)
         self._diagnostics: tuple[WriteDiagnostic, ...] = ()
+        self._rendered_dimensions: set[str] = set()
+
+    def render_dimension(self, entity: Entity) -> str:
+        """(Re)build the anonymous block of a DIMENSION from its definition points.
+
+        Returns the block name. The measurement, text midpoint and text
+        rotation of the entity are derived from the rendering unless the
+        dictionary already fixes them with ``text_midpoint``/``text_rotation``
+        (``actual_measurement`` is always recomputed).
+        """
+        if entity.dxftype != "DIMENSION":
+            raise ValueError("render_dimension requires a DIMENSION")
+        entities, derived = render_dimension(entity.dxf)
+        name = entity.dxf.get("geometry")
+        if name is None or name not in self.blocks:
+            index = 1
+            while f"*D{index}" in self.blocks:
+                index += 1
+            name = f"*D{index}"
+            self.blocks.new(name)
+        block = self.blocks[name]
+        for member in list(block):
+            block.delete(member)
+        for dxftype, dxf in entities:
+            block.add_entity(dxftype, dxf)
+        entity.dxf["geometry"] = name
+        entity.dxf["actual_measurement"] = derived["actual_measurement"]
+        if "text_midpoint" not in entity.dxf or name in self._rendered_dimensions:
+            entity.dxf["text_midpoint"] = (*derived["text_midpoint"], 0.0)
+            entity.dxf["text_rotation"] = derived["text_rotation"]
+        self._rendered_dimensions.add(name)
+        return name
 
     @classmethod
     def from_document(cls, doc: Document, *, strict: bool = True) -> Drawing:
@@ -240,6 +315,7 @@ class Drawing:
             list(self.blocks)
             if include_all_blocks
             else [e.dxf.get("name") for e in entities if e.dxftype == "INSERT"]
+            + [e.dxf.get("geometry") for e in entities if e.dxftype == "DIMENSION"]
         )
         blocks = {}
         while pending:
@@ -258,6 +334,8 @@ class Drawing:
                 selected[e.handle] = e
                 if e.dxftype == "INSERT":
                     pending.append(e.dxf.get("name"))
+                elif e.dxftype == "DIMENSION":
+                    pending.append(e.dxf.get("geometry"))
         for handle in tuple(selected):
             if handle in self._attributes:
                 selected.update((e.handle, e) for e in self._attributes[handle])
@@ -340,26 +418,61 @@ class Drawing:
                 for k, v in data.items()
                 if k in _COMMON | ATTRIBUTES | {"style"} and v is not None
             }
+            # AC1015 has no true colour: round it to the nearest ACI and report.
+            true_color = attrs[entity.handle].pop("true_color", None)
+            if true_color is not None:
+                index = nearest_aci(true_color)
+                attrs[entity.handle]["color_index"] = index
+                diagnostics.append(
+                    WriteDiagnostic(
+                        entity.handle,
+                        entity.dxftype,
+                        "true_color",
+                        describe_approximation(true_color, index),
+                        "approximated",
+                    )
+                )
             # New entities default to ByLayer (the raw tuple API defaults to ACI 7).
             attrs[entity.handle].setdefault("color_index", 256)
 
-        def rows(table):
+        def rows(table, kind=None):
             result = {}
             for name, props in table.items():
                 if "name" in props:
                     raise ValueError("table name belongs in the dictionary key")
-                result[name] = {"name": name, **deepcopy(props)}
+                row = {"name": name, **deepcopy(props)}
+                if kind == "LAYER" and row.get("true_color") is not None:
+                    index = nearest_aci(row.pop("true_color"))
+                    row["color_index"] = index
+                    diagnostics.append(
+                        WriteDiagnostic(
+                            None,
+                            "LAYER",
+                            "true_color",
+                            f"layer {name!r}: "
+                            + describe_approximation(props["true_color"], index),
+                            "approximated",
+                        )
+                    )
+                elif kind == "LAYER":
+                    row.pop("true_color", None)
+                result[name] = row
             return result
 
+        image_rows = {}
+        for name, props in self.image_defs.items():
+            image_def_error(name, props)
+            image_rows[name] = {"name": name, **deepcopy(props)}
         return prepare_strings(
             prepared,
             attrs,
-            rows(self.layers),
+            rows(self.layers, "LAYER"),
             rows(self.linetypes),
             rows(self.text_styles),
             deepcopy(self.header),
             diagnostics,
             block_rows,
+            image_rows,
         )
 
 
@@ -466,8 +579,19 @@ class EditableLayout:
         return self.get(entity)
 
     def update(self, entity: Entity | int, **attributes: Any) -> Entity:
-        """Validate an update before changing the live entity in place."""
+        """Validate an update before changing the live entity in place.
+
+        A DIMENSION whose block was rendered by ``add_dimension`` is rendered
+        again so its anonymous block matches the new definition.
+        """
         current = self._resolve(entity)
+        if current.dxftype == "DIMENSION" and current.dxf.get("geometry") in self.doc._rendered_dimensions:
+            updated = self._update(current, **attributes)
+            self.doc.render_dimension(updated)
+            return updated
+        return self._update(current, **attributes)
+
+    def _update(self, current: Entity, **attributes: Any) -> Entity:
         data = _normalize({**current.dxf, **attributes})
         _check_entity(Entity(current.dxftype, current.handle, data))
         current.dxf.clear()
@@ -725,6 +849,213 @@ class EditableLayout:
         self, points: Sequence[Sequence[float]], **attributes: Any
     ) -> Entity:
         return self.add_entity("LWPOLYLINE", {"points": points, **attributes})
+
+    def add_hatch(
+        self,
+        paths: Sequence[Mapping[str, Any] | Sequence[Sequence[float]]],
+        *,
+        pattern: str | Sequence[Any] | None = None,
+        pattern_angle: float = 0.0,
+        pattern_scale: float = 1.0,
+        pattern_double: bool = False,
+        pattern_name: str | None = None,
+        hatch_style: int = 0,
+        **attributes: Any,
+    ) -> Entity:
+        """Add a solid or pattern-filled HATCH over OCS boundary paths.
+
+        A path is a point list (closed polyline) or a dictionary with ``points``
+        (plus optional ``bulges``/``closed``/``flags``) or ``edges`` (line, arc,
+        ellipse and spline edges, angles in degrees). Without ``pattern`` the
+        hatch is a solid fill. ``pattern`` is a name from ``PATTERNS`` or
+        ``acad.pat`` rows; it is rotated by ``pattern_angle`` and scaled by
+        ``pattern_scale`` before it is stored, as DWG expects.
+        """
+        from ._hatch import transform_pattern_lines
+
+        normalized = []
+        for path in paths:
+            if isinstance(path, Mapping):
+                normalized.append(dict(path))
+            else:
+                normalized.append({"points": [tuple(p) for p in path], "closed": True})
+        data: dict[str, Any] = {
+            "paths": normalized,
+            "solid_fill": pattern is None,
+            "pattern_name": pattern_name
+            or (pattern if isinstance(pattern, str) else None)
+            or "SOLID",
+            "hatch_style": hatch_style,
+            "pattern_type": 1 if pattern is None or isinstance(pattern, str) else 0,
+            **attributes,
+        }
+        if pattern is not None:
+            data.update(
+                pattern_angle=pattern_angle,
+                pattern_scale=pattern_scale,
+                pattern_double=pattern_double,
+                pattern_lines=transform_pattern_lines(
+                    pattern, pattern_angle, pattern_scale
+                ),
+            )
+        return self.add_entity("HATCH", data)
+
+    def add_dimension(
+        self, dimtype: str, *, render: bool = True, **attributes: Any
+    ) -> Entity:
+        """Add a DIMENSION of ``dimtype`` (linear, aligned, angular, angular2ln,
+        radius, diameter, ordinate) from its definition points.
+
+        Unless ``geometry`` names an existing anonymous block, the dimension's
+        block (``*D1``...) is rendered from the Standard DIMSTYLE defaults. Pass
+        ``text="<>"`` to prefix/suffix the measurement, ``text=" "`` for no text.
+        """
+        data = {"dimtype": kind_of(dimtype), **attributes}
+        entity = self.add_entity("DIMENSION", data)
+        if render and not data.get("geometry"):
+            self.doc.render_dimension(entity)
+        return entity
+
+    def add_linear_dim(
+        self,
+        base: Sequence[float],
+        p1: Sequence[float],
+        p2: Sequence[float],
+        angle: float = 0.0,
+        **attributes: Any,
+    ) -> Entity:
+        """Rotated linear dimension: ``base`` lies on the dimension line."""
+        return self.add_dimension(
+            "linear", defpoint=base, defpoint2=p1, defpoint3=p2, angle=angle, **attributes
+        )
+
+    def add_aligned_dim(
+        self,
+        p1: Sequence[float],
+        p2: Sequence[float],
+        distance: float,
+        **attributes: Any,
+    ) -> Entity:
+        """Aligned dimension offset by ``distance`` to the left of p1->p2."""
+        dx, dy = float(p2[0]) - float(p1[0]), float(p2[1]) - float(p1[1])
+        length = math.hypot(dx, dy) or 1.0
+        base = (
+            float(p2[0]) - dy / length * distance,
+            float(p2[1]) + dx / length * distance,
+            0.0,
+        )
+        return self.add_dimension(
+            "aligned", defpoint=base, defpoint2=p1, defpoint3=p2, **attributes
+        )
+
+    def add_radius_dim(
+        self,
+        center: Sequence[float],
+        radius: float,
+        angle: float = 45.0,
+        **attributes: Any,
+    ) -> Entity:
+        rad = math.radians(angle)
+        on_arc = (float(center[0]) + radius * math.cos(rad), float(center[1]) + radius * math.sin(rad), 0.0)
+        return self.add_dimension("radius", defpoint=center, defpoint4=on_arc, **attributes)
+
+    def add_diameter_dim(
+        self,
+        center: Sequence[float],
+        radius: float,
+        angle: float = 45.0,
+        **attributes: Any,
+    ) -> Entity:
+        rad = math.radians(angle)
+        dx, dy = radius * math.cos(rad), radius * math.sin(rad)
+        return self.add_dimension(
+            "diameter",
+            defpoint=(float(center[0]) + dx, float(center[1]) + dy, 0.0),
+            defpoint4=(float(center[0]) - dx, float(center[1]) - dy, 0.0),
+            **attributes,
+        )
+
+    def add_angular_dim(
+        self,
+        center: Sequence[float],
+        p1: Sequence[float],
+        p2: Sequence[float],
+        radius: float,
+        **attributes: Any,
+    ) -> Entity:
+        """Three-point angular dimension measured counterclockwise from p1 to p2."""
+        a1 = math.atan2(float(p1[1]) - float(center[1]), float(p1[0]) - float(center[0]))
+        a2 = math.atan2(float(p2[1]) - float(center[1]), float(p2[0]) - float(center[0]))
+        mid = a1 + ((a2 - a1) % math.tau) / 2.0
+        on_arc = (float(center[0]) + radius * math.cos(mid), float(center[1]) + radius * math.sin(mid), 0.0)
+        return self.add_dimension(
+            "angular", defpoint=on_arc, defpoint2=p1, defpoint3=p2, defpoint4=center, **attributes
+        )
+
+    def add_ordinate_dim(
+        self,
+        feature: Sequence[float],
+        leader_end: Sequence[float],
+        origin: Sequence[float] = (0.0, 0.0, 0.0),
+        x_type: bool = True,
+        **attributes: Any,
+    ) -> Entity:
+        return self.add_dimension(
+            "ordinate",
+            defpoint=origin,
+            defpoint2=feature,
+            defpoint3=leader_end,
+            ordinate_x=x_type,
+            **attributes,
+        )
+
+    def add_image(
+        self,
+        image_def: str,
+        insert: Sequence[float] = (0.0, 0.0, 0.0),
+        *,
+        width: float | None = None,
+        height: float | None = None,
+        rotation: float = 0.0,
+        u_vector: Sequence[float] | None = None,
+        v_vector: Sequence[float] | None = None,
+        **attributes: Any,
+    ) -> Entity:
+        """Place the raster image ``image_def`` (a key of ``Drawing.image_defs``).
+
+        ``width``/``height`` are drawing units (the aspect ratio of the pixel
+        size is kept when one is omitted); ``u_vector``/``v_vector`` give the
+        step of one pixel explicitly instead. ``rotation`` is in degrees.
+        """
+        definition = self.doc.image_defs.get(image_def)
+        if definition is None:
+            raise ValueError(f"undefined image definition: {image_def}")
+        image_def_error(image_def, definition)
+        size = tuple(float(v) for v in definition["size"])
+        if u_vector is None or v_vector is None:
+            if width is None and height is None:
+                pixel = definition.get("pixel_size", (1.0, 1.0))
+                width, height = size[0] * float(pixel[0]), size[1] * float(pixel[1])
+            elif width is None:
+                width = float(height) * size[0] / size[1]
+            elif height is None:
+                height = float(width) * size[1] / size[0]
+            angle = math.radians(rotation)
+            cos, sin = math.cos(angle), math.sin(angle)
+            step_u, step_v = float(width) / size[0], float(height) / size[1]
+            u_vector = (step_u * cos, step_u * sin, 0.0)
+            v_vector = (-step_v * sin, step_v * cos, 0.0)
+        return self.add_entity(
+            "IMAGE",
+            {
+                "image_def": image_def,
+                "insert": insert,
+                "u_vector": u_vector,
+                "v_vector": v_vector,
+                "size": size,
+                **attributes,
+            },
+        )
 
     def add_text(
         self,

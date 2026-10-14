@@ -170,16 +170,14 @@ pub fn decode_dictionary_handles(
     data_section_common: Option<(u32, bool, bool)>,
 ) -> Result<DictionaryHandles> {
     let common = match data_section_common {
-        Some((num_reactors, is_xdic_missing, has_ds_data)) => {
-            decode_common_object_handle_refs(
-                handle_reader,
-                version,
-                object_handle,
-                num_reactors,
-                is_xdic_missing,
-                has_ds_data,
-            )?
-        }
+        Some((num_reactors, is_xdic_missing, has_ds_data)) => decode_common_object_handle_refs(
+            handle_reader,
+            version,
+            object_handle,
+            num_reactors,
+            is_xdic_missing,
+            has_ds_data,
+        )?,
         None => decode_common_object_handles(handle_reader, version, object_handle)?,
     };
 
