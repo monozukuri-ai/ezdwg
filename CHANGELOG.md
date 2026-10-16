@@ -148,6 +148,12 @@
   and the write-polyline metadata build the index once per pass, so a drawing with
   23k POLYLINE_2D among 163k objects reads in seconds instead of 65 s. Output is
   unchanged.
+- `list_object_headers_with_type`, `decode_block_header_names` and
+  `decode_entity_linetypes` now decode once per file and serve repeated calls from
+  the shared path-keyed cache (`FileDecodeState` in `cache.rs`, keyed by path, size
+  and mtime like the LAYER table; `limit` is applied to the cached rows). One read of
+  a Document asked for the object headers seven times and for the other two tables
+  twice. `clear_decode_caches()` drops these entries as well. Output is unchanged.
 - Object-map page offsets, body-handle identity, 64-bit handle references, and
   string-stream size metadata. Layer-state lineweights and viewport colors/
   transparency now use decoded units, including true-color black and ACI restore.

@@ -440,6 +440,20 @@ pub fn decode_entity_linetypes(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<EntityLinetypeRow>> {
+    // Decoded once per file (see `FileDecodeState` in cache.rs): the entity
+    // linetype map and the common layer map both consume these rows.
+    cached_rows(
+        |state| &state.entity_linetypes,
+        path,
+        limit,
+        |limit| decode_entity_linetypes_uncached(path, limit),
+    )
+}
+
+fn decode_entity_linetypes_uncached(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<EntityLinetypeRow>> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let best_effort = is_best_effort_compat_version(&decoder);

@@ -818,8 +818,22 @@ pub fn decode_insert_minsert_dimension_entities(
     Ok((inserts, minserts, dimensions))
 }
 
+/// BLOCK_HEADER names, decoded once per file (see `FileDecodeState` in
+/// cache.rs): the reader and the editable import both ask for them.
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_block_header_names(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<BlockHeaderNameRow>> {
+    cached_rows(
+        |state| &state.block_header_names,
+        path,
+        limit,
+        |limit| decode_block_header_names_uncached(path, limit),
+    )
+}
+
+fn decode_block_header_names_uncached(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<BlockHeaderNameRow>> {

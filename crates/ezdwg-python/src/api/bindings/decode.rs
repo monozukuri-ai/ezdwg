@@ -234,8 +234,23 @@ pub fn list_object_headers(path: &str, limit: Option<usize>) -> PyResult<Vec<Obj
     Ok(result)
 }
 
+/// Object headers with resolved type names, decoded once per file (see
+/// `FileDecodeState` in cache.rs): one read of a Document asks for this table
+/// from several Python helpers.
 #[pyfunction(signature = (path, limit=None))]
 pub fn list_object_headers_with_type(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<ObjectHeaderWithTypeRow>> {
+    cached_rows(
+        |state| &state.object_headers_with_type,
+        path,
+        limit,
+        |limit| list_object_headers_with_type_uncached(path, limit),
+    )
+}
+
+fn list_object_headers_with_type_uncached(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<ObjectHeaderWithTypeRow>> {
