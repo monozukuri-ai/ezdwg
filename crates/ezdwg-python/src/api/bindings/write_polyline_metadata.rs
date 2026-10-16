@@ -8,6 +8,20 @@ fn polyline_vertex_references(
     vertex_code: u16,
 ) -> Option<(Vec<u64>, u64)> {
     let by_handle: HashMap<_, _> = objects.iter().map(|o| (o.handle.0, o.offset)).collect();
+    polyline_vertex_references_indexed(decoder, &by_handle, parent, count, vertex_code)
+}
+
+/// Same as `polyline_vertex_references`, with the handle → offset index built once by the
+/// caller. Callers that resolve many polylines must use this one: building the index per
+/// polyline is O(objects) each time, and a drawing with 23k POLYLINE_2D among 163k objects
+/// spent 65 s of its 78 s read here (2026-10-17).
+fn polyline_vertex_references_indexed(
+    decoder: &decoder::Decoder<'_>,
+    by_handle: &HashMap<u64, u32>,
+    parent: u64,
+    count: Option<usize>,
+    vertex_code: u16,
+) -> Option<(Vec<u64>, u64)> {
     let get = |h| {
         let offset = *by_handle.get(&h)?;
         parse_record_and_header(decoder, offset, true)
@@ -19,7 +33,7 @@ fn polyline_vertex_references(
         read_common_entity_header_and_handles(&record, decoder.version(), &header)?;
     let mut handles = Vec::new();
     if let Some(count) = count {
-        if count > objects.len() {
+        if count > by_handle.len() {
             return None;
         }
         for _ in 0..count {
@@ -159,9 +173,9 @@ pub fn decode_write_polylines(py: Python<'_>, path: &str) -> PyResult<Vec<PyObje
             } else {
                 Some(body.read_bl().map_err(to_py_err)? as usize)
             };
-            let refs = polyline_vertex_references(
+            let refs = polyline_vertex_references_indexed(
                 &decoder,
-                &index.objects,
+                &offsets,
                 obj.handle.0,
                 count,
                 if is_3d { 0x0b } else { 0x0a },

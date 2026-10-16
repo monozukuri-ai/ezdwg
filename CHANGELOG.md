@@ -143,6 +143,11 @@
   to account for `material flags`, `shadow flags`, R2010 visual-style bits, and the R2013+ ds-binary-data flag.
 
 ### Fixed
+- Reading POLYLINE_2D / POLYLINE_3D sequences no longer rebuilds the handle → offset
+  index once per polyline. `decode_polyline_sequence_members`, the 2D/3D vertex rows
+  and the write-polyline metadata build the index once per pass, so a drawing with
+  23k POLYLINE_2D among 163k objects reads in seconds instead of 65 s. Output is
+  unchanged.
 - Object-map page offsets, body-handle identity, 64-bit handle references, and
   string-stream size metadata. Layer-state lineweights and viewport colors/
   transparency now use decoded units, including true-color black and ACI restore.

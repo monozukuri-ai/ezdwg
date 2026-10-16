@@ -365,6 +365,7 @@ fn decode_polyline_3d_vertex_rows(
     let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut sorted = index.objects.clone();
     sorted.sort_by_key(|obj| obj.offset);
+    let by_handle: HashMap<u64, u32> = sorted.iter().map(|obj| (obj.handle.0, obj.offset)).collect();
 
     let vertex_map = build_vertex_3d_map(&decoder, &sorted, &dynamic_types, best_effort)?;
     let mut result = Vec::new();
@@ -404,7 +405,10 @@ fn decode_polyline_3d_vertex_rows(
         };
         let (vertices, next_i) = collect_polyline_3d_vertices(
             &decoder,
-            &sorted,
+            &SortedObjects {
+                sorted: &sorted,
+                by_handle: &by_handle,
+            },
             &dynamic_types,
             &vertex_map,
             &poly,
@@ -465,9 +469,17 @@ fn build_vertex_3d_map(
     Ok(vertex_map)
 }
 
+/// The objects of a drawing sorted by offset, plus the handle → offset index built once per
+/// decode pass. The vertex collectors walk `sorted` forward for legacy sequences and resolve
+/// explicit references through `by_handle` (building that index per polyline was quadratic).
+struct SortedObjects<'a> {
+    sorted: &'a [objects::ObjectRef],
+    by_handle: &'a HashMap<u64, u32>,
+}
+
 fn collect_polyline_3d_vertices(
     decoder: &decoder::Decoder<'_>,
-    sorted: &[objects::ObjectRef],
+    objects: &SortedObjects<'_>,
     dynamic_types: &HashMap<u16, String>,
     vertex_map: &HashMap<u64, entities::Vertex3dEntity>,
     poly: &entities::Polyline3dEntity,
@@ -481,7 +493,7 @@ fn collect_polyline_3d_vertices(
         DwgVersion::R13 | DwgVersion::R14 | DwgVersion::R2000
     ) {
         if let Some((handles, _)) =
-            polyline_vertex_references(decoder, sorted, poly.handle, None, 0x0b)
+            polyline_vertex_references_indexed(decoder, objects.by_handle, poly.handle, None, 0x0b)
         {
             return Ok((
                 handles.iter().filter_map(|h| vertex_map.get(h).cloned()).collect(),
@@ -500,9 +512,9 @@ fn collect_polyline_3d_vertices(
     }
 
     let mut next_i = start_index + 1;
-    while next_i < sorted.len() {
+    while next_i < objects.sorted.len() {
         let Some((next_record, next_header)) =
-            parse_record_and_header(decoder, sorted[next_i].offset, best_effort)?
+            parse_record_and_header(decoder, objects.sorted[next_i].offset, best_effort)?
         else {
             next_i += 1;
             continue;
@@ -520,7 +532,7 @@ fn collect_polyline_3d_vertices(
                 &mut next_reader,
                 decoder.version(),
                 &next_header,
-                sorted[next_i].handle.0,
+                objects.sorted[next_i].handle.0,
             ) {
                 Ok(vertex) => vertex,
                 Err(_err) if best_effort => {
@@ -1353,6 +1365,7 @@ fn decode_polyline_2d_vertex_rows(
     let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut sorted = index.objects.clone();
     sorted.sort_by_key(|obj| obj.offset);
+    let by_handle: HashMap<u64, u32> = sorted.iter().map(|obj| (obj.handle.0, obj.offset)).collect();
 
     let vertex_map = build_vertex_2d_map(&decoder, &sorted, &dynamic_types, best_effort)?;
     let mut vertices_by_owner: HashMap<u64, Vec<entities::Vertex2dEntity>> = HashMap::new();
@@ -1466,7 +1479,10 @@ fn decode_polyline_2d_vertex_rows(
         }
         let (vertices, next_i) = collect_polyline_vertices(
             &decoder,
-            &sorted,
+            &SortedObjects {
+                sorted: &sorted,
+                by_handle: &by_handle,
+            },
             &dynamic_types,
             &vertex_map,
             &vertices_by_owner,
@@ -1556,7 +1572,7 @@ fn build_vertex_2d_map(
 
 fn collect_polyline_vertices(
     decoder: &decoder::Decoder<'_>,
-    sorted: &[objects::ObjectRef],
+    objects: &SortedObjects<'_>,
     dynamic_types: &HashMap<u16, String>,
     vertex_map: &HashMap<u64, entities::Vertex2dEntity>,
     vertices_by_owner: &HashMap<u64, Vec<entities::Vertex2dEntity>>,
@@ -1571,7 +1587,7 @@ fn collect_polyline_vertices(
         DwgVersion::R13 | DwgVersion::R14 | DwgVersion::R2000
     ) {
         if let Some((handles, _)) =
-            polyline_vertex_references(decoder, sorted, poly.handle, None, 0x0a)
+            polyline_vertex_references_indexed(decoder, objects.by_handle, poly.handle, None, 0x0a)
         {
             return Ok((
                 handles.iter().filter_map(|h| vertex_map.get(h).cloned()).collect(),
@@ -1605,8 +1621,8 @@ fn collect_polyline_vertices(
     }
 
     let mut next_i = start_index + 1;
-    while next_i < sorted.len() {
-        let next = sorted[next_i];
+    while next_i < objects.sorted.len() {
+        let next = objects.sorted[next_i];
         let next_record = match decoder.parse_object_record(next.offset) {
             Ok(record) => record,
             Err(_err) if best_effort => {
@@ -1829,6 +1845,7 @@ pub fn decode_polyline_sequence_members(
     let index = decoder.build_object_index().map_err(to_py_err)?;
     let mut sorted = index.objects.clone();
     sorted.sort_by_key(|obj| obj.offset);
+    let by_handle: HashMap<u64, u32> = sorted.iter().map(|obj| (obj.handle.0, obj.offset)).collect();
 
     let mut vertex_2d_handles: HashSet<u64> = HashSet::new();
     let mut vertex_3d_handles: HashSet<u64> = HashSet::new();
@@ -1962,7 +1979,7 @@ pub fn decode_polyline_sequence_members(
             let count = if legacy { None } else { owned_handles.as_ref().map(Vec::len) };
             let code = if matches!(kind, PolylineSequenceKind::Polyline2d) { 0x0a } else { 0x0b };
             if let Some((handles, seqend)) =
-                polyline_vertex_references(&decoder, &sorted, polyline_handle, count, code)
+                polyline_vertex_references_indexed(&decoder, &by_handle, polyline_handle, count, code)
             {
                 result.push((
                     polyline_handle, kind.label().to_string(), handles, Vec::new(), Some(seqend),
