@@ -9,7 +9,7 @@ use crate::dwg::r2007;
 use crate::dwg::version::{detect_version, DwgVersion};
 use crate::objects::{ObjectClass, ObjectIndex, ObjectRecord};
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 const FILE_HEADER_CODEPAGE_OFFSET: usize = 0x13;
 
@@ -19,7 +19,7 @@ pub struct Decoder<'a> {
     version: DwgVersion,
     codepage: Option<u16>,
     config: ParseConfig,
-    objects_section_cache: OnceLock<Vec<u8>>,
+    objects_section_cache: OnceLock<Arc<Vec<u8>>>,
 }
 
 impl<'a> Decoder<'a> {
@@ -36,6 +36,20 @@ impl<'a> Decoder<'a> {
 
     pub fn version(&self) -> &DwgVersion {
         &self.version
+    }
+
+    /// Reuse the objects section another `Decoder` of the same bytes already
+    /// decompressed (R2004+/R2007). Decompressing it is most of the fixed cost
+    /// of every pass over a large drawing.
+    pub fn with_objects_section(self, section: Arc<Vec<u8>>) -> Self {
+        let _ = self.objects_section_cache.set(section);
+        self
+    }
+
+    /// The decompressed objects section, if a record was parsed (or it was
+    /// handed in) already; `None` for R13-R2000, whose records live in `bytes`.
+    pub fn objects_section(&self) -> Option<Arc<Vec<u8>>> {
+        self.objects_section_cache.get().cloned()
     }
 
     pub fn codepage(&self) -> Option<u16> {
@@ -222,7 +236,7 @@ impl<'a> Decoder<'a> {
                 ))
             }
         };
-        let _ = self.objects_section_cache.set(loaded);
+        let _ = self.objects_section_cache.set(Arc::new(loaded));
         let data = self.objects_section_cache.get().ok_or_else(|| {
             DwgError::new(
                 ErrorKind::Decode,

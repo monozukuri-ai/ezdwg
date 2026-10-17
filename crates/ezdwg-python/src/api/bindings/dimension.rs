@@ -96,17 +96,17 @@ pub fn decode_dimension_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<DimTypedEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let insert_name_state =
-        prepare_insert_name_resolution_state(&decoder, &dynamic_types, &index, best_effort)?;
+        insert_name_resolution_state(path, &decoder, dynamic_types, index, best_effort)?;
     decode_dimension_entities_with_state(
         &decoder,
-        &dynamic_types,
-        &index,
+        dynamic_types,
+        index,
         best_effort,
         &insert_name_state,
         limit,

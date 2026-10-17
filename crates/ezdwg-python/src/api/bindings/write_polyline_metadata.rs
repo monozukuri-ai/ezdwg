@@ -89,8 +89,8 @@ fn polyline_vertex_references_indexed(
 
 #[pyfunction]
 pub fn decode_write_polylines(py: Python<'_>, path: &str) -> PyResult<Vec<PyObject>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
     let version = decoder.version();
     let legacy = matches!(
         version,
@@ -101,7 +101,7 @@ pub fn decode_write_polylines(py: Python<'_>, path: &str) -> PyResult<Vec<PyObje
         version,
         DwgVersion::R2010 | DwgVersion::R2013 | DwgVersion::R2018
     );
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let index = &shared.index;
     let offsets: HashMap<_, _> = index
         .objects
         .iter()

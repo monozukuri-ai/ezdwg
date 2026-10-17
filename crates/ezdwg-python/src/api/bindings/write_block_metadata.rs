@@ -15,17 +15,17 @@ pub fn decode_insert_write_properties(
 /// Exact block metadata used by bounded write/import; undecoded rows stay absent.
 #[pyfunction]
 pub fn decode_write_blocks(py: Python<'_>, path: &str) -> PyResult<Vec<PyObject>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best = is_best_effort_compat_version(&decoder);
-    let dynamic = load_dynamic_types(&decoder, best)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best = shared.best_effort;
+    let dynamic = &shared.dynamic_types;
+    let index = &shared.index;
     let mut rows = Vec::new();
     for obj in &index.objects {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best)? else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x31, "BLOCK_HEADER", &dynamic) {
+        if !matches_type_name(header.type_code, 0x31, "BLOCK_HEADER", dynamic) {
             continue;
         }
         let decoded = (|| -> PyResult<PyObject> {
@@ -140,10 +140,10 @@ pub fn decode_write_blocks(py: Python<'_>, path: &str) -> PyResult<Vec<PyObject>
 
 #[pyfunction]
 pub fn decode_attribute_links(path: &str) -> PyResult<Vec<(u64, u64)>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best = is_best_effort_compat_version(&decoder);
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best = shared.best_effort;
+    let index = &shared.index;
     let mut rows = Vec::new();
     for obj in &index.objects {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best)? else {

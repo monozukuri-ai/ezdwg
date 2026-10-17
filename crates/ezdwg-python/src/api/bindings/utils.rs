@@ -155,21 +155,21 @@ where
         u64,
     ) -> crate::core::result::Result<entities::AttribEntity>,
 {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
     let debug_decode = std::env::var("EZDWG_DEBUG_ATTRIB")
         .ok()
         .is_some_and(|value| value != "0");
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, type_code, type_name, &dynamic_types) {
+        if !matches_type_name(header.type_code, type_code, type_name, dynamic_types) {
             continue;
         }
         let mut reader = record.bit_reader();
@@ -288,11 +288,11 @@ where
         u64,
     ) -> crate::core::result::Result<entities::DimLinearEntity>,
 {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let mut result = Vec::new();
 
     for obj in index.objects.iter() {
@@ -300,7 +300,7 @@ where
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, type_code, type_name, &dynamic_types) {
+        if !matches_type_name(header.type_code, type_code, type_name, dynamic_types) {
             continue;
         }
 

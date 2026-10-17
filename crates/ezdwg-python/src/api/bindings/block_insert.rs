@@ -112,6 +112,22 @@ fn prepare_insert_name_resolution_state(
     })
 }
 
+/// The block-name resolution state of `path`, built once per file (see
+/// `FileDecodeState` in cache.rs). `decoder`/`index` must belong to `path`.
+fn insert_name_resolution_state(
+    path: &str,
+    decoder: &decoder::Decoder<'_>,
+    dynamic_types: &HashMap<u16, String>,
+    index: &objects::ObjectIndex,
+    best_effort: bool,
+) -> PyResult<Arc<InsertNameResolutionState>> {
+    cached_value(
+        |state| &state.insert_name_resolution,
+        path,
+        || prepare_insert_name_resolution_state(decoder, dynamic_types, index, best_effort),
+    )
+}
+
 fn is_layout_pseudo_block_name(name: &str) -> bool {
     let upper = name.trim().to_ascii_uppercase();
     upper.starts_with("*MODEL_SPACE") || upper.starts_with("*PAPER_SPACE")
@@ -625,17 +641,23 @@ fn decode_minsert_entities_with_state(
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<InsertEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut state =
-        prepare_insert_name_resolution_state(&decoder, &dynamic_types, &index, best_effort)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
+    let mut state = (*insert_name_resolution_state(
+        path,
+        &decoder,
+        dynamic_types,
+        index,
+        best_effort,
+    )?)
+    .clone();
     decode_insert_entities_with_state(
         &decoder,
-        &dynamic_types,
-        &index,
+        dynamic_types,
+        index,
         best_effort,
         &mut state,
         limit,
@@ -709,17 +731,17 @@ pub fn decode_insert_owner_handles(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<InsertOwnerRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let state =
-        prepare_insert_name_resolution_state(&decoder, &dynamic_types, &index, best_effort)?;
+        insert_name_resolution_state(path, &decoder, dynamic_types, index, best_effort)?;
     decode_insert_owner_handles_impl(
         &decoder,
-        &dynamic_types,
-        &index,
+        dynamic_types,
+        index,
         best_effort,
         &state,
         limit,
@@ -731,17 +753,23 @@ pub fn decode_minsert_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<MInsertEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut state =
-        prepare_insert_name_resolution_state(&decoder, &dynamic_types, &index, best_effort)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
+    let mut state = (*insert_name_resolution_state(
+        path,
+        &decoder,
+        dynamic_types,
+        index,
+        best_effort,
+    )?)
+    .clone();
     decode_minsert_entities_with_state(
         &decoder,
-        &dynamic_types,
-        &index,
+        dynamic_types,
+        index,
         best_effort,
         &mut state,
         limit,
@@ -753,25 +781,31 @@ pub fn decode_insert_minsert_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<InsertMInsertRows> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut state =
-        prepare_insert_name_resolution_state(&decoder, &dynamic_types, &index, best_effort)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
+    let mut state = (*insert_name_resolution_state(
+        path,
+        &decoder,
+        dynamic_types,
+        index,
+        best_effort,
+    )?)
+    .clone();
     let inserts = decode_insert_entities_with_state(
         &decoder,
-        &dynamic_types,
-        &index,
+        dynamic_types,
+        index,
         best_effort,
         &mut state,
         limit,
     )?;
     let minserts = decode_minsert_entities_with_state(
         &decoder,
-        &dynamic_types,
-        &index,
+        dynamic_types,
+        index,
         best_effort,
         &mut state,
         limit,
@@ -784,33 +818,39 @@ pub fn decode_insert_minsert_dimension_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<InsertMInsertDimensionRows> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
-    let mut state =
-        prepare_insert_name_resolution_state(&decoder, &dynamic_types, &index, best_effort)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
+    let mut state = (*insert_name_resolution_state(
+        path,
+        &decoder,
+        dynamic_types,
+        index,
+        best_effort,
+    )?)
+    .clone();
     let inserts = decode_insert_entities_with_state(
         &decoder,
-        &dynamic_types,
-        &index,
+        dynamic_types,
+        index,
         best_effort,
         &mut state,
         limit,
     )?;
     let minserts = decode_minsert_entities_with_state(
         &decoder,
-        &dynamic_types,
-        &index,
+        dynamic_types,
+        index,
         best_effort,
         &mut state,
         limit,
     )?;
     let dimensions = decode_dimension_entities_with_state(
         &decoder,
-        &dynamic_types,
-        &index,
+        dynamic_types,
+        index,
         best_effort,
         &state,
         limit,
@@ -837,14 +877,18 @@ fn decode_block_header_names_uncached(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<BlockHeaderNameRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let state =
-        prepare_insert_name_resolution_state(&decoder, &dynamic_types, &index, best_effort)?;
-    let mut rows: Vec<BlockHeaderNameRow> = state.block_header_names.into_iter().collect();
+        insert_name_resolution_state(path, &decoder, dynamic_types, index, best_effort)?;
+    let mut rows: Vec<BlockHeaderNameRow> = state
+        .block_header_names
+        .iter()
+        .map(|(handle, name)| (*handle, name.clone()))
+        .collect();
     rows.sort_by_key(|(handle, _)| *handle);
     if let Some(limit) = limit {
         rows.truncate(limit);
@@ -857,11 +901,11 @@ pub fn decode_block_entity_names(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<BlockEntityNameRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let mut ordered_objects: Vec<_> = index.objects.iter().collect();
     ordered_objects.sort_by_key(|obj| obj.offset);
     let is_r2010_plus = matches!(
@@ -869,7 +913,7 @@ pub fn decode_block_entity_names(
         version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018
     );
     let header_entries =
-        collect_block_header_name_entries_in_order(&decoder, &dynamic_types, &index, best_effort)?;
+        collect_block_header_name_entries_in_order(&decoder, dynamic_types, index, best_effort)?;
     let mut header_entry_name_by_handle: HashMap<u64, String> = HashMap::new();
     for (raw_handle, decoded_handle, name) in header_entries.iter() {
         if name.is_empty() {
@@ -883,11 +927,11 @@ pub fn decode_block_entity_names(
             .or_insert_with(|| name.clone());
     }
     let block_header_names =
-        collect_block_header_names_in_order(&decoder, &dynamic_types, &index, best_effort, None)?;
+        collect_block_header_names_in_order(&decoder, dynamic_types, index, best_effort, None)?;
     let (mut block_aliases, mut endblk_aliases) = collect_block_and_endblk_handle_aliases_in_order(
         &decoder,
-        &dynamic_types,
-        &index,
+        dynamic_types,
+        index,
         best_effort,
         &block_header_names,
     )?;
@@ -912,7 +956,7 @@ pub fn decode_block_entity_names(
             else {
                 continue;
             };
-            if !matches_type_name(header.type_code, 0x31, "BLOCK_HEADER", &dynamic_types) {
+            if !matches_type_name(header.type_code, 0x31, "BLOCK_HEADER", dynamic_types) {
                 continue;
             }
             if let Some(name) = block_header_names
@@ -940,11 +984,11 @@ pub fn decode_block_entity_names(
         else {
             continue;
         };
-        if matches_type_name(header.type_code, 0x04, "BLOCK", &dynamic_types) {
+        if matches_type_name(header.type_code, 0x04, "BLOCK", dynamic_types) {
             block_handles_in_order.push(obj.handle.0);
             continue;
         }
-        if matches_type_name(header.type_code, 0x05, "ENDBLK", &dynamic_types) {
+        if matches_type_name(header.type_code, 0x05, "ENDBLK", dynamic_types) {
             endblk_handles_in_order.push(obj.handle.0);
         }
     }
@@ -955,8 +999,8 @@ pub fn decode_block_entity_names(
         if !block_targets.is_empty() {
             for (handle, name) in sorted_entries(collect_block_header_targeted_aliases_in_order(
                 &decoder,
-                &dynamic_types,
-                &index,
+                dynamic_types,
+                index,
                 best_effort,
                 &block_header_names,
                 &block_targets,
@@ -969,8 +1013,8 @@ pub fn decode_block_entity_names(
         if !endblk_targets.is_empty() {
             for (handle, name) in sorted_entries(collect_block_header_targeted_aliases_in_order(
                 &decoder,
-                &dynamic_types,
-                &index,
+                dynamic_types,
+                index,
                 best_effort,
                 &block_header_names,
                 &endblk_targets,
@@ -2222,6 +2266,7 @@ fn collect_block_header_insert_aliases_in_order(
 
     let mut aliases: HashMap<u64, String> = HashMap::new();
     let mut exact_rows: Vec<(u64, String, Vec<u64>)> = Vec::new();
+    let insert_set = InsertHandleSet::new(object_type_codes);
     for obj in index.objects.iter() {
         let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
         else {
@@ -2249,77 +2294,112 @@ fn collect_block_header_insert_aliases_in_order(
         }
 
         let scanned_handles =
-            scan_block_header_insert_handle_run(&record, obj.handle.0, object_type_codes);
+            scan_block_header_insert_handle_run(&record, obj.handle.0, &insert_set);
         if !scanned_handles.is_empty() {
             exact_rows.push((obj.handle.0, name, scanned_handles));
         }
     }
 
     if !exact_rows.is_empty() {
-        let mut insert_handles: Vec<u64> = object_type_codes
-            .iter()
-            .filter_map(|(handle, code)| {
-                if matches!(*code, 0x07 | 0x08) {
-                    Some(*handle)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        insert_handles.sort_unstable();
-
         let mut future_reserved: HashMap<u64, usize> = HashMap::new();
         for (_block_handle, _name, handles) in &exact_rows {
             for handle in handles {
-                if object_type_codes
-                    .get(handle)
-                    .is_some_and(|code| matches!(*code, 0x07 | 0x08))
-                {
+                if insert_set.contains(*handle) {
                     *future_reserved.entry(*handle).or_insert(0) += 1;
                 }
             }
         }
 
-        let mut assigned: HashSet<u64> = HashSet::new();
+        // Each raw handle takes the smallest unassigned INSERT handle at or after it,
+        // skipping handles a later row still reserves (then, failing that, ignoring the
+        // reservations). Two ordered sets answer both lookups in O(log n); the former
+        // linear scans over the sorted handle list were quadratic once most handles were
+        // assigned (2.7 s on a drawing with 23k references).
+        let mut unassigned: BTreeSet<u64> = insert_set.handles.iter().copied().collect();
+        let mut available: BTreeSet<u64> = unassigned
+            .iter()
+            .copied()
+            .filter(|handle| !future_reserved.contains_key(handle))
+            .collect();
         for (_block_handle, name, handles) in exact_rows {
             for raw_handle in handles {
                 if let Some(count) = future_reserved.get_mut(&raw_handle) {
                     *count = count.saturating_sub(1);
                     if *count == 0 {
                         future_reserved.remove(&raw_handle);
+                        if unassigned.contains(&raw_handle) {
+                            available.insert(raw_handle);
+                        }
                     }
                 }
 
-                let resolved = if object_type_codes
-                    .get(&raw_handle)
-                    .is_some_and(|code| matches!(*code, 0x07 | 0x08))
-                    && !assigned.contains(&raw_handle)
-                {
+                let resolved = if unassigned.contains(&raw_handle) {
                     Some(raw_handle)
                 } else {
-                    first_unassigned_insert_at_or_after(
-                        raw_handle,
-                        &insert_handles,
-                        &assigned,
-                        &future_reserved,
-                    )
-                    .or_else(|| {
-                        first_unassigned_insert_at_or_after(
-                            raw_handle,
-                            &insert_handles,
-                            &assigned,
-                            &HashMap::new(),
-                        )
-                    })
+                    available
+                        .range(raw_handle..)
+                        .next()
+                        .copied()
+                        .or_else(|| unassigned.range(raw_handle..).next().copied())
                 };
                 if let Some(insert_handle) = resolved {
-                    assigned.insert(insert_handle);
+                    unassigned.remove(&insert_handle);
+                    available.remove(&insert_handle);
                     insert_block_alias_name(&mut aliases, insert_handle, &name);
                 }
             }
         }
     }
     Ok(aliases)
+}
+
+/// The INSERT/MINSERT handles of a file, with O(1) membership for the bit-by-bit
+/// scans of `scan_block_header_insert_handle_run` (a bitmap when the handles are
+/// small enough, the type-code map otherwise).
+struct InsertHandleSet {
+    handles: Vec<u64>,
+    bitmap: Option<Vec<u64>>,
+    dense: HashSet<u64>,
+}
+
+impl InsertHandleSet {
+    const BITMAP_LIMIT: u64 = 1 << 26; // 8 MiB of bits at most
+
+    fn new(object_type_codes: &HashMap<u64, u16>) -> Self {
+        let mut handles: Vec<u64> = object_type_codes
+            .iter()
+            .filter_map(|(handle, code)| matches!(*code, 0x07 | 0x08).then_some(*handle))
+            .collect();
+        handles.sort_unstable();
+        let max = handles.last().copied().unwrap_or(0);
+        let bitmap = (max < Self::BITMAP_LIMIT).then(|| {
+            let mut bits = vec![0u64; (max as usize) / 64 + 1];
+            for handle in &handles {
+                bits[(*handle / 64) as usize] |= 1u64 << (*handle % 64);
+            }
+            bits
+        });
+        let dense = if bitmap.is_none() {
+            handles.iter().copied().collect()
+        } else {
+            HashSet::new()
+        };
+        Self {
+            handles,
+            bitmap,
+            dense,
+        }
+    }
+
+    #[inline]
+    fn contains(&self, handle: u64) -> bool {
+        match &self.bitmap {
+            Some(bits) => bits
+                .get((handle / 64) as usize)
+                .is_some_and(|word| word & (1u64 << (handle % 64)) != 0),
+            None => self.dense.contains(&handle),
+        }
+    }
 }
 
 fn insert_block_alias_name(aliases: &mut HashMap<u64, String>, insert_handle: u64, name: &str) {
@@ -2335,20 +2415,6 @@ fn insert_block_alias_name(aliases: &mut HashMap<u64, String>, insert_handle: u6
             aliases.insert(insert_handle, name.to_string());
         }
     }
-}
-
-fn first_unassigned_insert_at_or_after(
-    raw_handle: u64,
-    insert_handles: &[u64],
-    assigned: &HashSet<u64>,
-    future_reserved: &HashMap<u64, usize>,
-) -> Option<u64> {
-    let start = insert_handles.partition_point(|handle| *handle < raw_handle);
-    insert_handles
-        .iter()
-        .copied()
-        .skip(start)
-        .find(|handle| !assigned.contains(handle) && !future_reserved.contains_key(handle))
 }
 
 fn repair_sequential_generated_block_names_in_order(
@@ -2545,7 +2611,7 @@ fn best_block_header_insert_metadata(
 fn scan_block_header_insert_handle_run(
     record: &objects::ObjectRecord<'_>,
     base_handle: u64,
-    object_type_codes: &HashMap<u64, u16>,
+    insert_set: &InsertHandleSet,
 ) -> Vec<u64> {
     let total_bits = record.body.as_ref().len().saturating_mul(8);
     let mut best: Option<(usize, usize, Vec<u64>)> = None;
@@ -2559,10 +2625,7 @@ fn scan_block_header_insert_handle_run(
         let mut handles = Vec::new();
         let mut seen = HashSet::new();
         while let Ok(handle) = entities::common::read_handle_reference(&mut reader, base_handle) {
-            if !object_type_codes
-                .get(&handle)
-                .is_some_and(|code| matches!(*code, 0x07 | 0x08))
-            {
+            if !insert_set.contains(handle) {
                 break;
             }
             if !seen.insert(handle) {

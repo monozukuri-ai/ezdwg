@@ -154,6 +154,20 @@
   and mtime like the LAYER table; `limit` is applied to the cached rows). One read of
   a Document asked for the object headers seven times and for the other two tables
   twice. `clear_decode_caches()` drops these entries as well. Output is unchanged.
+- Every decode pass now starts from one shared `DecodedFile` per (path, size,
+  mtime): the file bytes, the decompressed objects section (R2004+/R2007), the
+  object index and the CLASSES maps are built once and each pass only parses its
+  own records. Reading a 200k-object drawing ran that prologue about 25 times
+  (0.15-0.2 s each). `Decoder::with_objects_section`/`objects_section` share the
+  section between decoders.
+- The block-name resolution tables (`InsertNameResolutionState`) are built once
+  per file and shared by the BLOCK_HEADER, INSERT, MINSERT and DIMENSION passes;
+  before, each pass rebuilt them (3.8 s each on a drawing with 31k block
+  headers). Inside the build, assigning INSERT handles to block headers used
+  linear scans over the sorted handle list that turned quadratic once most
+  handles were assigned (2.7 s); two ordered sets answer the same lookups, and
+  the bit-by-bit handle scan tests membership with a bitmap instead of a hash
+  map. Results are unchanged.
 - Object-map page offsets, body-handle identity, 64-bit handle references, and
   string-stream size metadata. Layer-state lineweights and viewport colors/
   transparency now use decoded units, including true-color black and ACI restore.

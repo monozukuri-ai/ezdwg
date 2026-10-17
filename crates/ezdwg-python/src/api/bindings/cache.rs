@@ -103,18 +103,79 @@ fn clear_decode_cache() -> PyResult<()> {
 // mtime). Slots fill lazily; a call with `limit` never fills a slot (a partial
 // decode is not the table) but is served from one that is already full.
 
-type DecodeSlot<T> = Mutex<Option<Arc<Vec<T>>>>;
+type DecodeSlot<T> = Mutex<Option<Arc<T>>>;
 
 /// Lazily filled decode results of one file. Add a slot here instead of a new
 /// process-global static when another pass turns out to run repeatedly.
 #[derive(Default)]
 struct FileDecodeState {
     /// `list_object_headers_with_type`: handle/offset/size/type of every object.
-    object_headers_with_type: DecodeSlot<ObjectHeaderWithTypeRow>,
+    object_headers_with_type: DecodeSlot<Vec<ObjectHeaderWithTypeRow>>,
     /// `decode_block_header_names`: BLOCK_HEADER handle -> block name.
-    block_header_names: DecodeSlot<BlockHeaderNameRow>,
+    block_header_names: DecodeSlot<Vec<BlockHeaderNameRow>>,
     /// `decode_entity_linetypes`: common entity linetype data of every entity.
-    entity_linetypes: DecodeSlot<EntityLinetypeRow>,
+    entity_linetypes: DecodeSlot<Vec<EntityLinetypeRow>>,
+    /// Block-name resolution tables (block_insert.rs). Building them walks the
+    /// file several times and ran once per INSERT/DIMENSION/BLOCK_HEADER pass,
+    /// i.e. 3-4 times per read; one of those builds took 3.8 s on a drawing
+    /// with 31k block headers.
+    insert_name_resolution: DecodeSlot<InsertNameResolutionState>,
+    /// The file's bytes, decompressed objects section, object index and class
+    /// maps: the prologue every pass used to redo (read, decompress, index).
+    decoded: DecodeSlot<DecodedFile>,
+}
+
+/// What every decode pass needs before its own loop, built once per file.
+///
+/// A pass gets a fresh `Decoder` over the shared bytes with the objects section
+/// already decompressed (`decoder()`), so it only pays for its own records.
+struct DecodedFile {
+    bytes: Vec<u8>,
+    objects_section: Option<Arc<Vec<u8>>>,
+    index: objects::ObjectIndex,
+    best_effort: bool,
+    dynamic_types: HashMap<u16, String>,
+    dynamic_type_classes: HashMap<u16, objects::ObjectClass>,
+}
+
+impl DecodedFile {
+    fn open(path: &str) -> PyResult<Self> {
+        let bytes = file_open::read_file(path).map_err(to_py_err)?;
+        let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+        let best_effort = is_best_effort_compat_version(&decoder);
+        let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
+        let dynamic_type_classes = load_dynamic_type_classes(&decoder, best_effort)?;
+        let index = decoder.build_object_index().map_err(to_py_err)?;
+        // Parsing one record decompresses the objects section (R2004+/R2007);
+        // keep it so later passes start from it. Errors surface in the passes.
+        if let Some(first) = index.objects.first() {
+            let _ = decoder.parse_object_record(first.offset);
+        }
+        let objects_section = decoder.objects_section();
+        drop(decoder);
+        Ok(Self {
+            bytes,
+            objects_section,
+            index,
+            best_effort,
+            dynamic_types,
+            dynamic_type_classes,
+        })
+    }
+
+    /// A decoder over the shared bytes, with the objects section preloaded.
+    fn decoder(&self) -> PyResult<decoder::Decoder<'_>> {
+        let decoder = build_decoder(&self.bytes).map_err(to_py_err)?;
+        Ok(match &self.objects_section {
+            Some(section) => decoder.with_objects_section(section.clone()),
+            None => decoder,
+        })
+    }
+}
+
+/// The shared decoded state of `path` (see `DecodedFile`).
+fn decoded_file(path: &str) -> PyResult<Arc<DecodedFile>> {
+    cached_value(|state| &state.decoded, path, || DecodedFile::open(path))
 }
 
 fn file_decode_state_cache() -> &'static PathFifoCache<FileDecodeState> {
@@ -145,7 +206,7 @@ fn file_decode_state(path: &str) -> Option<Arc<FileDecodeState>> {
 /// `limit` is applied to cached rows on the way out; on a cold slot a limited
 /// call runs `decode(limit)` and leaves the slot empty.
 fn cached_rows<T: Clone, E>(
-    slot: fn(&FileDecodeState) -> &DecodeSlot<T>,
+    slot: fn(&FileDecodeState) -> &DecodeSlot<Vec<T>>,
     path: &str,
     limit: Option<usize>,
     decode: impl FnOnce(Option<usize>) -> Result<Vec<T>, E>,
@@ -165,6 +226,27 @@ fn cached_rows<T: Clone, E>(
         *slot(&state).lock().unwrap() = Some(rows.clone());
     }
     Ok(take_rows(&rows, None))
+}
+
+/// One shared value per (path, size, mtime), built on first use. Callers get
+/// the `Arc` itself (no copy); a caller that needs to mutate clones the value.
+fn cached_value<T, E>(
+    slot: fn(&FileDecodeState) -> &DecodeSlot<T>,
+    path: &str,
+    build: impl FnOnce() -> Result<T, E>,
+) -> Result<Arc<T>, E> {
+    let state = file_decode_state(path);
+    if let Some(state) = state.as_ref() {
+        let cached = slot(state).lock().unwrap().clone();
+        if let Some(value) = cached {
+            return Ok(value);
+        }
+    }
+    let value = Arc::new(build()?);
+    if let Some(state) = state {
+        *slot(&state).lock().unwrap() = Some(value.clone());
+    }
+    Ok(value)
 }
 
 fn take_rows<T: Clone>(rows: &[T], limit: Option<usize>) -> Vec<T> {
@@ -196,7 +278,7 @@ mod file_decode_state_tests {
                 .map(|h| (h, format!("B{h}")))
                 .collect())
         };
-        let slot: fn(&FileDecodeState) -> &DecodeSlot<BlockHeaderNameRow> =
+        let slot: fn(&FileDecodeState) -> &DecodeSlot<Vec<BlockHeaderNameRow>> =
             |state| &state.block_header_names;
 
         // A limited call on a cold slot decodes with the limit and caches nothing.
@@ -232,7 +314,7 @@ mod file_decode_state_tests {
         let decode_b = |_: Option<usize>| -> Result<Vec<BlockHeaderNameRow>, ()> {
             Ok(vec![(2, "B".to_string())])
         };
-        let slot: fn(&FileDecodeState) -> &DecodeSlot<BlockHeaderNameRow> =
+        let slot: fn(&FileDecodeState) -> &DecodeSlot<Vec<BlockHeaderNameRow>> =
             |state| &state.block_header_names;
         assert_eq!(cached_rows(slot, &path, None, decode_a).unwrap()[0].1, "A");
         // Different size => different FileKey, so the stale rows are not served.

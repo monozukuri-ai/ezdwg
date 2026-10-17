@@ -49,11 +49,11 @@ fn get_all_layer_records(path: &str) -> PyResult<Arc<Vec<LayerRecord>>> {
 }
 
 fn parse_all_layer_records(path: &str) -> PyResult<Vec<LayerRecord>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let mut result = Vec::new();
 
     for obj in index.objects.iter() {
@@ -61,7 +61,7 @@ fn parse_all_layer_records(path: &str) -> PyResult<Vec<LayerRecord>> {
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x33, "LAYER", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x33, "LAYER", dynamic_types) {
             continue;
         }
 
@@ -616,11 +616,11 @@ fn validate_layer_handle_types(
 }
 
 fn build_object_type_map(path: &str) -> PyResult<HashMap<u64, (u16, String)>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let mut map = HashMap::new();
     for obj in index.objects.iter() {
         let Some((_record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
@@ -693,18 +693,18 @@ fn build_table_name_map(
     type_code: u16,
     type_name: &str,
 ) -> PyResult<HashMap<u64, String>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let mut map = HashMap::new();
     for obj in index.objects.iter() {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, type_code, type_name, &dynamic_types) {
+        if !matches_type_name(header.type_code, type_code, type_name, dynamic_types) {
             continue;
         }
         if let Some(name) =

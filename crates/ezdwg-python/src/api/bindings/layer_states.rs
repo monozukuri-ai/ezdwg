@@ -90,11 +90,11 @@ fn extract_mask_and_description(groups: &[objects::XDataGroup]) -> (Option<i64>,
 }
 
 fn discover_layer_state_entries(path: &str) -> PyResult<Vec<(String, u64)>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic = &shared.dynamic_types;
+    let index = &shared.index;
 
     let mut by_handle: HashMap<u64, usize> = HashMap::new();
     for (i, obj) in index.objects.iter().enumerate() {
@@ -132,7 +132,7 @@ fn discover_layer_state_entries(path: &str) -> PyResult<Vec<(String, u64)>> {
         else {
             continue;
         };
-        if !is_layer_control_type(header.type_code, &dynamic) {
+        if !is_layer_control_type(header.type_code, dynamic) {
             continue;
         }
         let Some(xdic_h) = layer_control_xdic_handle(&decoder, obj, best_effort) else {
@@ -166,7 +166,7 @@ fn discover_layer_state_entries(path: &str) -> PyResult<Vec<(String, u64)>> {
             else {
                 continue;
             };
-            if !is_dictionary_type(header.type_code, &dynamic) {
+            if !is_dictionary_type(header.type_code, dynamic) {
                 continue;
             }
             let Some(dict) = decode_one_dictionary(&decoder, obj, best_effort) else {
@@ -211,10 +211,10 @@ pub fn decode_layer_state_xrecords(py: Python<'_>, path: &str) -> PyResult<Vec<L
         return Ok(Vec::new());
     }
 
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let index = &shared.index;
 
     let mut by_handle: HashMap<u64, usize> = HashMap::new();
     for (i, obj) in index.objects.iter().enumerate() {
@@ -267,11 +267,11 @@ const ACAD_PLOTSTYLENAME_KEYS: &[&str] = &["ACAD_PLOTSTYLENAME", "ACAD_PLOTSTYLE
 /// Returns `(name, value_handle)` pairs. Handles may point at PLACEHOLDER or
 /// PLOTSTYLENAME objects; callers map names for layer-state diff/apply.
 fn discover_plotstyle_entries(path: &str) -> PyResult<Vec<(String, u64)>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic = &shared.dynamic_types;
+    let index = &shared.index;
 
     let mut by_handle: HashMap<u64, usize> = HashMap::new();
     for (i, obj) in index.objects.iter().enumerate() {
@@ -303,7 +303,7 @@ fn discover_plotstyle_entries(path: &str) -> PyResult<Vec<(String, u64)>> {
         else {
             continue;
         };
-        if !is_dictionary_type(header.type_code, &dynamic) {
+        if !is_dictionary_type(header.type_code, dynamic) {
             continue;
         }
         let Some(dict) = decode_one_dictionary(&decoder, obj, best_effort) else {
@@ -334,7 +334,7 @@ fn discover_plotstyle_entries(path: &str) -> PyResult<Vec<(String, u64)>> {
             else {
                 continue;
             };
-            if !is_dictionary_type(header.type_code, &dynamic) {
+            if !is_dictionary_type(header.type_code, dynamic) {
                 continue;
             }
             let Some(dict) = decode_one_dictionary(&decoder, obj, best_effort) else {
@@ -518,10 +518,10 @@ fn parse_ovr_xrecord_groups(groups: &[objects::XDataGroup], property: &str) -> V
 #[pyfunction]
 pub fn decode_layer_vp_overrides(path: &str) -> PyResult<Vec<LayerVpOverrideRow>> {
     let records = get_all_layer_records(path)?;
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let index = &shared.index;
 
     let mut by_handle: HashMap<u64, usize> = HashMap::new();
     for (i, obj) in index.objects.iter().enumerate() {

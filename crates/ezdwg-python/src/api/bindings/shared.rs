@@ -1,6 +1,6 @@
 use pyo3::exceptions::{PyIOError, PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use crate::bit::{BitReader, Endian};
@@ -347,6 +347,7 @@ const DIM_DECODE_SPECS: [DimDecodeSpec; 7] = [
     },
 ];
 
+#[derive(Clone)]
 struct InsertNameResolutionState {
     known_block_handles: HashSet<u64>,
     block_header_names: HashMap<u64, String>,

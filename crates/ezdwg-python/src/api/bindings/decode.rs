@@ -94,18 +94,18 @@ fn collect_entity_rows<E, R, F>(
 where
     F: FnMut(E) -> R,
 {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, type_code, type_name, &dynamic_types) {
+        if !matches_type_name(header.type_code, type_code, type_name, dynamic_types) {
             continue;
         }
         let mut reader = record.bit_reader();
@@ -190,9 +190,8 @@ pub fn list_object_map_entries(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<ObjectMapEntryRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let index = &shared.index;
     let mut entries: Vec<ObjectMapEntryRow> = index
         .objects
         .iter()
@@ -208,10 +207,10 @@ pub fn list_object_map_entries(
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn list_object_headers(path: &str, limit: Option<usize>) -> PyResult<Vec<ObjectHeaderRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let index = &shared.index;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
         let record = match decoder.parse_object_record(obj.offset) {
@@ -254,12 +253,12 @@ fn list_object_headers_with_type_uncached(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<ObjectHeaderWithTypeRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let dynamic_type_classes = load_dynamic_type_classes(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let dynamic_type_classes = &shared.dynamic_type_classes;
+    let index = &shared.index;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
         let record = match decoder.parse_object_record(obj.offset) {
@@ -272,9 +271,9 @@ fn list_object_headers_with_type_uncached(
             Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
-        let type_name = resolved_type_name(header.type_code, &dynamic_types);
+        let type_name = resolved_type_name(header.type_code, dynamic_types);
         let type_class =
-            resolved_type_class(header.type_code, &type_name, &dynamic_type_classes);
+            resolved_type_class(header.type_code, &type_name, dynamic_type_classes);
         result.push((
             obj.handle.0,
             obj.offset,
@@ -913,13 +912,13 @@ pub fn list_object_headers_by_type(
     if type_codes.is_empty() {
         return Ok(Vec::new());
     }
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let dynamic_type_classes = load_dynamic_type_classes(&decoder, best_effort)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let dynamic_type_classes = &shared.dynamic_type_classes;
     let filter: HashSet<u16> = type_codes.into_iter().collect();
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let index = &shared.index;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
         let record = match decoder.parse_object_record(obj.offset) {
@@ -932,12 +931,12 @@ pub fn list_object_headers_by_type(
             Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
-        let type_name = resolved_type_name(header.type_code, &dynamic_types);
+        let type_name = resolved_type_name(header.type_code, dynamic_types);
         if !matches_type_filter(&filter, header.type_code, &type_name) {
             continue;
         }
         let type_class =
-            resolved_type_class(header.type_code, &type_name, &dynamic_type_classes);
+            resolved_type_class(header.type_code, &type_name, dynamic_type_classes);
         result.push((
             obj.handle.0,
             obj.offset,
@@ -964,11 +963,11 @@ pub fn read_object_records_by_type(
     if type_codes.is_empty() {
         return Ok(Vec::new());
     }
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
     let dynamic_types = decoder.dynamic_type_map().map_err(to_py_err)?;
     let filter: HashSet<u16> = type_codes.into_iter().collect();
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let index = &shared.index;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
         let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
@@ -1005,9 +1004,9 @@ pub fn read_object_records_by_handle(
         return Ok(Vec::new());
     }
 
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let index = &shared.index;
     let target_handles: HashSet<u64> = handles.iter().copied().collect();
     let mut object_offsets: HashMap<u64, u32> = HashMap::new();
     for obj in index.objects.iter() {
@@ -1112,13 +1111,13 @@ pub fn decode_object_entity_layer_handles(
         return Ok(Vec::new());
     }
 
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let known_layer_handles: HashSet<u64> =
-        collect_known_layer_handles_in_order(&decoder, &dynamic_types, &index, best_effort)?
+        collect_known_layer_handles_in_order(&decoder, dynamic_types, index, best_effort)?
             .into_iter()
             .collect();
     let target_handles: HashSet<u64> = handles.iter().copied().collect();
@@ -1763,10 +1762,10 @@ pub fn decode_object_handle_stream_refs(
         return Ok(Vec::new());
     }
 
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let index = &shared.index;
     let known_handles: HashSet<u64> = index.objects.iter().map(|obj| obj.handle.0).collect();
     let mut object_offsets: HashMap<u64, u32> = HashMap::new();
     for obj in index.objects.iter() {
@@ -1817,12 +1816,12 @@ pub fn decode_acis_candidate_infos(
         return Ok(Vec::new());
     }
 
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let index = &shared.index;
     let known_handles: HashSet<u64> = index.objects.iter().map(|obj| obj.handle.0).collect();
-    let object_type_codes = collect_object_type_codes(&decoder, &index, best_effort)?;
+    let object_type_codes = collect_object_type_codes(&decoder, index, best_effort)?;
     let mut object_offsets: HashMap<u64, u32> = HashMap::new();
     for obj in index.objects.iter() {
         object_offsets
@@ -1917,12 +1916,12 @@ pub fn decode_proxy_graphic_chunk_infos(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<ProxyGraphicChunkInfoRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let dynamic_type_classes = load_dynamic_type_classes(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let dynamic_type_classes = &shared.dynamic_type_classes;
+    let index = &shared.index;
     let mut result = Vec::new();
 
     'objects: for obj in index.objects.iter() {
@@ -1933,9 +1932,9 @@ pub fn decode_proxy_graphic_chunk_infos(
         if header.type_code != 0x1F2 && header.type_code < 500 {
             continue;
         }
-        let type_name = resolved_type_name(header.type_code, &dynamic_types);
+        let type_name = resolved_type_name(header.type_code, dynamic_types);
         let type_class =
-            resolved_type_class(header.type_code, &type_name, &dynamic_type_classes);
+            resolved_type_class(header.type_code, &type_name, dynamic_type_classes);
         if type_class == "O" {
             continue;
         }
@@ -1973,12 +1972,12 @@ pub fn decode_proxy_graphic_text_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<ProxyGraphicTextRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let dynamic_type_classes = load_dynamic_type_classes(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let dynamic_type_classes = &shared.dynamic_type_classes;
+    let index = &shared.index;
     let mut result = Vec::new();
 
     'objects: for obj in index.objects.iter() {
@@ -1989,9 +1988,9 @@ pub fn decode_proxy_graphic_text_entities(
         if header.type_code != 0x1F2 && header.type_code < 500 {
             continue;
         }
-        let type_name = resolved_type_name(header.type_code, &dynamic_types);
+        let type_name = resolved_type_name(header.type_code, dynamic_types);
         let type_class =
-            resolved_type_class(header.type_code, &type_name, &dynamic_type_classes);
+            resolved_type_class(header.type_code, &type_name, dynamic_type_classes);
         if type_class == "O" {
             continue;
         }
@@ -2038,12 +2037,12 @@ pub fn decode_entity_placements(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<EntityPlacementRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let dynamic_type_classes = load_dynamic_type_classes(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let dynamic_type_classes = &shared.dynamic_type_classes;
+    let index = &shared.index;
     let version = decoder.version().clone();
     let mut result = Vec::new();
     for obj in index.objects.iter() {
@@ -2051,8 +2050,8 @@ pub fn decode_entity_placements(
         else {
             continue;
         };
-        let type_name = resolved_type_name(header.type_code, &dynamic_types);
-        if resolved_type_class(header.type_code, &type_name, &dynamic_type_classes) != "E" {
+        let type_name = resolved_type_name(header.type_code, dynamic_types);
+        if resolved_type_class(header.type_code, &type_name, dynamic_type_classes) != "E" {
             continue;
         }
         let mut reader = record.bit_reader();
@@ -2105,15 +2104,15 @@ pub fn decode_entity_placements(
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<EntityStyleRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let decoded_layer_rows = decode_layer_colors(path, None)?;
     let decoded_layer_handles: Vec<u64> = decoded_layer_rows.iter().map(|(h, _, _)| *h).collect();
     let raw_layer_handles =
-        collect_known_layer_handles_in_order(&decoder, &dynamic_types, &index, best_effort)?;
+        collect_known_layer_handles_in_order(&decoder, dynamic_types, index, best_effort)?;
     let mut layer_handle_remap = HashMap::new();
     if raw_layer_handles.len() == decoded_layer_handles.len() {
         for (raw, decoded) in raw_layer_handles
@@ -2141,12 +2140,12 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
             }
             return Err(to_py_err(err));
         }
-        if matches_type_name(header.type_code, 7, "INSERT", &dynamic_types)
-            || matches_type_name(header.type_code, 0x0f, "POLYLINE_2D", &dynamic_types) {
+        if matches_type_name(header.type_code, 7, "INSERT", dynamic_types)
+            || matches_type_name(header.type_code, 0x0f, "POLYLINE_2D", dynamic_types) {
             if let Some((common, handles)) = decode_common_entity_header_and_handles(&record, decoder.version(), &header) {
                 result.push((obj.handle.0, common.color.index, common.color.true_color, handles.layer));
             }
-        } else if matches_type_name(header.type_code, 0x13, "LINE", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x13, "LINE", dynamic_types) {
             let entity = match decode_line_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2175,7 +2174,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x1B, "POINT", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x1B, "POINT", dynamic_types) {
             let entity = match decode_point_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2204,7 +2203,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x11, "ARC", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x11, "ARC", dynamic_types) {
             let entity =
                 match decode_arc_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
                 {
@@ -2230,7 +2229,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x12, "CIRCLE", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x12, "CIRCLE", dynamic_types) {
             let entity = match decode_circle_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2259,7 +2258,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x23, "ELLIPSE", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x23, "ELLIPSE", dynamic_types) {
             let entity = match decode_ellipse_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2288,7 +2287,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x24, "SPLINE", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x24, "SPLINE", dynamic_types) {
             let entity = match decode_spline_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2317,7 +2316,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x01, "TEXT", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x01, "TEXT", dynamic_types) {
             let entity = match decode_text_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2346,7 +2345,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x02, "ATTRIB", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x02, "ATTRIB", dynamic_types) {
             let entity = match decode_attrib_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2375,7 +2374,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x03, "ATTDEF", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x03, "ATTDEF", dynamic_types) {
             let entity = match decode_attdef_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2404,7 +2403,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x2C, "MTEXT", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x2C, "MTEXT", dynamic_types) {
             let entity = match decode_mtext_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2433,7 +2432,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x2D, "LEADER", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x2D, "LEADER", dynamic_types) {
             let entity = match decode_leader_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2462,7 +2461,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x4E, "HATCH", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x4E, "HATCH", dynamic_types) {
             let entity = match decode_hatch_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2491,7 +2490,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0, "IMAGE", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0, "IMAGE", dynamic_types) {
             let entity = match decode_image_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2520,7 +2519,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x2E, "TOLERANCE", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x2E, "TOLERANCE", dynamic_types) {
             let entity = match decode_tolerance_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2549,7 +2548,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x2F, "MLINE", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x2F, "MLINE", dynamic_types) {
             let entity = match decode_mline_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2578,7 +2577,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x4D, "LWPOLYLINE", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x4D, "LWPOLYLINE", dynamic_types) {
             let entity = match decode_lwpolyline_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2607,7 +2606,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x10, "POLYLINE_3D", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x10, "POLYLINE_3D", dynamic_types) {
             let entity = match decode_polyline_3d_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2636,7 +2635,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x1E, "POLYLINE_MESH", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x1E, "POLYLINE_MESH", dynamic_types) {
             let entity = match decode_polyline_mesh_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2665,7 +2664,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x1D, "POLYLINE_PFACE", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x1D, "POLYLINE_PFACE", dynamic_types) {
             let entity = match decode_polyline_pface_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2694,7 +2693,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x1C, "3DFACE", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x1C, "3DFACE", dynamic_types) {
             let entity = match decode_3dface_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2723,7 +2722,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x1F, "SOLID", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x1F, "SOLID", dynamic_types) {
             let entity = match decode_solid_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2752,7 +2751,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x20, "TRACE", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x20, "TRACE", dynamic_types) {
             let entity = match decode_trace_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2781,7 +2780,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x21, "SHAPE", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x21, "SHAPE", dynamic_types) {
             let entity = match decode_shape_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2810,7 +2809,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x22, "VIEWPORT", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x22, "VIEWPORT", dynamic_types) {
             let entity = match decode_viewport_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2839,7 +2838,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x2B, "OLEFRAME", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x2B, "OLEFRAME", dynamic_types) {
             let entity = match decode_oleframe_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2868,7 +2867,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x4A, "OLE2FRAME", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x4A, "OLE2FRAME", dynamic_types) {
             let entity = match decode_ole2frame_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2897,7 +2896,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x4C, "LONG_TRANSACTION", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x4C, "LONG_TRANSACTION", dynamic_types) {
             let entity = match decode_long_transaction_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2926,7 +2925,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x25, "REGION", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x25, "REGION", dynamic_types) {
             let entity = match decode_region_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2955,7 +2954,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x26, "3DSOLID", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x26, "3DSOLID", dynamic_types) {
             let entity = match decode_3dsolid_for_version(
                 &mut reader,
                 decoder.version(),
@@ -2984,7 +2983,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x27, "BODY", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x27, "BODY", dynamic_types) {
             let entity = match decode_body_for_version(
                 &mut reader,
                 decoder.version(),
@@ -3013,7 +3012,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x28, "RAY", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x28, "RAY", dynamic_types) {
             let entity =
                 match decode_ray_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
                 {
@@ -3039,7 +3038,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x29, "XLINE", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x29, "XLINE", dynamic_types) {
             let entity = match decode_xline_for_version(
                 &mut reader,
                 decoder.version(),
@@ -3068,7 +3067,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x15, "DIM_LINEAR", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x15, "DIM_LINEAR", dynamic_types) {
             let entity = match decode_dim_linear_for_version(
                 &mut reader,
                 decoder.version(),
@@ -3098,7 +3097,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 common.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x14, "DIM_ORDINATE", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x14, "DIM_ORDINATE", dynamic_types) {
             let entity = match decode_dim_ordinate_for_version(
                 &mut reader,
                 decoder.version(),
@@ -3128,7 +3127,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 common.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x16, "DIM_ALIGNED", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x16, "DIM_ALIGNED", dynamic_types) {
             let entity = match decode_dim_aligned_for_version(
                 &mut reader,
                 decoder.version(),
@@ -3158,7 +3157,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 common.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x17, "DIM_ANG3PT", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x17, "DIM_ANG3PT", dynamic_types) {
             let entity = match decode_dim_ang3pt_for_version(
                 &mut reader,
                 decoder.version(),
@@ -3188,7 +3187,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 common.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x18, "DIM_ANG2LN", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x18, "DIM_ANG2LN", dynamic_types) {
             let entity = match decode_dim_ang2ln_for_version(
                 &mut reader,
                 decoder.version(),
@@ -3218,7 +3217,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 common.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x1A, "DIM_DIAMETER", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x1A, "DIM_DIAMETER", dynamic_types) {
             let entity = match decode_dim_diameter_for_version(
                 &mut reader,
                 decoder.version(),
@@ -3248,7 +3247,7 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 common.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0x19, "DIM_RADIUS", &dynamic_types) {
+        } else if matches_type_name(header.type_code, 0x19, "DIM_RADIUS", dynamic_types) {
             let entity = match decode_dim_radius_for_version(
                 &mut reader,
                 decoder.version(),
@@ -3294,18 +3293,18 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_line_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<LineEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x13, "LINE", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x13, "LINE", dynamic_types) {
             continue;
         }
         let mut entity: Option<entities::LineEntity> = None;
@@ -3359,18 +3358,18 @@ pub fn decode_line_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<Li
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_line_owner_handles(path: &str, limit: Option<usize>) -> PyResult<Vec<InsertOwnerRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x13, "LINE", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x13, "LINE", dynamic_types) {
             continue;
         }
         let mut entity: Option<entities::LineEntity> = None;
@@ -3416,18 +3415,18 @@ pub fn decode_line_owner_handles(path: &str, limit: Option<usize>) -> PyResult<V
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_point_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<PointEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x1B, "POINT", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x1B, "POINT", dynamic_types) {
             continue;
         }
         let mut reader = record.bit_reader();
@@ -3568,11 +3567,11 @@ pub fn decode_line_arc_circle_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<LineArcCircleRows> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let mut lines: Vec<LineEntityRow> = Vec::new();
     let mut arcs: Vec<ArcEntityRow> = Vec::new();
     let mut circles: Vec<CircleEntityRow> = Vec::new();
@@ -3583,9 +3582,9 @@ pub fn decode_line_arc_circle_entities(
         else {
             continue;
         };
-        let is_line = matches_type_name(header.type_code, 0x13, "LINE", &dynamic_types);
-        let is_arc = matches_type_name(header.type_code, 0x11, "ARC", &dynamic_types);
-        let is_circle = matches_type_name(header.type_code, 0x12, "CIRCLE", &dynamic_types);
+        let is_line = matches_type_name(header.type_code, 0x13, "LINE", dynamic_types);
+        let is_arc = matches_type_name(header.type_code, 0x11, "ARC", dynamic_types);
+        let is_circle = matches_type_name(header.type_code, 0x12, "CIRCLE", dynamic_types);
         if !(is_line || is_arc || is_circle) {
             continue;
         }
@@ -3727,18 +3726,18 @@ pub fn decode_spline_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_text_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<TextEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let known_handles: HashSet<u64> = if is_r2010_plus_version(decoder.version()) {
         index.objects.iter().map(|obj| obj.handle.0).collect()
     } else {
         HashSet::new()
     };
     let object_type_codes = if is_r2010_plus_version(decoder.version()) {
-        collect_object_type_codes(&decoder, &index, best_effort)?
+        collect_object_type_codes(&decoder, index, best_effort)?
     } else {
         HashMap::new()
     };
@@ -3748,7 +3747,7 @@ pub fn decode_text_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<Te
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x01, "TEXT", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x01, "TEXT", dynamic_types) {
             continue;
         }
         let mut reader = record.bit_reader();
@@ -3836,21 +3835,21 @@ pub fn decode_attdef_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_mtext_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<MTextEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
     let debug_mtext = std::env::var("EZDWG_DEBUG_MTEXT")
         .ok()
         .is_some_and(|value| value != "0");
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let known_handles: HashSet<u64> = if is_r2010_plus_version(decoder.version()) {
         index.objects.iter().map(|obj| obj.handle.0).collect()
     } else {
         HashSet::new()
     };
     let object_type_codes = if is_r2010_plus_version(decoder.version()) {
-        collect_object_type_codes(&decoder, &index, best_effort)?
+        collect_object_type_codes(&decoder, index, best_effort)?
     } else {
         HashMap::new()
     };
@@ -3860,7 +3859,7 @@ pub fn decode_mtext_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<M
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x2C, "MTEXT", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x2C, "MTEXT", dynamic_types) {
             continue;
         }
         let mut reader = record.bit_reader();
@@ -3988,21 +3987,21 @@ pub fn decode_leader_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_hatch_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<HatchEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
     let debug_hatch = std::env::var("EZDWG_DEBUG_HATCH")
         .ok()
         .is_some_and(|value| value != "0");
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x4E, "HATCH", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x4E, "HATCH", dynamic_types) {
             continue;
         }
         let mut reader = record.bit_reader();
@@ -4068,18 +4067,18 @@ pub fn decode_hatch_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<H
 /// definition cannot be read have no row.
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_hatch_patterns(path: &str, limit: Option<usize>) -> PyResult<Vec<HatchPatternRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x4E, "HATCH", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x4E, "HATCH", dynamic_types) {
             continue;
         }
         let mut reader = record.bit_reader();
@@ -4371,13 +4370,13 @@ pub fn decode_long_transaction_entities(
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_region_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<RegionEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let known_layer_handles: HashSet<u64> =
-        collect_known_layer_handles_in_order(&decoder, &dynamic_types, &index, best_effort)?
+        collect_known_layer_handles_in_order(&decoder, dynamic_types, index, best_effort)?
             .into_iter()
             .collect();
     let known_handles: HashSet<u64> = index.objects.iter().map(|obj| obj.handle.0).collect();
@@ -4387,7 +4386,7 @@ pub fn decode_region_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x25, "REGION", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x25, "REGION", dynamic_types) {
             continue;
         }
         let mut reader = record.bit_reader();
@@ -4429,13 +4428,13 @@ pub fn decode_3dsolid_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<Solid3dEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let known_layer_handles: HashSet<u64> =
-        collect_known_layer_handles_in_order(&decoder, &dynamic_types, &index, best_effort)?
+        collect_known_layer_handles_in_order(&decoder, dynamic_types, index, best_effort)?
             .into_iter()
             .collect();
     let known_handles: HashSet<u64> = index.objects.iter().map(|obj| obj.handle.0).collect();
@@ -4445,7 +4444,7 @@ pub fn decode_3dsolid_entities(
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x26, "3DSOLID", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x26, "3DSOLID", dynamic_types) {
             continue;
         }
         let mut reader = record.bit_reader();
@@ -4481,13 +4480,13 @@ pub fn decode_3dsolid_entities(
 
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_body_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<BodyEntityRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let known_layer_handles: HashSet<u64> =
-        collect_known_layer_handles_in_order(&decoder, &dynamic_types, &index, best_effort)?
+        collect_known_layer_handles_in_order(&decoder, dynamic_types, index, best_effort)?
             .into_iter()
             .collect();
     let known_handles: HashSet<u64> = index.objects.iter().map(|obj| obj.handle.0).collect();
@@ -4497,7 +4496,7 @@ pub fn decode_body_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<Bo
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x27, "BODY", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x27, "BODY", dynamic_types) {
             continue;
         }
         let mut reader = record.bit_reader();

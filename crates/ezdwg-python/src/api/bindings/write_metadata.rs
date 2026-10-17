@@ -76,19 +76,19 @@ pub fn decode_mtext_write_properties(path: &str) -> PyResult<Vec<(u64, Option<u6
 /// Retain STYLE properties and identify complex LTYPE definitions before export.
 #[pyfunction]
 pub fn decode_write_tables(py: Python<'_>, path: &str) -> PyResult<Vec<PyObject>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic = &shared.dynamic_types;
+    let index = &shared.index;
     let mut result = Vec::new();
     for obj in &index.objects {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
         };
-        let style = matches_type_name(header.type_code, 0x35, "STYLE", &dynamic);
-        let ltype = matches_type_name(header.type_code, 0x39, "LTYPE", &dynamic);
+        let style = matches_type_name(header.type_code, 0x35, "STYLE", dynamic);
+        let ltype = matches_type_name(header.type_code, 0x39, "LTYPE", dynamic);
         if !style && !ltype {
             continue;
         }
@@ -184,19 +184,19 @@ pub fn decode_write_tables(py: Python<'_>, path: &str) -> PyResult<Vec<PyObject>
 /// Nondefault properties that the bounded AC1015 writer cannot preserve.
 #[pyfunction]
 pub fn decode_write_property_losses(path: &str) -> PyResult<Vec<(u64, Vec<String>)>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best = is_best_effort_compat_version(&decoder);
-    let dynamic = load_dynamic_types(&decoder, best)?;
-    let classes = load_dynamic_type_classes(&decoder, best)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best = shared.best_effort;
+    let dynamic = &shared.dynamic_types;
+    let classes = &shared.dynamic_type_classes;
+    let index = &shared.index;
     let mut rows = Vec::new();
     for obj in &index.objects {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best)? else {
             continue;
         };
-        let name = resolved_type_name(header.type_code, &dynamic);
-        if resolved_type_class(header.type_code, &name, &classes) != "E" {
+        let name = resolved_type_name(header.type_code, dynamic);
+        if resolved_type_class(header.type_code, &name, classes) != "E" {
             continue;
         }
         let mut losses = Vec::new();

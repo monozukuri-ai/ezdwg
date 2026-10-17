@@ -105,11 +105,11 @@ fn extract_acly_name_and_expression(
 }
 
 fn discover_named_dict_entries(path: &str, keys: &[&str]) -> PyResult<Vec<(String, u64)>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic = &shared.dynamic_types;
+    let index = &shared.index;
 
     let mut by_handle: HashMap<u64, usize> = HashMap::new();
     for (i, obj) in index.objects.iter().enumerate() {
@@ -141,7 +141,7 @@ fn discover_named_dict_entries(path: &str, keys: &[&str]) -> PyResult<Vec<(Strin
         else {
             continue;
         };
-        if !is_layer_control_type(header.type_code, &dynamic) {
+        if !is_layer_control_type(header.type_code, dynamic) {
             continue;
         }
         let Some(xdic_h) = layer_control_xdic_handle(&decoder, obj, best_effort) else {
@@ -174,7 +174,7 @@ fn discover_named_dict_entries(path: &str, keys: &[&str]) -> PyResult<Vec<(Strin
             else {
                 continue;
             };
-            if !is_dictionary_type(header.type_code, &dynamic) {
+            if !is_dictionary_type(header.type_code, dynamic) {
                 continue;
             }
             let Some(dict) = decode_one_dictionary(&decoder, obj, best_effort) else {
@@ -219,10 +219,10 @@ pub fn decode_layer_filter_xrecords(
         return Ok(Vec::new());
     }
 
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let index = &shared.index;
 
     let mut by_handle: HashMap<u64, usize> = HashMap::new();
     for (i, obj) in index.objects.iter().enumerate() {
@@ -369,10 +369,10 @@ pub fn decode_layer_filter_tree(
         return Ok(Vec::new());
     }
 
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let index = &shared.index;
 
     let mut by_handle: HashMap<u64, usize> = HashMap::new();
     for (i, obj) in index.objects.iter().enumerate() {

@@ -206,11 +206,11 @@ fn decode_linetype_record(
 /// built-in entries "ByBlock", "ByLayer" and "Continuous".
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_linetypes(path: &str, limit: Option<usize>) -> PyResult<Vec<LinetypeRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let mut result: Vec<LinetypeRow> = Vec::new();
     let mut seen: HashSet<u64> = HashSet::new();
 
@@ -219,7 +219,7 @@ pub fn decode_linetypes(path: &str, limit: Option<usize>) -> PyResult<Vec<Linety
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x39, "LTYPE", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x39, "LTYPE", dynamic_types) {
             continue;
         }
         let row = match decode_linetype_record(&record, &header, decoder.version(), obj.handle.0) {
@@ -310,15 +310,15 @@ fn decode_layer_linetype_handle(
 /// Layers whose linetype handle cannot be read are omitted.
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_layer_linetypes(path: &str, limit: Option<usize>) -> PyResult<Vec<LayerLinetypeRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let linetype_handles = collect_object_handles_by_type(
         &decoder,
-        &dynamic_types,
-        &index,
+        dynamic_types,
+        index,
         best_effort,
         0x39,
         "LTYPE",
@@ -331,7 +331,7 @@ pub fn decode_layer_linetypes(path: &str, limit: Option<usize>) -> PyResult<Vec<
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x33, "LAYER", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x33, "LAYER", dynamic_types) {
             continue;
         }
         let Some(linetype_handle) = decode_layer_linetype_handle(
@@ -454,12 +454,12 @@ fn decode_entity_linetypes_uncached(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<EntityLinetypeRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let dynamic_type_classes = load_dynamic_type_classes(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let dynamic_type_classes = &shared.dynamic_type_classes;
+    let index = &shared.index;
     let mut result = Vec::new();
     let mut seen: HashSet<u64> = HashSet::new();
 
@@ -468,8 +468,8 @@ fn decode_entity_linetypes_uncached(
         else {
             continue;
         };
-        let type_name = resolved_type_name(header.type_code, &dynamic_types);
-        if resolved_type_class(header.type_code, &type_name, &dynamic_type_classes) != "E" {
+        let type_name = resolved_type_name(header.type_code, dynamic_types);
+        if resolved_type_class(header.type_code, &type_name, dynamic_type_classes) != "E" {
             continue;
         }
         let Some((common, handles)) =
@@ -515,12 +515,12 @@ pub fn decode_entity_lineweights(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<EntityLineweightRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let dynamic_type_classes = load_dynamic_type_classes(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let dynamic_type_classes = &shared.dynamic_type_classes;
+    let index = &shared.index;
     let mut result = Vec::new();
     let mut seen: HashSet<u64> = HashSet::new();
 
@@ -529,8 +529,8 @@ pub fn decode_entity_lineweights(
         else {
             continue;
         };
-        let type_name = resolved_type_name(header.type_code, &dynamic_types);
-        if resolved_type_class(header.type_code, &type_name, &dynamic_type_classes) != "E" {
+        let type_name = resolved_type_name(header.type_code, dynamic_types);
+        if resolved_type_class(header.type_code, &type_name, dynamic_type_classes) != "E" {
             continue;
         }
         let Some((common, _handles)) =
@@ -610,11 +610,11 @@ fn decode_layer_state_record(
 /// `lineweight` is -3 there. Layers whose record cannot be read are omitted.
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_layer_states(path: &str, limit: Option<usize>) -> PyResult<Vec<LayerStateRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let mut result = Vec::new();
     let mut seen: HashSet<u64> = HashSet::new();
 
@@ -623,7 +623,7 @@ pub fn decode_layer_states(path: &str, limit: Option<usize>) -> PyResult<Vec<Lay
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x33, "LAYER", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x33, "LAYER", dynamic_types) {
             continue;
         }
         let Ok((frozen, off, frozen_in_new_viewports, locked, plot, lineweight)) =
@@ -758,11 +758,11 @@ fn decode_dimstyle_record(
 /// scaled by the viewport or annotatively).
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_dimstyles(path: &str, limit: Option<usize>) -> PyResult<Vec<DimStyleSizeRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let mut result = Vec::new();
     let mut seen: HashSet<u64> = HashSet::new();
 
@@ -771,7 +771,7 @@ pub fn decode_dimstyles(path: &str, limit: Option<usize>) -> PyResult<Vec<DimSty
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x45, "DIMSTYLE", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x45, "DIMSTYLE", dynamic_types) {
             continue;
         }
         let Ok((name, dimscale, dimasz, dimtxt)) =
@@ -1004,11 +1004,11 @@ fn decode_layout_record(
 /// R2000 may have none.
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_layout_objects(path: &str, limit: Option<usize>) -> PyResult<Vec<LayoutObjectRow>> {
-    let bytes = file_open::read_file(path).map_err(to_py_err)?;
-    let decoder = build_decoder(&bytes).map_err(to_py_err)?;
-    let best_effort = is_best_effort_compat_version(&decoder);
-    let dynamic_types = load_dynamic_types(&decoder, best_effort)?;
-    let index = decoder.build_object_index().map_err(to_py_err)?;
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
     let mut result = Vec::new();
     let mut seen: HashSet<u64> = HashSet::new();
 
@@ -1017,7 +1017,7 @@ pub fn decode_layout_objects(path: &str, limit: Option<usize>) -> PyResult<Vec<L
         else {
             continue;
         };
-        if !matches_type_name(header.type_code, 0x52, "LAYOUT", &dynamic_types) {
+        if !matches_type_name(header.type_code, 0x52, "LAYOUT", dynamic_types) {
             continue;
         }
         let Ok(mut row) = decode_layout_record(&record, &header, decoder.version(), obj.handle.0)
