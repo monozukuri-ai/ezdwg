@@ -35,6 +35,8 @@ pub fn write_ac1015_line_dwg(output_path: &str, lines: Vec<LineEntityRow>) -> Py
         None,
         None,
         None,
+        None,
+        None,
     )
 }
 
@@ -52,7 +54,7 @@ pub fn write_ac1015_line_dwg(output_path: &str, lines: Vec<LineEntityRow>) -> Py
     *, entity_attributes=None, layers=None, linetypes=None, metadata=None, text_styles=None,
     blocks=None, inserts=None, attdefs=None, attribs=None, entity_owners=None, ellipses=None,
     polylines2d=None, polylines3d=None, solids=None, traces=None, faces3d=None, splines=None,
-    hatches=None, dimensions=None, images=None, image_defs=None
+    hatches=None, dimensions=None, images=None, image_defs=None, viewports=None, layout=None
 ))]
 pub fn write_ac1015_dwg(
     output_path: &str,
@@ -86,6 +88,8 @@ pub fn write_ac1015_dwg(
     dimensions: Option<Vec<Bound<'_, PyDict>>>,
     images: Option<Vec<Bound<'_, PyDict>>>,
     image_defs: Option<Vec<Bound<'_, PyDict>>>,
+    viewports: Option<Vec<Bound<'_, PyDict>>>,
+    layout: Option<Bound<'_, PyDict>>,
 ) -> PyResult<()> {
     let points = points.unwrap_or_default();
     let rays = rays.unwrap_or_default();
@@ -308,6 +312,8 @@ pub fn write_ac1015_dwg(
     append_write_hatches(&mut doc, hatches)?;
     append_write_dimensions(&mut doc, dimensions)?;
     append_write_images(&mut doc, images, image_defs)?;
+    append_write_viewports(&mut doc, viewports)?;
+    apply_write_layout(&mut doc, layout)?;
     if let Some(mut attributes) = entity_attributes {
         for entity in &mut doc.modelspace {
             if let Some(h) = entity.common().handle {

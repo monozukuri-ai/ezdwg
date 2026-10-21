@@ -4,7 +4,7 @@ use super::entities::common::{encode_entity_payload, CommonEntityEncodeInput};
 use crate::bit::{BitWriter, Endian};
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
-use crate::writer::ir::{LayerDef, TextStyleDef, WriterDocument};
+use crate::writer::ir::{LayerDef, LayoutSettings, TextStyleDef, WriterDocument};
 use crate::writer::HandleAllocator;
 use std::collections::BTreeMap;
 
@@ -30,6 +30,8 @@ pub struct DatabaseHandles {
     pub normal_plotstyle: u64,
     pub model_layout: u64,
     pub paper_layout: u64,
+    /// The overall paper viewport of `Layout1` (0 when paper space is empty).
+    pub paper_viewport: u64,
     /// The `Standard` DIMSTYLE record referenced by dimensions and the header.
     pub dimstyle: u64,
     /// `ACAD_IMAGE_DICT`, `ACAD_IMAGE_VARS` and the IMAGEDEF objects, when images exist.
@@ -66,11 +68,15 @@ impl DatabaseHandles {
             normal_plotstyle: a.allocate()?,
             model_layout: a.allocate()?,
             paper_layout: a.allocate()?,
+            paper_viewport: 0,
             dimstyle: a.allocate()?,
             image_dict: 0,
             image_vars: 0,
             image_defs: BTreeMap::new(),
         };
+        if !doc.paperspace.is_empty() {
+            result.paper_viewport = a.allocate()?;
+        }
         if !doc.image_defs.is_empty() {
             result.image_dict = a.allocate()?;
             result.image_vars = a.allocate()?;
@@ -453,6 +459,12 @@ impl DatabaseHandles {
                 )?,
             ));
         }
+        // The paper viewport written by the layout loop leads the paper-space chain.
+        let paper_contents: Vec<u64> = (self.paper_viewport != 0)
+            .then_some(self.paper_viewport)
+            .into_iter()
+            .chain(layout_handles[WriterDocument::PAPER_LAYOUT].iter().copied())
+            .collect();
         let spaces = [
             (
                 self.model,
@@ -470,11 +482,13 @@ impl DatabaseHandles {
                 "*Paper_Space",
                 self.paper_begin,
                 self.paper_end,
-                &[][..],
+                paper_contents.as_slice(),
                 self.paper_layout,
                 (0., 0., 0.),
                 "",
-                false,
+                doc.paperspace
+                    .iter()
+                    .any(|e| matches!(e, crate::writer::WriterEntity::Attdef(_))),
             ),
         ];
         let definitions = doc.blocks.iter().enumerate().map(|(i, b)| {
@@ -484,7 +498,7 @@ impl DatabaseHandles {
                 b.name.as_str(),
                 begin,
                 end,
-                layout_handles[i + 1].as_slice(),
+                layout_handles[i + WriterDocument::FIRST_BLOCK_LAYOUT].as_slice(),
                 0,
                 b.base_point,
                 b.description.as_str(),
@@ -554,6 +568,12 @@ impl DatabaseHandles {
                 )?,
             ));
             if layout != 0 {
+                // 330 block record, 331 last active viewport, 346 base UCS, 345 named UCS.
+                let active_viewport = if h == self.paper {
+                    self.paper_viewport
+                } else {
+                    0
+                };
                 objects.push((
                     layout,
                     object(
@@ -561,8 +581,14 @@ impl DatabaseHandles {
                         502,
                         layout,
                         layouts,
-                        &[(4, h), (4, 0), (5, 0), (5, 0)],
-                        |w| layout_body(w, h == self.model),
+                        &[(4, h), (4, active_viewport), (5, 0), (5, 0)],
+                        |w| {
+                            if h == self.model {
+                                model_layout_body(w)
+                            } else {
+                                paper_layout_body(w, &doc.layout, self.paper_viewport != 0)
+                            }
+                        },
                     )?,
                 ));
             }
@@ -570,6 +596,7 @@ impl DatabaseHandles {
                 let common = CommonEntityEncodeInput {
                     handle,
                     owner_handle: h,
+                    entity_mode: 0,
                     layer_handle: self.layer,
                     color_index: 256,
                     linetype_flags: 0,
@@ -641,10 +668,11 @@ fn dimstyle_body(w: &mut BitWriter) -> Result<()> {
     w.write_b(0) // unknown (70 bit 0)
 }
 
-fn layout_body(w: &mut BitWriter, model: bool) -> Result<()> {
+/// The `Model` LAYOUT: default A3 plot settings of a model-space-only drawing.
+fn model_layout_body(w: &mut BitWriter) -> Result<()> {
     w.write_tv("")?;
     w.write_tv("")?;
-    w.write_bs(if model { 1024 } else { 0 })?;
+    w.write_bs(1024)?;
     for v in [0., 0., 0., 0., 420., 297.] {
         w.write_bd(v)?;
     }
@@ -665,8 +693,8 @@ fn layout_body(w: &mut BitWriter, model: bool) -> Result<()> {
     w.write_bd(1.)?;
     w.write_bd(0.)?;
     w.write_bd(0.)?;
-    w.write_tv(if model { "Model" } else { "Layout1" })?;
-    w.write_bl(if model { 0 } else { 1 })?;
+    w.write_tv("Model")?;
+    w.write_bl(0)?;
     w.write_bs(1)?;
     w.write_3bd(0., 0., 0.)?;
     for v in [0., 0., 420., 297.] {
@@ -679,6 +707,65 @@ fn layout_body(w: &mut BitWriter, model: bool) -> Result<()> {
     w.write_bs(0)?;
     w.write_3bd(0., 0., 0.)?;
     w.write_3bd(0., 0., 0.)
+}
+
+/// The paper-space LAYOUT (ODA 20.4.84, R2000 column): PLOTSETTINGS data from
+/// `layout`, then the layout name, tab order 1, PSLTSCALE flag, the world UCS,
+/// limits around the paper and, once the sheet holds entities, the paper
+/// rectangle as extents.
+fn paper_layout_body(w: &mut BitWriter, layout: &LayoutSettings, has_entities: bool) -> Result<()> {
+    w.write_tv(&layout.page_setup_name)?;
+    w.write_tv(&layout.printer)?;
+    w.write_bs(layout.plot_layout_flags)?;
+    let (left, bottom, right, top) = layout.margins;
+    for v in [
+        left,
+        bottom,
+        right,
+        top,
+        layout.paper_width,
+        layout.paper_height,
+    ] {
+        w.write_bd(v)?;
+    }
+    w.write_tv(&layout.paper_size)?;
+    w.write_bd(layout.plot_origin.0)?;
+    w.write_bd(layout.plot_origin.1)?;
+    w.write_bs(layout.paper_units)?;
+    w.write_bs(layout.plot_rotation)?;
+    w.write_bs(layout.plot_type)?;
+    let ((wx0, wy0), (wx1, wy1)) = layout.plot_window;
+    for v in [wx0, wy0, wx1, wy1] {
+        w.write_bd(v)?;
+    }
+    w.write_tv(&layout.plot_view_name)?; // R13-R2000 only
+    w.write_bd(layout.scale_numerator)?;
+    w.write_bd(layout.scale_denominator)?;
+    w.write_tv(&layout.style_sheet)?;
+    w.write_bs(layout.scale_type)?;
+    w.write_bd(layout.scale_factor())?;
+    w.write_bd(layout.paper_image_origin.0)?;
+    w.write_bd(layout.paper_image_origin.1)?;
+    w.write_tv(&layout.name)?;
+    w.write_bl(1)?; // tab order
+    w.write_bs(1)?; // PSLTSCALE
+    w.write_3bd(0., 0., 0.)?; // UCS origin
+    let ((x0, y0), (x1, y1)) = layout.limits();
+    for v in [x0, y0, x1, y1] {
+        w.write_rd(Endian::Little, v)?;
+    }
+    for p in [(0., 0., 0.), (1., 0., 0.), (0., 1., 0.)] {
+        w.write_3bd(p.0, p.1, p.2)?; // insertion base, UCS X, UCS Y
+    }
+    w.write_bd(0.)?; // elevation
+    w.write_bs(0)?; // orthographic view type
+    if has_entities {
+        w.write_3bd(x0, y0, 0.)?;
+        w.write_3bd(x1, y1, 0.)
+    } else {
+        w.write_3bd(0., 0., 0.)?;
+        w.write_3bd(0., 0., 0.)
+    }
 }
 
 fn table_name(w: &mut BitWriter, name: &str) -> Result<()> {

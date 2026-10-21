@@ -179,7 +179,8 @@ def import_drawing(doc, *, strict=True, layout=None, types=None, all_blocks=True
         for e in source
         if e.dxftype == "ATTRIB" and e.handle not in selected
     )
-    prepared, attrs, layers, ltypes, styles, header, losses, image_defs = (
+    # Paper space (layouts, viewports) of the source is not imported.
+    prepared, attrs, layers, ltypes, styles, header, losses, image_defs, _layout = (
         prepare_attributes(doc, list(selected.values()))
     )
     for row in image_defs:

@@ -65,6 +65,7 @@ from ._convert_row_builders import (
     _as_spline_row,
     _as_ray_row,
     _as_text_row,
+    _as_viewport_row,
     _as_xline_row,
 )
 from ._convert_polyline2d_spline import (
@@ -250,8 +251,12 @@ def to_dwg(
     if isinstance(source, (Drawing, EditableLayout)):
         layout = source.modelspace() if isinstance(source, Drawing) else source
         source_path = layout.doc.source_path or ""
+        selected = list(layout.query(types))
+        if isinstance(source, Drawing):
+            # A whole drawing writes its paper space (viewports, title block) too.
+            selected += list(source.paperspace().query(types))
         entities, block_rows, entity_owners = layout.doc._write_selection(
-            list(layout.query(types)),
+            selected,
             include_all_blocks=isinstance(source, Drawing) and types is None,
         )
         prepared = layout.doc._prepare_write(entities, block_rows)
@@ -285,6 +290,7 @@ def to_dwg(
         metadata,
         diagnostics,
         image_defs,
+        layout_row,
     ) = prepared
 
     total = 0
@@ -305,6 +311,7 @@ def to_dwg(
     hatch_rows: list[dict] = []
     dimension_rows: list[dict] = []
     image_rows: list[dict] = []
+    viewport_rows: list[dict] = []
     solid_rows, trace_rows, face3d_rows = [], [], []
     polyline2d_rows, polyline3d_rows = [], []
     lwpolyline_rows: list[
@@ -343,6 +350,7 @@ def to_dwg(
         "HATCH": (_as_hatch_row, hatch_rows),
         "DIMENSION": (_as_dimension_row, dimension_rows),
         "IMAGE": (_as_image_row, image_rows),
+        "VIEWPORT": (_as_viewport_row, viewport_rows),
         "SOLID": (_as_face_row, solid_rows),
         "TRACE": (_as_face_row, trace_rows),
         "3DFACE": (_as_face_row, face3d_rows),
@@ -485,6 +493,8 @@ def to_dwg(
             for d in image_defs
             if any(r["image_def"] == d["name"] for r in image_rows)
         ],
+        viewports=viewport_rows,
+        layout=layout_row,
     )
 
     # Python query caches are path-based; an atomic same-path replacement must

@@ -162,6 +162,7 @@ mod tests {
         CommonEntityEncodeInput {
             handle: 100,
             owner_handle: 10,
+            entity_mode: 0,
             layer_handle: 20,
             color_index: 3,
             linetype_flags: 0,

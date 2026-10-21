@@ -1,4 +1,4 @@
-"""Editable, in-memory model-space drawings for the native AC1015 writer."""
+"""Editable, in-memory drawings (model space, paper space, blocks) for the native AC1015 writer."""
 
 from __future__ import annotations
 
@@ -15,6 +15,14 @@ from ._dimension import FIELDS as DIMENSION_FIELDS
 from ._dimension import kind_of, render_dimension
 from ._image import FIELDS as IMAGE_FIELDS
 from ._image import image_def_error
+from ._viewport import FIELDS as VIEWPORT_FIELDS
+from ._viewport import (
+    LAYOUT_DEFAULTS,
+    MODEL_VIEWPORT_STATUS,
+    VIEWPORT_LOCKED,
+    layout_row,
+    paper_size_name,
+)
 from ._write_preflight import (
     ATTRIBUTES,
     WriteDiagnostic,
@@ -114,6 +122,7 @@ _FIELDS["HATCH"] = {
 }
 _FIELDS["DIMENSION"] = set(DIMENSION_FIELDS)
 _FIELDS["IMAGE"] = set(IMAGE_FIELDS)
+_FIELDS["VIEWPORT"] = set(VIEWPORT_FIELDS)
 _FIELDS["INSERT"] = {
     "name",
     "insert",
@@ -152,6 +161,8 @@ _POINTS = {
     "defpoint4",
     "defpoint5",
     "text_midpoint",
+    "view_target",
+    "ucs_origin",
 }
 _VECTORS = {
     "extrusion",
@@ -160,7 +171,12 @@ _VECTORS = {
     "major_axis",
     "start_tangent",
     "end_tangent",
+    "view_direction",
+    "ucs_x_axis",
+    "ucs_y_axis",
 }
+# Two-coordinate values (viewport display coordinates and snap/grid spacing).
+_PAIRS = {"view_center", "snap_base", "snap_spacing", "grid_spacing"}
 
 
 def new(version: str = "AC1015") -> Drawing:
@@ -177,6 +193,10 @@ def _normalize(data: Mapping[str, Any]) -> dict[str, Any]:
             result[key] = tuple(value) + (
                 (0.0,) if key in _POINTS and len(value) == 2 else ()
             )
+    for key in _PAIRS:
+        value = result.get(key)
+        if isinstance(value, (list, tuple)):
+            result[key] = tuple(value)
     for key in ("points", "widths", "control_points", "fit_points"):
         if isinstance(result.get(key), (list, tuple)):
             result[key] = [tuple(p) for p in result[key]]
@@ -214,6 +234,10 @@ class Drawing:
     ``layers``, ``linetypes`` and ``text_styles`` map names to property dicts.
     ``header`` stores AC1015 units/precision and global linetype scale. These
     tables are validated on save, including unused definitions and references.
+
+    ``modelspace()`` holds the drawing at real size; ``paperspace()`` is the
+    single paper-space layout whose sheet is described by ``layout`` (see
+    ``set_paper``) and which shows model space through ``add_viewport``.
     """
 
     def __init__(self, version: str = "AC1015") -> None:
@@ -235,10 +259,15 @@ class Drawing:
             "auprec": 0,
             "ltscale": 1.0,
         }
+        #: Paper-space LAYOUT settings (``_viewport.LAYOUT_DEFAULTS`` keys):
+        #: name, paper_width/paper_height and margins in millimetres, paper_size
+        #: name, plot type/rotation/scale. Change them with ``set_paper``.
+        self.layout: dict[str, Any] = dict(LAYOUT_DEFAULTS)
         self._next_handle = 1
         self._attributes: dict[int, EditableLayout] = {}
         self.blocks = BlockTable(self)
         self._layout = EditableLayout(self)
+        self._paperspace = EditableLayout(self, "PAPERSPACE", paper=True)
         self._diagnostics: tuple[WriteDiagnostic, ...] = ()
         self._rendered_dimensions: set[str] = set()
 
@@ -291,6 +320,7 @@ class Drawing:
 
     def _layouts(self) -> Iterator[EditableLayout]:
         yield self._layout
+        yield self._paperspace
         yield from self.blocks.values()
         yield from self._attributes.values()
 
@@ -344,12 +374,60 @@ class Drawing:
             owners.update(
                 (e.handle, name) for e in self.blocks[name] if e.handle in selected
             )
+        # Paper-space entities are owned by the `*Paper_Space` block record.
+        owners.update(
+            (e.handle, "*PAPER_SPACE") for e in self._paperspace if e.handle in selected
+        )
         for owner, layout in self._attributes.items():
             owners.update((e.handle, owner) for e in layout if e.handle in selected)
         return list(selected.values()), blocks, owners
 
     def modelspace(self) -> EditableLayout:
         return self._layout
+
+    def paperspace(self) -> EditableLayout:
+        """The paper-space layout: title block entities and ``add_viewport``.
+
+        Its sheet is ``layout`` / ``set_paper``. On save the writer puts the
+        sheet's own viewport in front of these entities and names it as the
+        layout's active viewport, as AutoCAD does for an initialised layout.
+        """
+        return self._paperspace
+
+    def set_paper(
+        self,
+        width: float,
+        height: float,
+        *,
+        name: str | None = None,
+        margins: Sequence[float] | None = None,
+        paper_size: str | None = None,
+        **settings: Any,
+    ) -> dict[str, Any]:
+        """Set the sheet of the paper-space layout in millimetres.
+
+        ``width`` x ``height`` is the paper as it lies on the layout (420 x 297
+        for A3 landscape); ``margins`` are (left, bottom, right, top). The
+        AutoCAD paper size name is derived for ISO A sizes unless ``paper_size``
+        is given. Other ``layout`` keys (``plot_type``, ``plot_rotation``,
+        ``scale_type``, ...) are accepted as keywords. Returns ``layout``.
+        """
+        layout = {
+            **self.layout,
+            "paper_width": float(width),
+            "paper_height": float(height),
+            "paper_size": paper_size
+            if paper_size is not None
+            else paper_size_name(width, height),
+        }
+        if name is not None:
+            layout["name"] = name
+        if margins is not None:
+            layout["margins"] = tuple(float(v) for v in margins)
+        layout.update(settings)
+        layout_row(layout)  # validate before replacing
+        self.layout = layout
+        return self.layout
 
     def save(
         self, output_path: str | PathLike[str] | None = None, *, strict: bool = True
@@ -413,10 +491,12 @@ class Drawing:
                     )
                     copy = Entity(entity.dxftype, entity.handle, {})
             prepared.append(copy)
+            # VIEWPORT ``width`` is the window size, not the text width factor.
+            common_keys = (
+                _COMMON if entity.dxftype == "VIEWPORT" else _COMMON | ATTRIBUTES | {"style"}
+            )
             attrs[entity.handle] = {
-                k: v
-                for k, v in data.items()
-                if k in _COMMON | ATTRIBUTES | {"style"} and v is not None
+                k: v for k, v in data.items() if k in common_keys and v is not None
             }
             # AC1015 has no true colour: round it to the nearest ACI and report.
             true_color = attrs[entity.handle].pop("true_color", None)
@@ -473,11 +553,12 @@ class Drawing:
             diagnostics,
             block_rows,
             image_rows,
+            layout_row(self.layout),
         )
 
 
 class EditableLayout:
-    """Persistent model-space entities with stable, unique integer handles."""
+    """Persistent entities of one space or block with stable, unique integer handles."""
 
     def __init__(
         self,
@@ -485,10 +566,12 @@ class EditableLayout:
         name: str = "MODELSPACE",
         *,
         attribute_owner: int | None = None,
+        paper: bool = False,
     ) -> None:
         self.doc = doc
         self._name = name
         self._attribute_owner = attribute_owner
+        self._paper = paper
         self._entities: dict[int, Entity] = {}
 
     @property
@@ -546,6 +629,8 @@ class EditableLayout:
         kind = dxftype.upper()
         if (kind == "ATTRIB") != (self._attribute_owner is not None):
             raise ValueError("ATTRIB must be attached with add_attrib to an INSERT")
+        if kind == "VIEWPORT" and not self._paper:
+            raise ValueError("VIEWPORT requires paper space: use Drawing.paperspace()")
         if handle is None:
             handle = self.doc._next_handle
         if (
@@ -1066,6 +1151,52 @@ class EditableLayout:
     ) -> Entity:
         return self.add_entity(
             "TEXT", {"text": text, "insert": insert, "height": height, **attributes}
+        )
+
+    def add_viewport(
+        self,
+        center: Sequence[float],
+        width: float,
+        height: float,
+        *,
+        view_center: Sequence[float],
+        view_height: float,
+        view_direction: Sequence[float] = (0.0, 0.0, 1.0),
+        twist: float = 0.0,
+        status_flags: int | None = None,
+        frozen_layers: Sequence[str] = (),
+        locked: bool = True,
+        **attributes: Any,
+    ) -> Entity:
+        """Add a paper-space VIEWPORT (``Drawing.paperspace()`` only).
+
+        ``center``, ``width`` and ``height`` place the window on the sheet in
+        paper units. ``view_center`` is the model-space point shown at its
+        centre and ``view_height`` the model-space height it shows, so
+        ``view_height / height`` is the scale denominator (``height * 100``
+        shows model space at 1:100). ``twist`` is in degrees. ``frozen_layers``
+        names the layers hidden in this viewport; ``locked`` protects the zoom.
+        ``status_flags`` replaces the default flags (``MODEL_VIEWPORT_STATUS``)
+        before ``locked`` is applied. Further editable keys (``lens_length``,
+        ``snap_spacing``, ``grid_spacing``, ``ucs_*``, ...) are accepted.
+        """
+        flags = MODEL_VIEWPORT_STATUS if status_flags is None else int(status_flags)
+        if locked:
+            flags |= VIEWPORT_LOCKED
+        return self.add_entity(
+            "VIEWPORT",
+            {
+                "center": center,
+                "width": width,
+                "height": height,
+                "view_center": tuple(view_center),
+                "view_height": view_height,
+                "view_direction": view_direction,
+                "view_twist_angle": twist,
+                "status_flags": flags,
+                "frozen_layers": list(frozen_layers),
+                **attributes,
+            },
         )
 
     def add_mtext(

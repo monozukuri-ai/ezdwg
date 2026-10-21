@@ -3,12 +3,13 @@
 use super::{checksum::crc16, database::DatabaseHandles};
 use crate::bit::{BitWriter, Endian};
 use crate::core::result::Result;
-use crate::writer::ir::WriterMetadata;
+use crate::writer::ir::{LayoutSettings, WriterMetadata};
 
 pub fn encode_header(
     h: &DatabaseHandles,
     handseed: u64,
     metadata: &WriterMetadata,
+    layout: &LayoutSettings,
 ) -> Result<Vec<u8>> {
     let mut w = BitWriter::with_codepage(metadata.codepage);
     for v in [412148564080., 1., 1., 1.] {
@@ -94,7 +95,7 @@ pub fn encode_header(
         w.write_h(5, handle)?;
     }
     w.write_bd(0.)?; // PSVPSCALE
-    space(&mut w, &WriterMetadata::default())?;
+    paper_space(&mut w, layout, h.paper_viewport != 0)?;
     space(&mut w, metadata)?;
     w.write_tv("")?;
     w.write_tv("")?; // DIMPOST, DIMAPOST
@@ -139,6 +140,25 @@ pub fn encode_header(
     Ok(out)
 }
 
+/// PINSBASE, PEXTMIN/PEXTMAX, PLIMMIN/PLIMMAX and the paper-space UCS: the
+/// limits follow the paper of `layout`; the extents are the paper rectangle
+/// once the sheet holds entities.
+fn paper_space(w: &mut BitWriter, layout: &LayoutSettings, has_entities: bool) -> Result<()> {
+    let ((x0, y0), (x1, y1)) = layout.limits();
+    let (ext_min, ext_max) = if has_entities {
+        ((x0, y0, 0.), (x1, y1, 0.))
+    } else {
+        ((0., 0., 0.), (0., 0., 0.))
+    };
+    for p in [(0., 0., 0.), ext_min, ext_max] {
+        w.write_3bd(p.0, p.1, p.2)?;
+    }
+    for v in [x0, y0, x1, y1] {
+        w.write_rd(Endian::Little, v)?;
+    }
+    ucs_tail(w)
+}
+
 fn space(w: &mut BitWriter, m: &WriterMetadata) -> Result<()> {
     for p in [
         m.insertion_base,
@@ -150,6 +170,12 @@ fn space(w: &mut BitWriter, m: &WriterMetadata) -> Result<()> {
     for v in [0., 0., 420., 297.] {
         w.write_rd(Endian::Little, v)?;
     }
+    ucs_tail(w)
+}
+
+/// ELEVATION, UCSORG/UCSXDIR/UCSYDIR, UCS name, ORTHOREF, ORTHOVIEW, UCS base
+/// and the six orthographic UCS origins of one space.
+fn ucs_tail(w: &mut BitWriter) -> Result<()> {
     w.write_bd(0.)?;
     for p in [(0., 0., 0.), (1., 0., 0.), (0., 1., 0.)] {
         w.write_3bd(p.0, p.1, p.2)?;

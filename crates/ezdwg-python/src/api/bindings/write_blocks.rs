@@ -74,7 +74,8 @@ fn append_write_blocks(
     Ok(())
 }
 
-/// Owner values are block names for definition contents, or INSERT handles for ATTRIB.
+/// Owner values are block names for definition contents, `*PAPER_SPACE` for
+/// paper-space entities, or INSERT handles for ATTRIB.
 fn assign_write_owners(
     doc: &mut writer::WriterDocument,
     owners: Option<HashMap<u64, Bound<'_, PyAny>>>,
@@ -108,6 +109,10 @@ fn assign_write_owners(
             let name = owner
                 .extract::<String>()
                 .map_err(|_| PyValueError::new_err("entity owner must be a block name"))?;
+            if name.eq_ignore_ascii_case("*PAPER_SPACE") {
+                doc.paperspace.push(e);
+                continue;
+            }
             let block = doc
                 .blocks
                 .iter_mut()

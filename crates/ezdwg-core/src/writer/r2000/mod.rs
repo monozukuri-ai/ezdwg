@@ -12,7 +12,7 @@ use self::entities::{
     encode_arc_entity_payload, encode_circle_entity_payload, encode_ellipse_entity_payload,
     encode_line_entity_payload, encode_lwpolyline_entity_payload, encode_mtext_entity_payload,
     encode_point_entity_payload, encode_ray_entity_payload, encode_text_entity_payload,
-    encode_xline_entity_payload, ArcEncodeInput, CircleEncodeInput, EllipseEncodeInput,
+    encode_viewport_entity_payload, encode_xline_entity_payload, ArcEncodeInput, CircleEncodeInput, EllipseEncodeInput,
     LineEncodeInput, LwPolylineEncodeInput, MTextEncodeInput, PointEncodeInput, RayEncodeInput,
     TextEncodeInput, XLineEncodeInput,
 };
@@ -107,19 +107,57 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
     let mut record_rows: Vec<(ObjectRef, Vec<u8>)> = Vec::new();
 
     for (layout_index, (entities, handles)) in doc.layouts().zip(&layout_handles).enumerate() {
+        let paper = layout_index == WriterDocument::PAPER_LAYOUT;
         let owner = if layout_index == 0 {
             database.model
+        } else if paper {
+            database.paper
         } else {
-            database.blocks[&doc.blocks[layout_index - 1].name.to_uppercase()].0
+            let block = &doc.blocks[layout_index - WriterDocument::FIRST_BLOCK_LAYOUT];
+            database.blocks[&block.name.to_uppercase()].0
         };
+        // Entities of `*Paper_Space` are stored as AutoCAD stores the current
+        // paper-space layout: entmode 1, without an owner handle.
+        let entity_mode = u8::from(paper);
+        // The overall paper viewport leads the paper-space entity chain.
+        let first_handle = if paper { database.paper_viewport } else { 0 };
+        if first_handle != 0 {
+            let common = entities::common::CommonEntityEncodeInput {
+                handle: first_handle,
+                owner_handle: owner,
+                entity_mode,
+                layer_handle: database.layer,
+                previous_handle: 0,
+                next_handle: handles.first().copied().unwrap_or(0),
+                style_handle: 0,
+                color_index: 256,
+                linetype_flags: 0,
+                linetype_handle: 0,
+                codepage: doc.metadata.codepage,
+                formatting: Default::default(),
+            };
+            let payload =
+                encode_viewport_entity_payload(common, &doc.layout.paper_viewport(), &[])?;
+            record_rows.push((
+                ObjectRef {
+                    handle: Handle(first_handle),
+                    offset: 0,
+                },
+                encode_object_record(&payload)?,
+            ));
+        }
         for (i, entity) in entities.iter().enumerate() {
             let handle = handles[i];
-            let previous_handle = i.checked_sub(1).map(|j| handles[j]).unwrap_or(0);
+            let previous_handle = i
+                .checked_sub(1)
+                .map(|j| handles[j])
+                .unwrap_or(first_handle);
             let next_handle = handles.get(i + 1).copied().unwrap_or(0);
             let props = entity.common();
             let common = entities::common::CommonEntityEncodeInput {
                 handle,
                 owner_handle: owner,
+                entity_mode,
                 layer_handle: database.layer_handle(&props.layer_name)?,
                 previous_handle,
                 next_handle,
@@ -300,6 +338,7 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
                         let child = entities::common::CommonEntityEncodeInput {
                             handle: vertices[j],
                             owner_handle: handle,
+                            entity_mode: 0,
                             previous_handle: j.checked_sub(1).map(|k| vertices[k]).unwrap_or(0),
                             next_handle: vertices.get(j + 1).copied().unwrap_or(0),
                             color_index: 256,
@@ -320,6 +359,7 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
                     let child = entities::common::CommonEntityEncodeInput {
                         handle: *seqend,
                         owner_handle: handle,
+                        entity_mode: 0,
                         previous_handle: 0,
                         next_handle: 0,
                         color_index: 256,
@@ -448,6 +488,21 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
                         encode_object_record(&reactor_payload)?,
                     ));
                 }
+                WriterEntity::Viewport(viewport) => {
+                    let frozen = viewport
+                        .frozen_layers
+                        .iter()
+                        .map(|name| database.layer_handle(name))
+                        .collect::<Result<Vec<_>>>()?;
+                    let payload = encode_viewport_entity_payload(common, viewport, &frozen)?;
+                    record_rows.push((
+                        ObjectRef {
+                            handle: Handle(handle),
+                            offset: 0,
+                        },
+                        encode_object_record(&payload)?,
+                    ));
+                }
                 WriterEntity::Hatch(hatch) => {
                     let payload = entities::hatch::encode_hatch_entity_payload(common, hatch)?;
                     record_rows.push((
@@ -488,6 +543,7 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
                         let child = entities::common::CommonEntityEncodeInput {
                             handle: attrs[i],
                             owner_handle: handle,
+                            entity_mode: 0,
                             previous_handle: i.checked_sub(1).map(|j| attrs[j]).unwrap_or(0),
                             next_handle: attrs.get(i + 1).copied().unwrap_or(0),
                             layer_handle: database.layer_handle(&c.layer_name)?,
@@ -516,6 +572,7 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
                         let child = entities::common::CommonEntityEncodeInput {
                             handle: *seqend,
                             owner_handle: handle,
+                            entity_mode: 0,
                             previous_handle: 0,
                             next_handle: 0,
                             layer_handle: database.layer,
@@ -555,7 +612,7 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
         .unwrap_or(0)
         .checked_add(1)
         .ok_or_else(|| DwgError::new(ErrorKind::Unsupported, "handle space exhausted"))?;
-    let header_section = header::encode_header(&database, handseed, &doc.metadata)?;
+    let header_section = header::encode_header(&database, handseed, &doc.metadata, &doc.layout)?;
     record_rows.sort_by_key(|(obj_ref, _)| obj_ref.handle.0);
 
     let record_count = 3usize;

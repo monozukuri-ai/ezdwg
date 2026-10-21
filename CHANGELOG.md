@@ -3,6 +3,32 @@
 ## Unreleased
 
 ### Native DWG writer
+- Add paper-space layouts: `Drawing.paperspace()` holds the entities of `*Paper_Space`
+  (title block lines, text, ...) and `Drawing.layout` / `Drawing.set_paper(width, height,
+  margins=..., name=...)` describe the sheet of the `Layout1` LAYOUT object (paper size in
+  millimetres, margins, AutoCAD paper size name such as `ISO_A3_(420.00_x_297.00_MM)`, plot
+  type/rotation/scale, limits and extents around the paper). Paper-space entities are stored
+  as AutoCAD stores the current paper-space layout (entmode 1, owned by the `*Paper_Space`
+  block record) and the header's paper-space limits follow the sheet.
+- Add native VIEWPORT writing (`add_viewport(center, width, height, view_center=...,
+  view_height=..., frozen_layers=..., locked=True)`): the complete R2000 body (view target,
+  direction and twist, view height, lens length, clip planes, snap/grid, circle zoom, status
+  flags, style sheet, render mode, viewport UCS) with the frozen layer, clip boundary,
+  viewport entity header and UCS handle data. `view_height / height` is the scale
+  denominator, so a 1:100 viewport shows `height * 100` drawing units. The writer puts the
+  sheet's own viewport (AutoCAD id 1, status `0xC8020`, covering the paper) in front of the
+  user's viewports and names it as the LAYOUT's active viewport. Verified bit for bit against
+  AutoCAD-written AC1015 viewports, by reader roundtrips and by ODA read/resave; `ezdwg.read`
+  returns the viewports through `Document.paperspace()` and the sheet through
+  `Document.layouts()`. `Document.edit()` and `to_dwg` from a file still import model space
+  and blocks only; the paper space of an existing drawing is reported as before
+  (`DOCUMENT.spaces`, dropped; strict imports keep rejecting it) and is not carried over yet.
+- Choose the legacy code page per drawing from `WRITE_CODEPAGES` (ANSI_1252, 932, 936,
+  949, 950, 1250–1257, 874) instead of cp1252-or-cp932: the first page that stores every
+  string wins (Japanese stays ANSI_932, Hangul prefers ANSI_949, Cyrillic/Thai/Hebrew/Arabic
+  text without CJK takes its own Windows page), otherwise the one with the fewest
+  replacements. `Drawing.header["codepage"]` forces a page; `ezdwg.select_codepage` exposes
+  the choice. Chinese, Korean and Cyrillic text is no longer written as `?`.
 - Add native HATCH writing: `add_hatch` with polyline paths (bulges) or
   line/arc/ellipse/spline edge paths, solid fills and pattern fills with their
   definition lines (built-in `ANSI31`/`ANSI32`/`ANSI33`/`ANSI37`/`DOTS`/`LINE`/

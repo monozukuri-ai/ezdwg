@@ -204,6 +204,20 @@ drawing.save("blocks.dwg")
 Attribute placement is explicit; `add_attrib` does not automatically transform an
 ATTDEF or synchronize defaults. See [blocks and attributes](docs/guide/convert.md#blocks-and-attributes).
 
+Paper space is a single layout (`Layout1`) with a sheet in millimetres and
+viewports that show model space at a scale; `view_height / height` is the
+scale denominator, so an A3 sheet plotted 1:1 shows the model at 1:100 here:
+
+```python
+drawing.set_paper(420, 297)  # ISO A3 landscape, margins (left, bottom, right, top) optional
+psp = drawing.paperspace()
+psp.add_viewport((210, 148.5), 400, 277, view_center=(10000, 5000), view_height=277 * 100)
+psp.add_text("A3 1:100", (10, 5), height=5)  # title block entities live on the sheet
+drawing.save("sheet.dwg")
+```
+
+The sheet's own viewport is written automatically in front of the user viewports.
+
 ## Examples
 Sample DWG files are available under `examples/data/`.
 
@@ -228,7 +242,8 @@ raw.decode_line_entities("path/to/file.dwg")
 
 ## Limitations
 - Native DWG write currently targets **AC1015** only
-- Native DWG write supports a subset of entities: **LINE/RAY/XLINE/POINT/ARC/CIRCLE/ELLIPSE/SPLINE/SOLID/TRACE/3DFACE/LWPOLYLINE/POLYLINE_2D/POLYLINE_3D/TEXT/MTEXT/INSERT/ATTDEF/ATTRIB/HATCH/DIMENSION/IMAGE**, including nested block definitions, rendered dimension blocks and raster image definitions; true colours are rounded to the nearest ACI
+- Native DWG write supports a subset of entities: **LINE/RAY/XLINE/POINT/ARC/CIRCLE/ELLIPSE/SPLINE/SOLID/TRACE/3DFACE/LWPOLYLINE/POLYLINE_2D/POLYLINE_3D/TEXT/MTEXT/INSERT/ATTDEF/ATTRIB/HATCH/DIMENSION/IMAGE/VIEWPORT**, including nested block definitions, rendered dimension blocks, raster image definitions and one paper-space layout (`Drawing.paperspace()`, `Drawing.set_paper()`); true colours are rounded to the nearest ACI
+- Paper space of an existing drawing is not imported by `Document.edit()` / `to_dwg`; only new paper-space content is written
 - High-level API supports R13 (AC1012, experimental), R14 (AC1014, experimental), R2000 (AC1015), R2004 (AC1018), R2007 (AC1021), R2010 (AC1024), R2013 (AC1027), and R2018 (AC1032)
 - AC1012/AC1014 decode the 2D entity types with the layouts of the ODA specification (LINE, ARC, CIRCLE, ELLIPSE, POINT, LWPOLYLINE, POLYLINE_2D, TEXT, MTEXT, ATTRIB/ATTDEF, INSERT/MINSERT, HATCH, SOLID, TRACE, 3DFACE, SPLINE, LEADER, TOLERANCE, MLINE, SHAPE, DIMENSION), with block membership, block names and dimension blocks, and the 3D polylines and meshes. R13/R14 have no lineweights and no layer plot flag, and their viewports state a window but no view
 - AC1021/AC1024/AC1027/AC1032 use native decode for LINE/ARC/LWPOLYLINE/POINT/CIRCLE/ELLIPSE and are regression-tested against paired DXF samples

@@ -10,6 +10,7 @@ include!("bindings/write_splines.rs");
 include!("bindings/write_hatches.rs");
 include!("bindings/write_dimensions.rs");
 include!("bindings/write_images.rs");
+include!("bindings/write_viewports.rs");
 include!("bindings/write_polyline_metadata.rs");
 include!("bindings/write_metadata.rs");
 include!("bindings/write_block_metadata.rs");

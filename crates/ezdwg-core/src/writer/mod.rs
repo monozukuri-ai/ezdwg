@@ -10,7 +10,7 @@ pub use config::WriterConfig;
 pub use handle_allocator::HandleAllocator;
 pub use ir::{
     ArcEntity, AttributeEntity, BlockDef, CircleEntity, CommonEntityProps, EllipseEntity,
-    Face3dEntity, InsertEntity, LayerDef, LineEntity, LwPolylineEntity, MTextEntity,
-    PlanarFaceEntity, PointEntity, RayEntity, TextEntity, WriterDocument, WriterEntity,
-    WriterMetadata, XLineEntity,
+    Face3dEntity, InsertEntity, LayerDef, LayoutSettings, LineEntity, LwPolylineEntity,
+    MTextEntity, PlanarFaceEntity, PointEntity, RayEntity, TextEntity, ViewportEntity,
+    WriterDocument, WriterEntity, WriterMetadata, XLineEntity,
 };

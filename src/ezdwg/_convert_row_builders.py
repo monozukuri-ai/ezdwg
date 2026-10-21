@@ -408,3 +408,47 @@ def _as_image_row(entity: Entity) -> dict:
     if vertices:
         row["clip_vertices"] = [(float(v[0]), float(v[1])) for v in vertices]
     return row
+
+
+def _as_viewport_row(entity: Entity) -> dict:
+    """Editable VIEWPORT dictionary -> writer row (angles in radians)."""
+    d = entity.dxf
+
+    def p3(key, default=(0.0, 0.0, 0.0)):
+        value = d.get(key, default)
+        return (float(value[0]), float(value[1]), float(value[2]) if len(value) > 2 else 0.0)
+
+    def p2(key, default=(0.0, 0.0)):
+        value = d.get(key, default)
+        return (float(value[0]), float(value[1]))
+
+    return {
+        "handle": int(entity.handle),
+        "center": p3("center"),
+        "width": float(d["width"]),
+        "height": float(d["height"]),
+        "view_target": p3("view_target"),
+        "view_direction": p3("view_direction", (0.0, 0.0, 1.0)),
+        "twist_angle": math.radians(float(d.get("view_twist_angle", 0.0))),
+        "view_height": float(d["view_height"]),
+        "lens_length": float(d.get("lens_length", 50.0)),
+        "front_clip_z": float(d.get("front_clip_z", 0.0)),
+        "back_clip_z": float(d.get("back_clip_z", 0.0)),
+        "snap_angle": math.radians(float(d.get("snap_angle", 0.0))),
+        "view_center": p2("view_center"),
+        "snap_base": p2("snap_base"),
+        "snap_spacing": p2("snap_spacing", (10.0, 10.0)),
+        "grid_spacing": p2("grid_spacing", (10.0, 10.0)),
+        "circle_zoom": int(d.get("circle_zoom", 1000)),
+        "status_flags": int(d.get("status_flags", 0xC8060)),
+        "style_sheet": str(d.get("style_sheet", "")),
+        "render_mode": int(d.get("render_mode", 0)),
+        "ucs_at_origin": bool(d.get("ucs_at_origin", False)),
+        "ucs_per_viewport": bool(d.get("ucs_per_viewport", True)),
+        "ucs_origin": p3("ucs_origin"),
+        "ucs_x_axis": p3("ucs_x_axis", (1.0, 0.0, 0.0)),
+        "ucs_y_axis": p3("ucs_y_axis", (0.0, 1.0, 0.0)),
+        "ucs_elevation": float(d.get("ucs_elevation", 0.0)),
+        "ucs_ortho_view_type": int(d.get("ucs_ortho_view_type", 0)),
+        "frozen_layers": [str(name) for name in d.get("frozen_layers", [])],
+    }

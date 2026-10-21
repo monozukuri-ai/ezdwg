@@ -126,8 +126,9 @@ doc.export_dwg("output.dwg", version="AC1015")
 Current native writer scope:
 
 - Version: `AC1015` only
-- Entities: `LINE`, `RAY`, `XLINE`, `POINT`, `ARC`, `CIRCLE`, `ELLIPSE`, `SPLINE`, `SOLID`, `TRACE`, `3DFACE`, `LWPOLYLINE`, `POLYLINE_2D`, `POLYLINE_3D`, `TEXT`, `MTEXT`, `INSERT`, `ATTDEF`, `ATTRIB`, `HATCH`, `DIMENSION` (all seven kinds), `IMAGE`
+- Entities: `LINE`, `RAY`, `XLINE`, `POINT`, `ARC`, `CIRCLE`, `ELLIPSE`, `SPLINE`, `SOLID`, `TRACE`, `3DFACE`, `LWPOLYLINE`, `POLYLINE_2D`, `POLYLINE_3D`, `TEXT`, `MTEXT`, `INSERT`, `ATTDEF`, `ATTRIB`, `HATCH`, `DIMENSION` (all seven kinds), `IMAGE`, `VIEWPORT` (paper space only)
 - Named/anonymous static block definitions, including nested INSERTs and attached attributes
+- One paper-space layout (`Layout1`): `Drawing.set_paper()` / `Drawing.layout` for the sheet (millimetres, margins, paper size name, plot settings) and `Drawing.paperspace()` for its entities and `add_viewport()`; the sheet's own viewport is written in front of the user viewports
 - Raster image definitions (`IMAGEDEF`, `IMAGEDEF_REACTOR`, `RASTERVARIABLES`, `ACAD_IMAGE_DICT`) and a `Standard` DIMSTYLE
 - True colours are rounded to the nearest ACI (R2000 stores ACI only) and reported as `approximated`
 

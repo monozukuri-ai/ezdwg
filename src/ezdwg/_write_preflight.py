@@ -11,6 +11,7 @@ from ._aci import describe_approximation, nearest_aci
 from ._dimension import dimension_error
 from ._hatch import hatch_error
 from ._image import image_error
+from ._viewport import viewport_error
 from ._write_spline import FIELDS as SPLINE_FIELDS
 from ._write_spline import validate_spline
 from .entity import Entity
@@ -145,6 +146,8 @@ def geometry_error(e: Entity) -> str | None:
             dimension_error(d, number, point)
         elif kind == "IMAGE":
             image_error(d, number, point, direction)
+        elif kind == "VIEWPORT":
+            viewport_error(d, number, point, direction)
         elif kind == "HATCH":
 
             def point2(value):
@@ -743,6 +746,99 @@ def _image_def_name(file_path: str, handle: int) -> str:
     return stem or f"IMAGE_{handle}"
 
 
+# Legacy code pages the AC1015 writer can store, as (Python codec, DWG $DWGCODEPAGE index).
+# Every TV string of a drawing is encoded with the single code page the header names, so one
+# choice has to cover the whole drawing. The codec names match the encoding_rs labels the Rust
+# reader/writer uses for the same index (bit_reader::dwg_codepage_encoding).
+WRITE_CODEPAGES: tuple[tuple[str, int], ...] = (
+    ("cp1252", 30),  # ANSI_1252 (Western Europe)
+    ("cp932", 38),  # ANSI_932 (Japanese)
+    ("gbk", 39),  # ANSI_936 (Simplified Chinese)
+    ("cp949", 40),  # ANSI_949 (Korean)
+    ("big5", 41),  # ANSI_950 (Traditional Chinese)
+    ("cp1251", 29),  # ANSI_1251 (Cyrillic)
+    ("cp1250", 28),  # ANSI_1250 (Central Europe)
+    ("cp1253", 32),  # ANSI_1253 (Greek)
+    ("cp1254", 33),  # ANSI_1254 (Turkish)
+    ("cp1255", 34),  # ANSI_1255 (Hebrew)
+    ("cp1256", 35),  # ANSI_1256 (Arabic)
+    ("cp1257", 36),  # ANSI_1257 (Baltic)
+    ("cp874", 37),  # ANSI_874 (Thai)
+)
+_CODEPAGE_CODEC = {code: codec for codec, code in WRITE_CODEPAGES}
+_CODEC_CODEPAGE = {codec: code for codec, code in WRITE_CODEPAGES}
+_CJK_CODECS = ("cp932", "gbk", "cp949", "big5")
+_SINGLE_BYTE_CODECS = ("cp1251", "cp1250", "cp1253", "cp1254", "cp1255", "cp1256", "cp1257", "cp874")
+
+
+def _has_char(strings, lo, hi):
+    return any(lo <= ord(ch) <= hi for text in strings for ch in text)
+
+
+def _codec_preference(strings):
+    """Preference order for the automatic choice.
+
+    ``cp1252`` first keeps ASCII/Latin drawings unchanged. The CJK code pages overlap a lot
+    (GBK stores kana and every unified ideograph, cp932 stores basic Cyrillic and Greek), so
+    the order decides the ambiguous cases: ideographs without kana stay ANSI_932 (the main
+    market of this writer) unless only GBK stores them all, Hangul puts ANSI_949 first, and
+    Cyrillic / Thai / Hebrew / Arabic text without any CJK script takes its own Windows code
+    page instead of ANSI_932. Greek letters alone (``φ100`` in Japanese drawings) stay
+    ANSI_932.
+    """
+    hangul = _has_char(strings, 0xAC00, 0xD7AF) or _has_char(strings, 0x3130, 0x318F)
+    kana = _has_char(strings, 0x3040, 0x30FF) or _has_char(strings, 0xFF66, 0xFF9F)
+    han = _has_char(strings, 0x4E00, 0x9FFF) or _has_char(strings, 0x3400, 0x4DBF)
+    other_script = (
+        _has_char(strings, 0x0400, 0x04FF)  # Cyrillic
+        or _has_char(strings, 0x0E00, 0x0E7F)  # Thai
+        or _has_char(strings, 0x0590, 0x05FF)  # Hebrew
+        or _has_char(strings, 0x0600, 0x06FF)  # Arabic
+    )
+    cjk = list(_CJK_CODECS)
+    if hangul and not kana:
+        cjk.remove("cp949")
+        cjk.insert(0, "cp949")
+    if other_script and not (hangul or kana or han):
+        order = ["cp1252", *_SINGLE_BYTE_CODECS, *cjk]
+    else:
+        order = ["cp1252", *cjk, *_SINGLE_BYTE_CODECS]
+    return [(codec, _CODEC_CODEPAGE[codec]) for codec in order]
+
+
+def select_codepage(strings, requested=None):
+    """Choose the legacy code page for a drawing's strings.
+
+    ``requested`` (``Drawing.header["codepage"]``) forces one of ``WRITE_CODEPAGES``.
+    Kana anywhere in the drawing forces ANSI_932 and Hangul (without kana) ANSI_949, so a
+    Japanese or Korean drawing keeps its usual code page even when a few symbols (``é``,
+    simplified ideographs) have to become ``?``. Otherwise the first code page of
+    ``_codec_preference`` that stores every string wins; when none does, the one that
+    leaves the fewest strings unrepresentable (ties keep the preference order).
+    Returns ``(codec, codepage)``.
+    """
+    if requested in _CODEPAGE_CODEC:
+        return _CODEPAGE_CODEC[requested], requested
+    strings = [text for text in strings if isinstance(text, str)]
+    if _has_char(strings, 0x3040, 0x30FF) or _has_char(strings, 0xFF66, 0xFF9F):
+        return "cp932", 38
+    if _has_char(strings, 0xAC00, 0xD7AF) or _has_char(strings, 0x3130, 0x318F):
+        return "cp949", 40
+    best = None
+    for codec, code in _codec_preference(strings):
+        failures = 0
+        for text in strings:
+            try:
+                text.encode(codec)
+            except UnicodeEncodeError:
+                failures += 1
+        if failures == 0:
+            return codec, code
+        if best is None or failures < best[0]:
+            best = (failures, codec, code)
+    return (best[1], best[2]) if best else ("cp1252", 30)
+
+
 def prepare_strings(
     entities,
     attrs,
@@ -753,8 +849,13 @@ def prepare_strings(
     diagnostics,
     block_rows=None,
     image_rows=None,
+    layout_row=None,
 ):
-    """Prepare independent copies for legacy text encoding and report losses."""
+    """Prepare independent copies for legacy text encoding and report losses.
+
+    ``layout_row`` (paper-space LAYOUT settings) is encoded like the table rows
+    and returned as the last element; ``None`` keeps the writer defaults.
+    """
 
     def report(handle, kind, attr, message, action="defaulted"):
         diagnostics.append(WriteDiagnostic(handle, kind, attr, message, action))
@@ -762,10 +863,11 @@ def prepare_strings(
     # Select a legacy encoding for all strings, including table and font names.
     block_rows = block_rows or {}
     image_rows = image_rows or {}
+    layout_row = dict(layout_row) if layout_row is not None else None
     strings = [
         str(e.dxf.get(k, ""))
         for e in entities
-        for k in ("text", "raw_text", "tag", "prompt", "name", "image_def")
+        for k in ("text", "raw_text", "tag", "prompt", "name", "image_def", "style_sheet")
     ]
     strings += [
         v
@@ -775,22 +877,17 @@ def prepare_strings(
             *style_rows.values(),
             *block_rows.values(),
             *image_rows.values(),
+            *([layout_row] if layout_row else []),
         )
         for v in r.values()
         if isinstance(v, str)
     ]
 
-    def encodable(codec):
-        try:
-            for text in strings:
-                text.encode(codec)
-            return True
-        except UnicodeEncodeError:
-            return False
-
-    codec, metadata["codepage"] = (
-        ("cp1252", 30) if encodable("cp1252") else ("cp932", 38)
-    )
+    requested = metadata.get("codepage")
+    if requested is not None and requested not in _CODEPAGE_CODEC:
+        report(None, "HEADER", "codepage", "unsupported code page; selected automatically")
+        requested = None
+    codec, metadata["codepage"] = select_codepage(strings, requested)
 
     # Replace only with explicit diagnostics; strict will reject before writing.
     def encode_text(value, handle, kind, attr):
@@ -812,9 +909,15 @@ def prepare_strings(
     prepared = []
     for e in entities:
         d = dict(e.dxf)
-        for key in ("text", "raw_text", "tag", "prompt", "name"):
+        for key in ("text", "raw_text", "tag", "prompt", "name", "style_sheet"):
             if isinstance(d.get(key), str):
                 d[key] = encode_text(d[key], e.handle, e.dxftype, key)
+        # Frozen layer references must match the encoded LAYER record names.
+        if e.dxftype == "VIEWPORT" and isinstance(d.get("frozen_layers"), list):
+            d["frozen_layers"] = [
+                name.encode(codec, errors="replace").decode(codec)
+                for name in d["frozen_layers"]
+            ]
         # Only the legacy raw tuple accepts DXF bit 1 as closure. Decoded DWG
         # flag 1 is an explicit normal; carry closure independently here.
         if e.dxftype == "LWPOLYLINE":
@@ -828,6 +931,7 @@ def prepare_strings(
         (style_rows, "STYLE"),
         (block_rows, "BLOCK"),
         (image_rows, "IMAGEDEF"),
+        ({"layout": layout_row} if layout_row else {}, "LAYOUT"),
     ):
         for row in rows.values():
             for key, value in row.items():
@@ -847,4 +951,5 @@ def prepare_strings(
         metadata,
         diagnostics,
         list(image_rows.values()),
+        layout_row,
     )

@@ -163,6 +163,7 @@ pub fn validate_document(doc: &WriterDocument) -> Result<()> {
     for p in [m.ext_min, m.ext_max].into_iter().flatten() {
         point(p)?;
     }
+    validate_layout(&doc.layout, m.codepage)?;
     let mut names = HashSet::new();
     for l in &doc.layers {
         name(&l.name, m.codepage)?;
@@ -258,15 +259,39 @@ pub fn validate_document(doc: &WriterDocument) -> Result<()> {
             )?;
         }
     }
+    let layer_names: HashSet<String> = doc
+        .layers
+        .iter()
+        .map(|l| l.name.to_uppercase())
+        .chain(std::iter::once("0".to_string()))
+        .collect();
     let mut incoming = vec![0usize; doc.blocks.len()];
     let mut edges = vec![Vec::new(); doc.blocks.len()];
     for (layout_index, entities) in doc.layouts().enumerate() {
+        let in_block = layout_index >= WriterDocument::FIRST_BLOCK_LAYOUT;
         for e in entities {
             require(
                 !matches!(e, WriterEntity::Attrib(_)),
                 "ATTRIB must belong to INSERT",
             )?;
             validate_entity(e, m.codepage)?;
+            if let WriterEntity::Viewport(viewport) = e {
+                require(
+                    layout_index == WriterDocument::PAPER_LAYOUT,
+                    "VIEWPORT requires paper space",
+                )?;
+                let mut frozen = HashSet::new();
+                for layer in &viewport.frozen_layers {
+                    require(
+                        layer_names.contains(&layer.to_uppercase()),
+                        "VIEWPORT freezes an undefined layer",
+                    )?;
+                    require(
+                        frozen.insert(layer.to_uppercase()),
+                        "VIEWPORT freezes a layer twice",
+                    )?;
+                }
+            }
             if let WriterEntity::Dimension(dim) = e {
                 let Some(&target) = blocks.get(&dim.block_name.to_uppercase()) else {
                     return Err(DwgError::new(
@@ -278,8 +303,8 @@ pub fn validate_document(doc: &WriterDocument) -> Result<()> {
                     dim.dimstyle.eq_ignore_ascii_case("Standard"),
                     "AC1015 writer supports the Standard DIMSTYLE only",
                 )?;
-                if layout_index > 0 {
-                    edges[layout_index - 1].push(target);
+                if in_block {
+                    edges[layout_index - WriterDocument::FIRST_BLOCK_LAYOUT].push(target);
                     incoming[target] += 1;
                 }
             }
@@ -290,8 +315,8 @@ pub fn validate_document(doc: &WriterDocument) -> Result<()> {
                         format!("undefined block: {}", insert.block_name),
                     ));
                 };
-                if layout_index > 0 {
-                    edges[layout_index - 1].push(target);
+                if in_block {
+                    edges[layout_index - WriterDocument::FIRST_BLOCK_LAYOUT].push(target);
                     incoming[target] += 1;
                 }
                 let mut tags = HashSet::new();
@@ -393,6 +418,7 @@ pub fn validate_entity(e: &WriterEntity, codepage: u16) -> Result<()> {
                 | WriterEntity::Hatch(_)
                 | WriterEntity::Dimension(_)
                 | WriterEntity::Image(_)
+                | WriterEntity::Viewport(_)
         ) || f.thickness == 0.,
         "thickness is not supported for this entity type",
     )?;
@@ -405,6 +431,7 @@ pub fn validate_entity(e: &WriterEntity, codepage: u16) -> Result<()> {
                 | WriterEntity::Face3d(_)
                 | WriterEntity::Spline(_)
                 | WriterEntity::Image(_)
+                | WriterEntity::Viewport(_)
         ) || f.extrusion == (0., 0., 1.),
         "extrusion is not supported for this entity type",
     )?;
@@ -594,6 +621,7 @@ pub fn validate_entity(e: &WriterEntity, codepage: u16) -> Result<()> {
         WriterEntity::Hatch(v) => validate_hatch(v)?,
         WriterEntity::Dimension(v) => validate_dimension(v)?,
         WriterEntity::Image(v) => validate_image(v)?,
+        WriterEntity::Viewport(v) => validate_viewport(v, codepage)?,
         WriterEntity::MText(v) => {
             point(v.insert)?;
             direction(v.text_direction)?;
@@ -615,6 +643,107 @@ pub fn validate_entity(e: &WriterEntity, codepage: u16) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn validate_layout(layout: &LayoutSettings, codepage: u16) -> Result<()> {
+    name(&layout.name, codepage)?;
+    require(
+        !layout.name.eq_ignore_ascii_case("Model"),
+        "layout name Model is reserved",
+    )?;
+    let (left, bottom, right, top) = layout.margins;
+    let ((wx0, wy0), (wx1, wy1)) = layout.plot_window;
+    finite(&[
+        layout.paper_width,
+        layout.paper_height,
+        left,
+        bottom,
+        right,
+        top,
+        layout.plot_origin.0,
+        layout.plot_origin.1,
+        wx0,
+        wy0,
+        wx1,
+        wy1,
+        layout.scale_numerator,
+        layout.scale_denominator,
+        layout.paper_image_origin.0,
+        layout.paper_image_origin.1,
+    ])?;
+    require(
+        layout.paper_width > 0. && layout.paper_height > 0.,
+        "layout paper size must be positive",
+    )?;
+    require(
+        left >= 0.
+            && bottom >= 0.
+            && right >= 0.
+            && top >= 0.
+            && left + right < layout.paper_width
+            && bottom + top < layout.paper_height,
+        "layout margins must be nonnegative and leave a printable area",
+    )?;
+    require(
+        layout.paper_units <= 2
+            && layout.plot_rotation <= 3
+            && layout.plot_type <= 5
+            && layout.scale_type <= 32,
+        "invalid layout plot settings",
+    )?;
+    require(
+        layout.scale_numerator > 0. && layout.scale_denominator > 0.,
+        "layout plot scale must be positive",
+    )?;
+    for text in [
+        &layout.paper_size,
+        &layout.page_setup_name,
+        &layout.printer,
+        &layout.plot_view_name,
+        &layout.style_sheet,
+    ] {
+        BitWriter::with_codepage(codepage).write_tv(text)?;
+    }
+    Ok(())
+}
+
+fn validate_viewport(v: &ViewportEntity, codepage: u16) -> Result<()> {
+    point(v.center)?;
+    point(v.view_target)?;
+    direction(v.view_direction)?;
+    direction(v.ucs_x_axis)?;
+    direction(v.ucs_y_axis)?;
+    point(v.ucs_origin)?;
+    finite(&[
+        v.width,
+        v.height,
+        v.twist_angle,
+        v.view_height,
+        v.lens_length,
+        v.front_clip_z,
+        v.back_clip_z,
+        v.snap_angle,
+        v.view_center.0,
+        v.view_center.1,
+        v.snap_base.0,
+        v.snap_base.1,
+        v.snap_spacing.0,
+        v.snap_spacing.1,
+        v.grid_spacing.0,
+        v.grid_spacing.1,
+        v.ucs_elevation,
+    ])?;
+    require(
+        v.width > 0. && v.height > 0.,
+        "VIEWPORT width and height must be positive",
+    )?;
+    require(v.view_height > 0., "VIEWPORT view height must be positive")?;
+    require(v.lens_length >= 0., "VIEWPORT lens length must not be negative")?;
+    require(
+        v.render_mode <= 6 && v.ucs_ortho_view_type <= 6,
+        "invalid VIEWPORT render mode or UCS view type",
+    )?;
+    BitWriter::with_codepage(codepage).write_tv(&v.style_sheet)
 }
 
 fn validate_image(i: &ImageEntity) -> Result<()> {

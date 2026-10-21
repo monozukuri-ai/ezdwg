@@ -15,6 +15,7 @@ pub mod polyline;
 pub mod ray;
 pub mod spline;
 pub mod text;
+pub mod viewport;
 pub mod xline;
 
 pub use arc::{encode_arc_entity_payload, ArcEncodeInput};
@@ -26,4 +27,5 @@ pub use mtext::{encode_mtext_entity_payload, MTextEncodeInput};
 pub use point::{encode_point_entity_payload, PointEncodeInput};
 pub use ray::{encode_ray_entity_payload, RayEncodeInput};
 pub use text::{encode_text_entity_payload, TextEncodeInput};
+pub use viewport::encode_viewport_entity_payload;
 pub use xline::{encode_xline_entity_payload, XLineEncodeInput};

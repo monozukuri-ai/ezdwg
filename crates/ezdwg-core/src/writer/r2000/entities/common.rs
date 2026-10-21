@@ -6,6 +6,11 @@ use crate::core::result::Result;
 pub struct CommonEntityEncodeInput {
     pub handle: u64,
     pub owner_handle: u64,
+    /// Entity mode (ODA "entmode"): 0 stores `owner_handle` in the handle
+    /// stream (block definitions and this writer's model space); 1 marks an
+    /// entity of the current paper-space block (`*Paper_Space`) and 2 one of
+    /// `*Model_Space`, both without a stored owner handle.
+    pub entity_mode: u8,
     pub layer_handle: u64,
     pub color_index: u16,
     pub linetype_flags: u8,
@@ -47,7 +52,9 @@ where
     write_body(&mut pre_handle)?;
 
     let mut handle_stream = BitWriter::new();
-    handle_stream.write_h(0x04, common.owner_handle)?;
+    if common.entity_mode == 0 {
+        handle_stream.write_h(0x04, common.owner_handle)?;
+    }
     // R2000 always stores the xdictionary handle (null here); the "XDic Missing
     // Flag" that lets later versions omit it does not exist yet.
     handle_stream.write_h(0x03, 0)?;
@@ -97,6 +104,12 @@ fn validate_common_input(input: CommonEntityEncodeInput) -> Result<()> {
             "entity owner/layer handles must be non-zero",
         ));
     }
+    if input.entity_mode > 2 {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            "entity mode must be 0 (owner), 1 (paper space) or 2 (model space)",
+        ));
+    }
     Ok(())
 }
 
@@ -107,7 +120,7 @@ fn write_common_header_no_obj_size(
     writer.write_h(0x00, common.handle)?;
     writer.write_bs(0)?; // ext_size
     writer.write_b(0)?; // graphic_present_flag
-    writer.write_bb(0)?; // entity_mode
+    writer.write_bb(common.entity_mode)?;
     writer.write_bl(0)?; // num_of_reactors
     writer.write_b(0)?; // explicit previous/next handles, including null endpoints
     writer.write_bs(common.color_index)?;
