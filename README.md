@@ -6,6 +6,15 @@ This project is a **DWG read-focused parser** with growing high-level entity cov
 
 Documentation: https://monozukuri-ai.github.io/ezdwg/
 
+For Rust projects, use `ezdwg-core` without a Python dependency:
+
+```bash
+cargo add ezdwg-core
+```
+
+See the [Rust crate guide](crates/ezdwg-core/README.md) for reading and writing
+examples, or the [Rust API reference](https://docs.rs/ezdwg-core).
+
 ## Status
 - High-level API (`ezdwg.read`): **R13 / AC1012** and **R14 / AC1014** (2D entities), **R2000 / AC1015**, **R2004 / AC1018**, **R2007 / AC1021**, **R2010 / AC1024**, **R2013 / AC1027**, **R2018 / AC1032**
 - Raw API (`ezdwg.raw`): the same versions, with the per-type `decode_*` functions and the table, style and placement functions

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Rust crate distribution
+- Prepare `ezdwg-core` for crates.io with package metadata, a Rust README and
+  the MIT license. CI verifies the package and documentation examples; tagged
+  releases publish with `CARGO_REGISTRY_TOKEN`.
+- Keep `ezdwg-python` private to Cargo and retain the shared Rust/Python version.
+
 ### Native DWG writer
 - HATCH writing (`add_hatch`): polyline or edge boundary paths, solid and
   pattern fills with built-in or `acad.pat` definitions.

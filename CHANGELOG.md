@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Rust crate distribution
+- Prepare `ezdwg-core` for crates.io with package metadata, a Rust README and
+  the MIT license. Verify the packaged crate and its documentation examples
+  in CI, and publish tagged releases with `CARGO_REGISTRY_TOKEN`.
+- Mark the Python extension crate as private to Cargo; Python builds continue
+  to use the local Rust core and the shared workspace version.
+
 ### Native DWG writer
 - Add paper-space layouts: `Drawing.paperspace()` holds the entities of `*Paper_Space`
   (title block lines, text, ...) and `Drawing.layout` / `Drawing.set_paper(width, height,

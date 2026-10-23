@@ -65,6 +65,26 @@ jobs:
           "${VENV_PY}" -c "import ezdwg; doc = ezdwg.read('test_dwg/line_2007.dwg'); assert doc.version == 'AC1021'; assert doc.decode_version == 'AC1021'; assert sum(1 for _ in doc.modelspace().query('LINE')) == 1; print(doc.decode_version)"
           "${VENV_PY}" examples/basic_read.py
 
+  verify-crate:
+    name: Verify Rust crate
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check packaged license
+        run: cmp LICENSE crates/ezdwg-core/LICENSE
+      - name: Run Rust tests
+        run: cargo test -p ezdwg-core --locked
+      - name: Check crates.io package
+        run: cargo publish -p ezdwg-core --dry-run --locked
+      - name: Test examples from the packaged crate
+        run: cargo test --manifest-path target/package/ezdwg-core-*/Cargo.toml --doc --locked
+      - name: Build packaged API documentation
+        run: cargo doc --manifest-path target/package/ezdwg-core-*/Cargo.toml --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   build-wheels:
     name: Build wheels (${{ matrix.os }})
     needs: verify-python
@@ -161,3 +181,16 @@ jobs:
         run: uv publish 'dist/*'
         env:
           UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+
+  publish-crate:
+    name: Publish ezdwg-core to crates.io
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [verify-crate, build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish crate
+        run: cargo publish -p ezdwg-core --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

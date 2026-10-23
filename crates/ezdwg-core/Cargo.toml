@@ -2,6 +2,15 @@
 name = "ezdwg-core"
 version.workspace = true
 edition = "2021"
+description = "Pure Rust DWG reader and native AC1015 writer"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/monozukuri-ai/ezdwg"
+homepage = "https://monozukuri-ai.github.io/ezdwg/"
+documentation = "https://docs.rs/ezdwg-core"
+keywords = ["dwg", "cad", "parser", "drawing"]
+categories = ["parser-implementations", "encoding"]
+include = ["/src/**", "/README.md", "/LICENSE"]
 
 [dependencies]
 encoding_rs = "0.8.35"

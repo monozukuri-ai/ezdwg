@@ -11,6 +11,23 @@ permissions:
   contents: read
 
 jobs:
+  crate:
+    name: Verify Rust crate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check packaged license
+        run: cmp LICENSE crates/ezdwg-core/LICENSE
+      - name: Check crates.io package
+        run: cargo publish -p ezdwg-core --dry-run --locked
+      - name: Test examples from the packaged crate
+        run: cargo test --manifest-path target/package/ezdwg-core-*/Cargo.toml --doc --locked
+      - name: Build packaged API documentation
+        run: cargo doc --manifest-path target/package/ezdwg-core-*/Cargo.toml --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   version:
     name: Version consistency
     runs-on: ubuntu-latest

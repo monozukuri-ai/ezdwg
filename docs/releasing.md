@@ -37,6 +37,7 @@ Review the diff and update the release notes in `CHANGELOG.md` and
 uv run --with maturin maturin develop --release
 uv run --with pytest --extra dxf --extra plot pytest -q tests
 cargo test --all --quiet
+cargo publish -p ezdwg-core --dry-run --locked
 uv run scripts/bump_version.py --check --tag v0.14.0
 ```
 
@@ -45,3 +46,43 @@ Commit the version and release notes, then push the commit and its `v<version>`
 tag to publish through the release workflow. CI checks version consistency;
 the release workflow also rejects tags that disagree with `Cargo.toml` before
 building distributions.
+
+## Rust crate publication
+
+`ezdwg-core` is the public Rust crate. `ezdwg-python` is a private Cargo
+package (`publish = false`) used to build the Python distribution; it keeps
+its local path dependency so wheel and sdist builds do not require an
+already-published core version.
+
+Before the first automated crate release, create a crates.io API token with
+permission to publish `ezdwg-core` and store it as the repository Actions
+secret `CARGO_REGISTRY_TOKEN`. The token must permit creating the crate on
+its first release. See the [Cargo publishing guide](https://doc.rust-lang.org/cargo/reference/publishing.html)
+for account and token setup.
+
+The release workflow tests the Rust crate, runs `cargo publish --dry-run`,
+and tests the README examples from the extracted package. After verification
+and Python distribution builds succeed, a `v<version>` tag publishes
+`ezdwg-core` to crates.io. The crate job also runs when manually dispatching
+the workflow on a matching tag; a branch dispatch does not publish the crate.
+PyPI publication remains a separate job using `PYPI_API_TOKEN`.
+
+To inspect or publish the crate manually from a clean release checkout:
+
+```bash
+cargo package -p ezdwg-core --list --locked
+cargo publish -p ezdwg-core --dry-run --locked
+cargo login
+cargo publish -p ezdwg-core --locked
+```
+
+The archive contains the Rust sources, crate README, MIT license, and Cargo
+metadata. Python bindings and repository DWG fixtures are not bundled.
+Keep `crates/ezdwg-core/LICENSE` identical to the root `LICENSE`; CI checks it.
+The README is also the crate-level API documentation, so its examples are
+compiled by Rust's documentation tests.
+
+The crate uses the same version as Python; continue using the version helper
+above. crates.io versions cannot be overwritten. If one publication job
+succeeds and another fails, rerun only the failed jobs instead of republishing
+an existing crate version.
