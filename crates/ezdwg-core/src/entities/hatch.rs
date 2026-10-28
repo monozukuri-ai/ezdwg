@@ -331,9 +331,19 @@ fn decode_hatch_with_header(
         }
     }
 
-    if let Some((_score, chosen_reader, entity)) = best {
-        *reader = chosen_reader;
-        return Ok(entity);
+    if let Some((score, chosen_reader, entity)) = best {
+        if score > HATCH_CANDIDATE_REJECT {
+            *reader = chosen_reader;
+            return Ok(entity);
+        }
+        // Every candidate was garbage (no boundary): report a failure instead of
+        // an entity with an empty or shifted boundary and a corrupt pattern name.
+        return Err(first_err.unwrap_or_else(|| {
+            DwgError::new(
+                ErrorKind::Format,
+                "failed to decode HATCH: no candidate has a usable boundary",
+            )
+        }));
     }
 
     Err(first_err.unwrap_or_else(|| {
@@ -437,8 +447,18 @@ fn decode_hatch_body(
     string_mode: HatchStringMode,
     spline_fit_points: bool,
 ) -> Result<HatchEntity> {
+    let debug = std::env::var("EZDWG_DEBUG_HATCH")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|handle| handle == header.handle);
+    if debug {
+        eprintln!("[hatch trace] body start bit={} obj_size={}", reader.tell_bits(), header.obj_size);
+    }
     if skip_gradient {
         skip_gradient_payload(reader, string_mode)?;
+        if debug {
+            eprintln!("[hatch trace] after gradient bit={}", reader.tell_bits());
+        }
     }
 
     let elevation = reader.read_bd()?;
@@ -448,6 +468,12 @@ fn decode_hatch_body(
     let associative = reader.read_b()? != 0;
 
     let num_paths = bounded_count(reader.read_bl()?, "hatch paths")?;
+    if debug {
+        eprintln!(
+            "[hatch trace] elev={elevation} ext={extrusion:?} name={name:?} solid={solid_fill} assoc={associative} num_paths={num_paths} bit={}",
+            reader.tell_bits()
+        );
+    }
     let mut paths = Vec::with_capacity(num_paths.min(4096));
     let mut any_path_uses_pixel_size = false;
     let mut tessellated_points: usize = 0;
@@ -455,12 +481,21 @@ fn decode_hatch_body(
     for _ in 0..num_paths {
         let path_flag = reader.read_bl()?;
         any_path_uses_pixel_size |= (path_flag & 0x04) != 0;
+        if debug {
+            eprintln!("[hatch trace] path flag={path_flag:#x} bit={}", reader.tell_bits());
+        }
 
         if (path_flag & 0x02) == 0 {
             let num_segments = bounded_count(reader.read_bl()?, "hatch edge path segments")?;
             let mut path_points: Vec<(f64, f64)> = Vec::new();
             for _ in 0..num_segments {
                 let segment_type = reader.read_rc()?;
+                if debug {
+                    eprintln!(
+                        "[hatch trace]  seg type={segment_type} of {num_segments} bit={}",
+                        reader.tell_bits()
+                    );
+                }
                 match segment_type {
                     1 => {
                         let start = read_point2rd(reader)?;
@@ -513,7 +548,7 @@ fn decode_hatch_body(
                         append_segment_points(&mut path_points, &segment);
                     }
                     4 => {
-                        let segment = spline_edge_points(reader, spline_fit_points)?;
+                        let segment = spline_edge_points(reader, spline_fit_points, debug)?;
                         charge_hatch_points(&mut tessellated_points, segment.len())?;
                         append_segment_points(&mut path_points, &segment);
                     }
@@ -715,12 +750,17 @@ fn scan_hatch_polyline_paths(
     Ok(paths)
 }
 
+/// Score below which a candidate is a misaligned read, not a hatch.
+const HATCH_CANDIDATE_REJECT: i32 = i32::MIN / 8;
+
 fn score_hatch_candidate(entity: &HatchEntity) -> i32 {
     let mut score = 0i32;
     if !entity.name.is_empty() {
         score += 8;
     }
-    if entity.paths.is_empty() {
+    // Without a single usable boundary the candidate read the wrong bits (every
+    // real hatch has a boundary with at least three points).
+    if entity.paths.is_empty() || entity.paths.iter().all(|path| path.points.len() < 3) {
         return i32::MIN / 4;
     }
     score += (entity.paths.len().min(32) as i32) * 4;
@@ -791,6 +831,12 @@ fn require_plausible_hatch_scalar(value: f64, context: &str) -> Result<()> {
 
 fn is_plausible_hatch_point(point: (f64, f64)) -> bool {
     point.0.is_finite() && point.1.is_finite() && point.0.abs() <= 1.0e8 && point.1.abs() <= 1.0e8
+}
+
+/// A tangent component is 0 or a sane magnitude; the bytes of a following edge
+/// or path read as doubles come out as denormals or astronomically large.
+fn is_plausible_tangent_component(value: f64) -> bool {
+    value.is_finite() && (value == 0.0 || (1.0e-9..=1.0e8).contains(&value.abs()))
 }
 
 fn read_hatch_string(reader: &mut BitReader<'_>, mode: HatchStringMode) -> Result<String> {
@@ -925,7 +971,18 @@ fn close_path_if_needed(points: &mut Vec<(f64, f64)>) {
 /// BL knot count, BL control point count, BD knots, 2RD control points
 /// (each followed by BD weight when rational); R2010+ append BL fit-point
 /// count, 2RD fit points and the 2RD start/end tangents.
-fn spline_edge_points(reader: &mut BitReader<'_>, has_fit_points: bool) -> Result<Vec<(f64, f64)>> {
+///
+/// The specification lists the tangent pair unconditionally, but AutoCAD 2018
+/// drawings seen in production store it only together with fit points: a
+/// spline edge with zero fit points is followed directly by the next edge or
+/// path. Reading 32 bytes of tangents there shifted every following field, so
+/// the tangents are consumed only when fit points exist or when the next 4
+/// doubles look like a tangent pair.
+fn spline_edge_points(
+    reader: &mut BitReader<'_>,
+    has_fit_points: bool,
+    debug: bool,
+) -> Result<Vec<(f64, f64)>> {
     let degree = bounded_count(reader.read_bl()?, "hatch spline degree")?;
     if degree > 25 {
         return Err(DwgError::new(
@@ -937,6 +994,12 @@ fn spline_edge_points(reader: &mut BitReader<'_>, has_fit_points: bool) -> Resul
     let _periodic = reader.read_b()? != 0;
     let num_knots = bounded_count(reader.read_bl()?, "hatch spline knots")?;
     let num_control = bounded_count(reader.read_bl()?, "hatch spline control points")?;
+    if debug {
+        eprintln!(
+            "[hatch trace]   spline degree={degree} rational={rational} knots={num_knots} ctl={num_control} bit={}",
+            reader.tell_bits()
+        );
+    }
     let mut knots = Vec::with_capacity(num_knots.min(4096));
     for _ in 0..num_knots {
         knots.push(reader.read_bd()?);
@@ -955,8 +1018,27 @@ fn spline_edge_points(reader: &mut BitReader<'_>, has_fit_points: bool) -> Resul
         for _ in 0..num_fit {
             fit_points.push(read_point2rd(reader)?);
         }
-        let _start_tangent = read_point2rd(reader)?;
-        let _end_tangent = read_point2rd(reader)?;
+        let tangents_present = if num_fit > 0 {
+            true
+        } else {
+            let mut probe = reader.clone();
+            (0..4).all(|_| {
+                probe
+                    .read_rd(Endian::Little)
+                    .map(is_plausible_tangent_component)
+                    .unwrap_or(false)
+            })
+        };
+        if tangents_present {
+            let _start_tangent = read_point2rd(reader)?;
+            let _end_tangent = read_point2rd(reader)?;
+        }
+        if debug {
+            eprintln!(
+                "[hatch trace]   spline num_fit={num_fit} tangents_present={tangents_present} bit={}",
+                reader.tell_bits()
+            );
+        }
     }
     if control.len() >= 2 {
         if let Some(points) = sample_bspline(&control, &weights, &knots, degree) {
@@ -1249,6 +1331,7 @@ fn bounded_count(raw: u32, label: &str) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bit::BitWriter;
 
     #[test]
     fn bspline_sampler_reproduces_a_polyline_for_degree_one() {
@@ -1309,5 +1392,88 @@ mod tests {
             ..real.clone()
         };
         assert!(score_hatch_candidate(&real) > score_hatch_candidate(&garbage));
+        // Garbage is rejected outright: no boundary with three points means the bits
+        // were read from the wrong offset (2026-10-28, R2018 production files).
+        assert!(score_hatch_candidate(&garbage) <= HATCH_CANDIDATE_REJECT);
+        assert!(score_hatch_candidate(&real) > HATCH_CANDIDATE_REJECT);
+    }
+
+    /// degree 1, two control points, R2010+ fit-point count 0.
+    fn write_spline_edge_without_fit_points(writer: &mut BitWriter) {
+        writer.write_bl(1).unwrap(); // degree
+        writer.write_b(0).unwrap(); // rational
+        writer.write_b(0).unwrap(); // periodic
+        writer.write_bl(4).unwrap(); // knots
+        writer.write_bl(2).unwrap(); // control points
+        for knot in [0.0, 0.0, 1.0, 1.0] {
+            writer.write_bd(knot).unwrap();
+        }
+        for (x, y) in [(0.0, 0.0), (10.0, 0.0)] {
+            writer.write_rd(Endian::Little, x).unwrap();
+            writer.write_rd(Endian::Little, y).unwrap();
+        }
+        writer.write_bl(0).unwrap(); // fit points (R2010+)
+    }
+
+    #[test]
+    fn spline_edge_without_fit_points_does_not_eat_the_next_edge_as_tangents() {
+        // AutoCAD 2018 files store no start/end tangents when a spline edge has no fit
+        // points; the next edge (type 1 = line) follows directly.
+        let mut writer = BitWriter::new();
+        write_spline_edge_without_fit_points(&mut writer);
+        writer.write_rc(1).unwrap();
+        writer.write_rd(Endian::Little, 10.0).unwrap();
+        writer.write_rd(Endian::Little, 0.0).unwrap();
+        writer.write_rd(Endian::Little, 10.0).unwrap();
+        writer.write_rd(Endian::Little, 5.0).unwrap();
+        let bytes = writer.into_bytes();
+        let mut reader = BitReader::new(&bytes);
+        let points = spline_edge_points(&mut reader, true, false).expect("spline edge");
+        assert_eq!(points.first().copied(), Some((0.0, 0.0)));
+        assert_eq!(reader.read_rc().unwrap(), 1, "next edge type follows the spline edge");
+        assert_eq!(reader.read_rd(Endian::Little).unwrap(), 10.0);
+    }
+
+    #[test]
+    fn spline_edge_without_fit_points_still_consumes_a_real_tangent_pair() {
+        // Writers that follow the specification literally store the tangents anyway.
+        let mut writer = BitWriter::new();
+        write_spline_edge_without_fit_points(&mut writer);
+        for value in [1.0, 0.0, 0.0, 1.0] {
+            writer.write_rd(Endian::Little, value).unwrap();
+        }
+        writer.write_rc(2).unwrap();
+        let bytes = writer.into_bytes();
+        let mut reader = BitReader::new(&bytes);
+        spline_edge_points(&mut reader, true, false).expect("spline edge");
+        assert_eq!(reader.read_rc().unwrap(), 2, "tangent pair was consumed");
+    }
+
+    #[test]
+    fn spline_edge_with_fit_points_reads_fit_points_and_tangents() {
+        let mut writer = BitWriter::new();
+        writer.write_bl(1).unwrap();
+        writer.write_b(0).unwrap();
+        writer.write_b(0).unwrap();
+        writer.write_bl(4).unwrap();
+        writer.write_bl(2).unwrap();
+        for knot in [0.0, 0.0, 1.0, 1.0] {
+            writer.write_bd(knot).unwrap();
+        }
+        for (x, y) in [(0.0, 0.0), (10.0, 0.0)] {
+            writer.write_rd(Endian::Little, x).unwrap();
+            writer.write_rd(Endian::Little, y).unwrap();
+        }
+        writer.write_bl(1).unwrap(); // one fit point
+        writer.write_rd(Endian::Little, 5.0).unwrap();
+        writer.write_rd(Endian::Little, 0.0).unwrap();
+        for value in [1.0, 0.0, 1.0, 0.0] {
+            writer.write_rd(Endian::Little, value).unwrap(); // tangents
+        }
+        writer.write_rc(3).unwrap();
+        let bytes = writer.into_bytes();
+        let mut reader = BitReader::new(&bytes);
+        spline_edge_points(&mut reader, true, false).expect("spline edge");
+        assert_eq!(reader.read_rc().unwrap(), 3);
     }
 }

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### DWG reader
+- HATCH spline boundary edges of R2010+ drawings: the start/end tangent pair is
+  stored only together with fit points. AutoCAD 2018 drawings with zero fit
+  points (production files, 36 of 600 DWGs) were read 32 bytes off from the
+  first spline edge on, so every following edge and path came back empty or
+  shifted (``paths=[]``, corrupt pattern names, ``extrusion (0, 1, 0)``) and
+  the hatches were dropped. The tangents are now read when fit points exist or
+  when the next four doubles look like a tangent pair.
+- A HATCH whose every decode candidate lacks a usable boundary is reported as a
+  decode failure instead of an entity with empty paths.
+
 ### Rust crate distribution
 - Prepare `ezdwg-core` for crates.io with package metadata, a Rust README and
   the MIT license. Verify the packaged crate and its documentation examples
