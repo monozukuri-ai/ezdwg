@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import raw
+from ._core import legacy_text_is_representable
 from ._aci import describe_approximation, nearest_aci
 from ._dimension import dimension_error
 from ._hatch import hatch_error
@@ -806,6 +807,47 @@ def _codec_preference(strings):
     return [(codec, _CODEC_CODEPAGE[codec]) for codec in order]
 
 
+def _storable(codec, codepage, text):
+    """Whether the writer stores ``text`` unchanged in the code page.
+
+    Python's codec and the writer's own table (encoding_rs) must both accept it:
+    Python's cp932 maps the undefined byte A0 to the private-use U+F8F0, which the
+    writer's Shift_JIS table cannot encode, and the writer's GBK table would store
+    any character as a GB18030 sequence that AutoCAD does not read as cp936.
+    """
+    try:
+        if text.encode(codec).decode(codec) != text:
+            return False
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return False
+    return legacy_text_is_representable(codepage, text)
+
+
+def is_representable(codepage, text):
+    """Whether ``text`` is stored unchanged in ``codepage`` (one of ``WRITE_CODEPAGES``)."""
+    if codepage not in _CODEPAGE_CODEC:
+        raise ValueError(f"unsupported DWG codepage {codepage}")
+    return _storable(_CODEPAGE_CODEC[codepage], codepage, text)
+
+
+def replace_unrepresentable(codepage, text, replacement="?"):
+    """``text`` with every character ``codepage`` cannot store replaced, and that count."""
+    if codepage not in _CODEPAGE_CODEC:
+        raise ValueError(f"unsupported DWG codepage {codepage}")
+    codec = _CODEPAGE_CODEC[codepage]
+    if _storable(codec, codepage, text):
+        return text, 0
+    out = []
+    replaced = 0
+    for ch in text:
+        if _storable(codec, codepage, ch):
+            out.append(ch)
+        else:
+            out.append(replacement)
+            replaced += 1
+    return "".join(out), replaced
+
+
 def select_codepage(strings, requested=None):
     """Choose the legacy code page for a drawing's strings.
 
@@ -826,12 +868,7 @@ def select_codepage(strings, requested=None):
         return "cp949", 40
     best = None
     for codec, code in _codec_preference(strings):
-        failures = 0
-        for text in strings:
-            try:
-                text.encode(codec)
-            except UnicodeEncodeError:
-                failures += 1
+        failures = sum(1 for text in strings if not _storable(codec, code, text))
         if failures == 0:
             return codec, code
         if best is None or failures < best[0]:
@@ -889,22 +926,21 @@ def prepare_strings(
         requested = None
     codec, metadata["codepage"] = select_codepage(strings, requested)
 
+    codepage = metadata["codepage"]
+
     # Replace only with explicit diagnostics; strict will reject before writing.
     def encode_text(value, handle, kind, attr):
-        try:
-            data = value.encode(codec)
-            if data.decode(codec) != value or len(data) > 65535 or "\0" in value:
-                raise ValueError("string is too long or contains NUL")
+        if (
+            "\0" not in value
+            and _storable(codec, codepage, value)
+            and len(value.encode(codec)) <= 65535
+        ):
             return value
-        except (UnicodeEncodeError, ValueError):
-            report(
-                handle, kind, attr, f"string cannot be stored in {codec}", "replaced"
-            )
-            return (
-                value.replace("\0", " ")
-                .encode(codec, errors="replace")[:65535]
-                .decode(codec, errors="ignore")
-            )
+        report(handle, kind, attr, f"string cannot be stored in {codec}", "replaced")
+        text, _ = replace_unrepresentable(codepage, value.replace("\0", " "))
+        return (
+            text.encode(codec, errors="replace")[:65535].decode(codec, errors="ignore")
+        )
 
     prepared = []
     for e in entities:

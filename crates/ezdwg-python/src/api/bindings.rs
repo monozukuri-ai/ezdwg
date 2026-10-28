@@ -25,4 +25,5 @@ include!("bindings/polyline.rs");
 include!("bindings/block_insert.rs");
 include!("bindings/utils.rs");
 include!("bindings/embedded_text.rs");
+include!("bindings/legacy_text.rs");
 include!("bindings/register.rs");

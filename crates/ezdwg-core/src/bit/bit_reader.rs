@@ -479,7 +479,9 @@ pub fn decode_tv_bytes(bytes: &[u8], codepage: Option<u16>) -> String {
     }
 
     if let Some(encoding) = dwg_codepage_encoding(codepage) {
-        let (decoded, _, _) = encoding.decode(bytes);
+        // No BOM sniffing: cp1252 text may start with "ÿþ" (FF FE) or "ï»¿" (EF BB BF),
+        // which `Encoding::decode` would otherwise read as UTF-16LE / UTF-8.
+        let (decoded, _) = encoding.decode_without_bom_handling(bytes);
         return decode_legacy_text_escapes(&decoded);
     }
 
@@ -528,7 +530,7 @@ fn decode_legacy_text_escapes(text: &str) -> String {
             };
             if let Some(encoding) = dwg_codepage_encoding(Some(cp)) {
                 let value = u16::from_str_radix(&tail[4..8], 16).unwrap().to_be_bytes();
-                let (decoded, _, errors) = encoding.decode(&value);
+                let (decoded, errors) = encoding.decode_without_bom_handling(&value);
                 if !errors {
                     out.push_str(&decoded);
                     tail = &tail[8..];

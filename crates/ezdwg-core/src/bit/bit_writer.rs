@@ -318,18 +318,20 @@ impl BitWriter {
 
     pub fn write_tv(&mut self, text: &str) -> Result<()> {
         let codepage = self.codepage.unwrap_or(30);
-        let encoding = crate::bit::bit_reader::dwg_codepage_encoding(Some(codepage))
-            .ok_or_else(|| DwgError::new(ErrorKind::Unsupported, "unsupported TV codepage"))?;
+        if crate::bit::bit_reader::dwg_codepage_encoding(Some(codepage)).is_none() {
+            return Err(DwgError::new(ErrorKind::Unsupported, "unsupported TV codepage"));
+        }
         if text.contains('\0') {
             return Err(DwgError::new(ErrorKind::Format, "TV text contains NUL"));
         }
-        let (bytes, _, errors) = encoding.encode(text);
-        if errors || encoding.decode(&bytes).0 != text {
-            return Err(DwgError::new(
+        // Shared with the Python preflight; compares the bytes without BOM sniffing so
+        // that cp1252 text starting with "ÿþ" (FF FE) is not mistaken for UTF-16.
+        let bytes = crate::bit::legacy_text::encode_legacy_text(codepage, text).ok_or_else(|| {
+            DwgError::new(
                 ErrorKind::Unsupported,
                 format!("text is not representable in DWG codepage {codepage}"),
-            ));
-        }
+            )
+        })?;
         if bytes.len() > u16::MAX as usize {
             return Err(DwgError::new(
                 ErrorKind::Unsupported,

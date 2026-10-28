@@ -10,6 +10,15 @@
   to use the local Rust core and the shared workspace version.
 
 ### Native DWG writer
+- Text whose cp1252 bytes start like a UTF-16 byte order mark (``ÿþ`` = FF FE,
+  ``ï»¿`` = EF BB BF) is written as is: the writer's round-trip check decoded
+  the bytes with BOM sniffing and rejected such strings as "not representable in
+  DWG codepage 30" (DGN texts decoded with a code page start that way).
+- The write preflight checks representability with the writer's own table
+  (encoding_rs) as well as Python's codec, and ``ezdwg.is_representable`` /
+  ``ezdwg.replace_unrepresentable`` expose that check. Characters only Python's
+  codec maps (cp932's private-use U+F8F0–U+F8F3 for the undefined bytes A0 and
+  FD–FF) are replaced by ``?`` with a diagnostic instead of failing the file.
 - Add paper-space layouts: `Drawing.paperspace()` holds the entities of `*Paper_Space`
   (title block lines, text, ...) and `Drawing.layout` / `Drawing.set_paper(width, height,
   margins=..., name=...)` describe the sheet of the `Layout1` LAYOUT object (paper size in

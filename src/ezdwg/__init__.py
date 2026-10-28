@@ -1,7 +1,12 @@
 from typing import Sequence
 
 from .convert import ConvertResult, WriteDiagnostic, WriteResult, to_dwg, to_dxf
-from ._write_preflight import WRITE_CODEPAGES, select_codepage
+from ._write_preflight import (
+    WRITE_CODEPAGES,
+    is_representable,
+    replace_unrepresentable,
+    select_codepage,
+)
 from .document import Document, Layout, clear_decode_caches, read
 from .drawing import BlockLayout, BlockTable, Drawing, EditableLayout, new
 from .entity import Entity
@@ -31,6 +36,8 @@ from .render import plot
 __all__ = [
     "WRITE_CODEPAGES",
     "select_codepage",
+    "is_representable",
+    "replace_unrepresentable",
     "read",
     "new",
     "Drawing",

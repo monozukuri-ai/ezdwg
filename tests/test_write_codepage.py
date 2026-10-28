@@ -123,3 +123,44 @@ def test_mixed_scripts_report_replacements_instead_of_failing(tmp_path):
     assert _file_codepage(out) == 38
     replaced = [d for d in result.diagnostics if d.action == "replaced"]
     assert len(replaced) == 1
+
+
+def test_text_starting_like_a_utf16_byte_order_mark_is_stored_as_is(tmp_path):
+    # "ÿþ" is FF FE in cp1252. The writer compared its bytes through a BOM-sniffing decode
+    # and rejected such strings ("text is not representable in DWG codepage 30"); DGN texts
+    # decoded with a code page start that way (three production drawings, 2026-10-22)
+    drawing = ezdwg.new()
+    msp = drawing.modelspace()
+    msp.add_text("ÿþ café", insert=(0.0, 0.0), height=2.5)
+    msp.add_text("ï»¿ note", insert=(0.0, 5.0), height=2.5)
+    out = tmp_path / "out.dwg"
+    result = drawing.save(out)
+    assert not [d for d in result.diagnostics if d.action == "replaced"]
+    assert _file_codepage(out) == 30
+    doc = ezdwg.read(str(out))
+    texts = [e.dxf["text"] for e in doc.modelspace().query(["TEXT"])]
+    assert texts == ["ÿþ café", "ï»¿ note"]
+
+
+def test_characters_only_pythons_codec_maps_are_replaced_instead_of_rejected(tmp_path):
+    # Python's cp932 maps the undefined byte A0 to U+F8F0 (a DXF read as cp932 carries it);
+    # the writer's Shift_JIS table has no such character and used to fail the whole file
+    drawing = ezdwg.new()
+    msp = drawing.modelspace()
+    msp.add_text("ﾊﾟﾙﾌﾞ L\uf8f0990", insert=(0.0, 0.0), height=2.5)  # kana pins cp932
+    out = tmp_path / "out.dwg"
+    result = drawing.save(out, strict=False)
+    assert _file_codepage(out) == 38
+    assert len([d for d in result.diagnostics if d.action == "replaced"]) == 1
+    doc = ezdwg.read(str(out))
+    assert [e.dxf["text"] for e in doc.modelspace().query(["TEXT"])] == ["ﾊﾟﾙﾌﾞ L?990"]
+
+
+def test_representability_helpers_agree_with_the_writer():
+    assert ezdwg.is_representable(30, "ÿþ café")
+    assert not ezdwg.is_representable(38, "")
+    assert ezdwg.replace_unrepresentable(38, "L990") == ("L?990", 1)
+    assert ezdwg.replace_unrepresentable(38, "L990", "") == ("L990", 1)
+    assert ezdwg.replace_unrepresentable(30, "plain") == ("plain", 0)
+    with pytest.raises(ValueError):
+        ezdwg.is_representable(999, "x")
