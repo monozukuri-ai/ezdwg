@@ -14,7 +14,10 @@ pub fn encode_insert(
     seqend: u64,
 ) -> Result<Vec<u8>> {
     let mut refs = vec![(5, block)];
-    if let (Some(first), Some(last)) = (attributes.first(), attributes.last()) {
+    if common.modern && !attributes.is_empty() {
+        refs.extend(attributes.iter().map(|h| (4, *h)));
+        refs.push((3, seqend));
+    } else if let (Some(first), Some(last)) = (attributes.first(), attributes.last()) {
         refs.extend([(4, *first), (4, *last), (3, seqend)]);
     }
     encode_entity_payload_with_handles(
@@ -30,7 +33,11 @@ pub fn encode_insert(
             w.write_bd(insert.rotation_rad)?;
             let normal = common.formatting.extrusion;
             w.write_3bd(normal.0, normal.1, normal.2)?;
-            w.write_b(u8::from(!attributes.is_empty()))
+            w.write_b(u8::from(!attributes.is_empty()))?;
+            if common.modern && !attributes.is_empty() {
+                w.write_bl(attributes.len() as u32)?;
+            }
+            Ok(())
         },
         &refs,
     )
@@ -50,10 +57,20 @@ pub fn encode_attribute(
     };
     encode_entity_payload(if definition { 3 } else { 2 }, common, |w| {
         write_text_body(w, &text)?;
+        if w.is_unicode() {
+            w.write_rc(0)?; // attribute version
+            w.write_rc(1)?; // single-line attribute (R2018)
+        }
         w.write_tv(&attr.tag)?;
         w.write_bs(attr.field_length)?;
         w.write_rc(attr.flags)?;
+        if w.is_unicode() {
+            w.write_b(0)?;
+        } // lock position
         if definition {
+            if w.is_unicode() {
+                w.write_rc(0)?;
+            } // ATTDEF version
             w.write_tv(&attr.prompt)?;
         }
         Ok(())
@@ -76,6 +93,8 @@ mod tests {
             linetype_flags: 0,
             linetype_handle: 0,
             codepage: 30,
+            modern: false,
+            true_color: None,
             formatting: Default::default(),
             previous_handle: 0,
             next_handle: 0,

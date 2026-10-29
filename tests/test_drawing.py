@@ -230,7 +230,7 @@ def test_invalid_direct_mutation_preserves_output(tmp_path, change):
 
 def test_unknown_attributes_and_versions_reject():
     with pytest.raises(ValueError, match="version"):
-        ezdwg.new("AC1032")
+        ezdwg.new("AC1027")
     with pytest.raises(ValueError, match="unsupported"):
         ezdwg.new().modelspace().add_point((0, 0), colour=2)
     with pytest.raises(ValueError, match="output path"):

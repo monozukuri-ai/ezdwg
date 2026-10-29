@@ -21,6 +21,13 @@
   to use the local Rust core and the shared workspace version.
 
 ### Native DWG writer
+- Add native AC1032 output with exact entity/layer RGB colors and UTF-16
+  strings, including mixed-language names and supplementary characters.
+  Select it with `ezdwg.new("AC1032")`, `to_dwg(..., version="AC1032")`,
+  `Document.edit(version="AC1032")` or `--dwg-version AC1032`.
+  The initial scope is basic model-space geometry, TEXT/MTEXT and nested static
+  blocks with single-line attributes. AC1015 remains the default and retains
+  its broader entity and paper-space support.
 - Text whose cp1252 bytes start like a UTF-16 byte order mark (``ÿþ`` = FF FE,
   ``ï»¿`` = EF BB BF) is written as is: the writer's round-trip check decoded
   the bytes with BOM sniffing and rejected such strings as "not representable in

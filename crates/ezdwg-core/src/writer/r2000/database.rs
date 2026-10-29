@@ -172,6 +172,7 @@ impl DatabaseHandles {
         doc: &WriterDocument,
         image_reactors: &std::collections::HashMap<u64, u64>,
     ) -> Result<Vec<(u64, Vec<u8>)>> {
+        let modern = matches!(doc.version, crate::dwg::version::DwgVersion::R2018);
         let mut objects = Vec::new();
         // Header variable table order: BLOCK, LAYER, STYLE, LTYPE, VIEW, UCS,
         // VPORT, APPID, DIMSTYLE, VX (viewport entity header).
@@ -200,7 +201,7 @@ impl DatabaseHandles {
             }
             objects.push((
                 h,
-                object(doc.metadata.codepage, typ, h, 0, &refs, |w| {
+                object(doc.metadata.codepage, modern, typ, h, 0, &refs, |w| {
                     w.write_bl(entries.len() as u32)?;
                     if i == 8 {
                         w.write_rc(0)?;
@@ -244,6 +245,7 @@ impl DatabaseHandles {
                 h,
                 object(
                     doc.metadata.codepage,
+                    modern,
                     if i == 5 { 500 } else { 0x2A },
                     h,
                     if i == 0 { 0 } else { nod },
@@ -258,6 +260,11 @@ impl DatabaseHandles {
                             }
                         }
                         if i == 3 {
+                            if w.is_unicode() {
+                                for v in [0, 2, 300] {
+                                    w.write_bs(v)?;
+                                }
+                            }
                             w.write_tv("Model")?;
                             w.write_tv("Layout1")?;
                         }
@@ -273,6 +280,7 @@ impl DatabaseHandles {
             self.normal_plotstyle,
             object(
                 doc.metadata.codepage,
+                modern,
                 501,
                 self.normal_plotstyle,
                 styles,
@@ -294,6 +302,7 @@ impl DatabaseHandles {
                 self.image_dict,
                 object(
                     doc.metadata.codepage,
+                    modern,
                     0x2A,
                     self.image_dict,
                     nod,
@@ -359,10 +368,21 @@ impl DatabaseHandles {
                 handle,
                 object(
                     doc.metadata.codepage,
+                    modern,
                     0x33,
                     handle,
                     self.controls[1],
-                    &[(5, 0), (5, self.normal_plotstyle), (5, ltype)],
+                    &if modern {
+                        vec![
+                            (5, 0),
+                            (5, self.normal_plotstyle),
+                            (5, 0),
+                            (5, ltype),
+                            (5, 0),
+                        ]
+                    } else {
+                        vec![(5, 0), (5, self.normal_plotstyle), (5, ltype)]
+                    },
                     |w| {
                         table_name(w, &layer.name)?;
                         let flags = u16::from(layer.frozen)
@@ -374,7 +394,7 @@ impl DatabaseHandles {
                                 layer.lineweight,
                             )?) << 5);
                         w.write_bs(flags)?;
-                        w.write_bs(layer.color_index)
+                        w.write_cmc(layer.color_index, layer.true_color)
                     },
                 )?,
             ));
@@ -383,10 +403,25 @@ impl DatabaseHandles {
             self.dimstyle,
             object(
                 doc.metadata.codepage,
+                modern,
                 0x45,
                 self.dimstyle,
                 self.controls[8],
-                &[(5, 0), (5, self.style), (5, 0), (5, 0), (5, 0), (5, 0)],
+                &if modern {
+                    vec![
+                        (5, 0),
+                        (5, self.style),
+                        (5, 0),
+                        (5, 0),
+                        (5, 0),
+                        (5, 0),
+                        (5, 0),
+                        (5, 0),
+                        (5, 0),
+                    ]
+                } else {
+                    vec![(5, 0), (5, self.style), (5, 0), (5, 0), (5, 0), (5, 0)]
+                },
                 |w| dimstyle_body(w),
             )?,
         ));
@@ -404,6 +439,7 @@ impl DatabaseHandles {
                 h,
                 object(
                     doc.metadata.codepage,
+                    modern,
                     0x35,
                     h,
                     self.controls[2],
@@ -435,6 +471,7 @@ impl DatabaseHandles {
                 *h,
                 object(
                     doc.metadata.codepage,
+                    modern,
                     0x39,
                     *h,
                     self.controls[3],
@@ -454,7 +491,11 @@ impl DatabaseHandles {
                             w.write_bd(0.)?;
                             w.write_bs(0)?;
                         }
-                        w.write_rcs(&[0; 256])
+                        if modern {
+                            Ok(())
+                        } else {
+                            w.write_rcs(&[0; 256])
+                        }
                     },
                 )?,
             ));
@@ -539,12 +580,18 @@ impl DatabaseHandles {
                 (4, contents.last().copied().unwrap_or(0)),
                 (3, end),
             ];
+            if modern {
+                refs = vec![(5, 0), (3, begin)];
+                refs.extend(contents.iter().map(|h| (3, *h)));
+                refs.push((3, end));
+            }
             refs.extend(inserts.iter().map(|h| (4, *h)));
             refs.push((5, layout));
             objects.push((
                 h,
                 object(
                     doc.metadata.codepage,
+                    modern,
                     0x31,
                     h,
                     self.controls[0],
@@ -556,6 +603,9 @@ impl DatabaseHandles {
                         for _ in 0..3 {
                             w.write_b(0)?;
                         } // xref, overlay, unloaded
+                        if modern {
+                            w.write_bl(contents.len() as u32)?;
+                        }
                         w.write_3bd(base.0, base.1, base.2)?;
                         w.write_tv("")?;
                         for _ in &inserts {
@@ -563,7 +613,13 @@ impl DatabaseHandles {
                         }
                         w.write_rc(0)?;
                         w.write_tv(description)?;
-                        w.write_bl(0)
+                        w.write_bl(0)?;
+                        if modern {
+                            w.write_bs(0)?;
+                            w.write_b(1)?;
+                            w.write_rc(0)?;
+                        }
+                        Ok(())
                     },
                 )?,
             ));
@@ -578,10 +634,15 @@ impl DatabaseHandles {
                     layout,
                     object(
                         doc.metadata.codepage,
-                        502,
+                        modern,
+                        if modern { 0x52 } else { 502 },
                         layout,
                         layouts,
-                        &[(4, h), (4, active_viewport), (5, 0), (5, 0)],
+                        &if modern {
+                            vec![(4, 0), (4, 0), (4, h), (4, active_viewport), (5, 0), (5, 0)]
+                        } else {
+                            vec![(4, h), (4, active_viewport), (5, 0), (5, 0)]
+                        },
                         |w| {
                             if h == self.model {
                                 model_layout_body(w)
@@ -602,6 +663,8 @@ impl DatabaseHandles {
                     linetype_flags: 0,
                     linetype_handle: 0,
                     codepage: doc.metadata.codepage,
+                    modern,
+                    true_color: None,
                     formatting: Default::default(),
                     previous_handle: 0,
                     next_handle: 0,
@@ -633,6 +696,12 @@ fn dimstyle_body(w: &mut BitWriter) -> Result<()> {
         w.write_bd(v)?;
     }
     // DIMTOL, DIMLIM, DIMTIH, DIMTOH, DIMSE1, DIMSE2
+    if w.is_unicode() {
+        w.write_bd(1.)?;
+        w.write_bd(std::f64::consts::FRAC_PI_4)?;
+        w.write_bs(0)?;
+        w.write_cmc(0, None)?;
+    }
     for v in [0, 0, 0, 0, 0, 0] {
         w.write_b(v)?;
     }
@@ -640,7 +709,10 @@ fn dimstyle_body(w: &mut BitWriter) -> Result<()> {
     for v in [1, 8, 0] {
         w.write_bs(v)?;
     }
-    // DIMTXT, DIMCEN, DIMTSZ, DIMALTF, DIMLFAC, DIMTVP, DIMTFAC, DIMGAP, DIMALTRND
+    if w.is_unicode() {
+        w.write_bs(0)?;
+    } // DIMARCSYM
+      // DIMTXT, DIMCEN, DIMTSZ, DIMALTF, DIMLFAC, DIMTVP, DIMTFAC, DIMGAP, DIMALTRND
     for v in [2.5, 2.5, 0., 0.03937007874015748, 1., 0., 1., 0.625, 0.] {
         w.write_bd(v)?;
     }
@@ -652,7 +724,10 @@ fn dimstyle_body(w: &mut BitWriter) -> Result<()> {
     }
     // DIMCLRD, DIMCLRE, DIMCLRT (BYBLOCK), DIMADEC, DIMDEC, DIMTDEC, DIMALTU,
     // DIMALTTD, DIMAUNIT, DIMFRAC, DIMLUNIT, DIMDSEP ('.'), DIMTMOVE, DIMJUST
-    for v in [0, 0, 0, 0, 2, 2, 2, 2, 0, 0, 2, 46, 0, 0] {
+    for _ in 0..3 {
+        w.write_cmc(0, None)?;
+    }
+    for v in [0, 2, 2, 2, 2, 0, 0, 2, 46, 0, 0] {
         w.write_bs(v)?;
     }
     w.write_b(0)?; // DIMSD1
@@ -663,6 +738,14 @@ fn dimstyle_body(w: &mut BitWriter) -> Result<()> {
     }
     w.write_b(0)?; // DIMUPT
     w.write_bs(3)?; // DIMFIT
+    if w.is_unicode() {
+        w.write_b(0)?;
+        w.write_b(0)?;
+        w.write_bd(100.)?;
+        w.write_tv("")?;
+        w.write_bd(100.)?;
+        w.write_tv("")?;
+    }
     w.write_bs((-2i16) as u16)?; // DIMLWD BYBLOCK
     w.write_bs((-2i16) as u16)?; // DIMLWE BYBLOCK
     w.write_b(0) // unknown (70 bit 0)
@@ -685,7 +768,9 @@ fn model_layout_body(w: &mut BitWriter) -> Result<()> {
     for _ in 0..4 {
         w.write_bd(0.)?;
     }
-    w.write_tv("")?;
+    if !w.is_unicode() {
+        w.write_tv("")?;
+    }
     w.write_bd(1.)?;
     w.write_bd(1.)?;
     w.write_tv("")?;
@@ -693,6 +778,11 @@ fn model_layout_body(w: &mut BitWriter) -> Result<()> {
     w.write_bd(1.)?;
     w.write_bd(0.)?;
     w.write_bd(0.)?;
+    if w.is_unicode() {
+        for v in [0, 2, 300] {
+            w.write_bs(v)?;
+        }
+    }
     w.write_tv("Model")?;
     w.write_bl(0)?;
     w.write_bs(1)?;
@@ -706,7 +796,11 @@ fn model_layout_body(w: &mut BitWriter) -> Result<()> {
     w.write_bd(0.)?;
     w.write_bs(0)?;
     w.write_3bd(0., 0., 0.)?;
-    w.write_3bd(0., 0., 0.)
+    w.write_3bd(0., 0., 0.)?;
+    if w.is_unicode() {
+        w.write_bl(0)?;
+    }
+    Ok(())
 }
 
 /// The paper-space LAYOUT (ODA 20.4.84, R2000 column): PLOTSETTINGS data from
@@ -738,7 +832,9 @@ fn paper_layout_body(w: &mut BitWriter, layout: &LayoutSettings, has_entities: b
     for v in [wx0, wy0, wx1, wy1] {
         w.write_bd(v)?;
     }
-    w.write_tv(&layout.plot_view_name)?; // R13-R2000 only
+    if !w.is_unicode() {
+        w.write_tv(&layout.plot_view_name)?;
+    }
     w.write_bd(layout.scale_numerator)?;
     w.write_bd(layout.scale_denominator)?;
     w.write_tv(&layout.style_sheet)?;
@@ -746,6 +842,11 @@ fn paper_layout_body(w: &mut BitWriter, layout: &LayoutSettings, has_entities: b
     w.write_bd(layout.scale_factor())?;
     w.write_bd(layout.paper_image_origin.0)?;
     w.write_bd(layout.paper_image_origin.1)?;
+    if w.is_unicode() {
+        for v in [0, 2, 300] {
+            w.write_bs(v)?;
+        }
+    }
     w.write_tv(&layout.name)?;
     w.write_bl(1)?; // tab order
     w.write_bs(1)?; // PSLTSCALE
@@ -761,23 +862,32 @@ fn paper_layout_body(w: &mut BitWriter, layout: &LayoutSettings, has_entities: b
     w.write_bs(0)?; // orthographic view type
     if has_entities {
         w.write_3bd(x0, y0, 0.)?;
-        w.write_3bd(x1, y1, 0.)
+        w.write_3bd(x1, y1, 0.)?;
     } else {
         w.write_3bd(0., 0., 0.)?;
-        w.write_3bd(0., 0., 0.)
+        w.write_3bd(0., 0., 0.)?;
     }
+    if w.is_unicode() {
+        w.write_bl(0)?;
+    }
+    Ok(())
 }
 
 fn table_name(w: &mut BitWriter, name: &str) -> Result<()> {
     w.write_tv(name)?;
-    w.write_b(0)?;
-    w.write_bs(0)?;
-    w.write_b(0)
+    if w.is_unicode() {
+        w.write_bs(0)
+    } else {
+        w.write_b(0)?;
+        w.write_bs(0)?;
+        w.write_b(0)
+    }
 }
 
 /// Common non-entity record, with an absolute handle and explicit handle stream.
 fn object<F>(
     codepage: u16,
+    modern: bool,
     typ: u16,
     handle: u64,
     owner: u64,
@@ -787,6 +897,9 @@ fn object<F>(
 where
     F: FnOnce(&mut BitWriter) -> Result<()>,
 {
+    if modern {
+        return crate::writer::r2018::streams::object(typ, handle, owner, refs, body);
+    }
     let mut w = BitWriter::with_codepage(codepage);
     w.write_bs(typ)?;
     let size_pos = w.tell_bits() as u32;

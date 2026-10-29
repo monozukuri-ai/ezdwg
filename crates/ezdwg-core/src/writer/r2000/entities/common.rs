@@ -16,6 +16,8 @@ pub struct CommonEntityEncodeInput {
     pub linetype_flags: u8,
     pub linetype_handle: u64,
     pub codepage: u16,
+    pub modern: bool,
+    pub true_color: Option<u32>,
     pub formatting: crate::writer::ir::EntityFormatting,
     pub previous_handle: u64,
     pub next_handle: u64,
@@ -43,6 +45,54 @@ where
     F: FnOnce(&mut BitWriter) -> Result<()>,
 {
     validate_common_input(common)?;
+
+    if common.modern {
+        let mut data = BitWriter::with_unicode();
+        data.write_ot_r2010(type_code)?;
+        data.write_h(0, common.handle)?;
+        data.write_bs(0)?;
+        data.write_b(0)?; // no proxy graphics
+        data.write_bb(common.entity_mode)?;
+        data.write_bl(0)?;
+        data.write_b(1)?; // xdictionary missing
+        data.write_b(0)?; // no DS binary data
+        data.write_bs(if common.true_color.is_some() {
+            0x8000
+        } else {
+            common.color_index
+        })?;
+        if let Some(rgb) = common.true_color {
+            data.write_bl(0xc200_0000 | rgb)?;
+        }
+        data.write_bd(common.formatting.linetype_scale)?;
+        data.write_bb(common.linetype_flags)?;
+        data.write_bb(0)?; // material BYLAYER
+        data.write_rc(0)?; // shadow flags
+        data.write_bb(0)?; // plot style BYLAYER
+        for _ in 0..3 {
+            data.write_b(0)?;
+        } // visual styles absent
+        data.write_bs(u16::from(common.formatting.invisible))?;
+        data.write_rc(crate::writer::validation::lineweight_index(
+            common.formatting.lineweight,
+        )?)?;
+        write_body(&mut data)?;
+        let mut handles = BitWriter::new();
+        if common.entity_mode == 0 {
+            handles.write_h(4, common.owner_handle)?;
+        }
+        handles.write_h(5, common.layer_handle)?;
+        if common.linetype_flags == 3 {
+            handles.write_h(5, common.linetype_handle)?;
+        }
+        if matches!(type_code, 1 | 2 | 3 | 0x2c) {
+            handles.write_h(5, common.style_handle)?;
+        }
+        for &(code, h) in extra_handles {
+            handles.write_h(code, h)?;
+        }
+        return crate::writer::r2018::streams::finish(data, &handles);
+    }
 
     let mut type_prefix = BitWriter::new();
     type_prefix.write_bs(type_code)?;

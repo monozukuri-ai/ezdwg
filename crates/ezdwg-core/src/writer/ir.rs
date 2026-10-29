@@ -296,6 +296,7 @@ impl Default for WriterMetadata {
 pub struct LayerDef {
     pub name: String,
     pub color_index: u16,
+    pub true_color: Option<u32>,
     pub linetype: String,
     pub lineweight: i16,
     pub frozen: bool,
@@ -310,6 +311,7 @@ impl Default for LayerDef {
         Self {
             name: "0".to_string(),
             color_index: 7,
+            true_color: None,
             linetype: "Continuous".into(),
             lineweight: -3,
             frozen: false,

@@ -4,6 +4,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(legacy_text_replace_unrepresentable, module)?)?;
     module.add_function(wrap_pyfunction!(clear_decode_cache, module)?)?;
     module.add_function(wrap_pyfunction!(write_ac1015_dwg, module)?)?;
+    module.add_function(wrap_pyfunction!(write_dwg, module)?)?;
     module.add_function(wrap_pyfunction!(decode_write_geometry, module)?)?;
     module.add_function(wrap_pyfunction!(decode_mtext_write_properties, module)?)?;
     module.add_function(wrap_pyfunction!(decode_write_tables, module)?)?;

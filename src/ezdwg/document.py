@@ -204,7 +204,7 @@ class Document:
         if self.decode_version is None:
             object.__setattr__(self, "decode_version", self.version)
 
-    def edit(self, *, strict: bool = True) -> "Drawing":
+    def edit(self, *, strict: bool = True, version: str = "AC1015") -> "Drawing":
         """Copy supported model-space and block data into an editable drawing.
 
         Losses reject the copy by default. ``strict=False`` retains diagnostics
@@ -212,7 +212,7 @@ class Document:
         """
         from .drawing import Drawing
 
-        return Drawing.from_document(self, strict=strict)
+        return Drawing.from_document(self, strict=strict, version=version)
 
     def modelspace(self) -> "Layout":
         """Entities that live in model space.
@@ -4311,6 +4311,12 @@ def _attach_entity_color(
     common_layer = getattr(entity_style_map, "common_layers", {}).get(handle)
     if common_layer is not None:
         layer_handle = common_layer
+    # ENC stores the 0xC2 method byte along with RGB. The editable API uses
+    # 24-bit colors, as do layer colors; leave the raw decode API unchanged.
+    if isinstance(true_color, int) and true_color >> 24 == 0xC2:
+        true_color &= 0xFFFFFF
+    if isinstance(resolved_true_color, int) and resolved_true_color >> 24 == 0xC2:
+        resolved_true_color &= 0xFFFFFF
     if index in (None, 0, 256, 257) and true_color is None and layer_handle is not None:
         layer_style = None
         if layer_color_overrides is not None:

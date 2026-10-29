@@ -4,6 +4,7 @@ pub mod handle_allocator;
 pub mod ir;
 pub mod object_graph;
 pub mod r2000;
+pub mod r2018;
 pub mod validation;
 
 pub use config::WriterConfig;

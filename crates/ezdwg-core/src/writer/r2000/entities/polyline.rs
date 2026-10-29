@@ -74,6 +74,8 @@ mod tests {
             linetype_flags: 0,
             linetype_handle: 0,
             codepage: 30,
+            modern: false,
+            true_color: None,
             formatting: Default::default(),
             previous_handle: 90,
             next_handle: 110,

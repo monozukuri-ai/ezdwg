@@ -91,6 +91,96 @@ pub fn write_ac1015_dwg(
     viewports: Option<Vec<Bound<'_, PyDict>>>,
     layout: Option<Bound<'_, PyDict>>,
 ) -> PyResult<()> {
+    write_dwg(
+        output_path,
+        lines,
+        arcs,
+        circles,
+        lwpolylines,
+        texts,
+        mtexts,
+        points,
+        rays,
+        xlines,
+        entity_attributes,
+        layers,
+        linetypes,
+        metadata,
+        text_styles,
+        blocks,
+        inserts,
+        attdefs,
+        attribs,
+        entity_owners,
+        ellipses,
+        polylines2d,
+        polylines3d,
+        solids,
+        traces,
+        faces3d,
+        splines,
+        hatches,
+        dimensions,
+        images,
+        image_defs,
+        viewports,
+        layout,
+        "AC1015",
+    )
+}
+
+#[pyfunction(signature = (
+    output_path,
+    lines,
+    arcs,
+    circles,
+    lwpolylines,
+    texts,
+    mtexts,
+    points=None,
+    rays=None,
+    xlines=None,
+    *, entity_attributes=None, layers=None, linetypes=None, metadata=None, text_styles=None,
+    blocks=None, inserts=None, attdefs=None, attribs=None, entity_owners=None, ellipses=None,
+    polylines2d=None, polylines3d=None, solids=None, traces=None, faces3d=None, splines=None,
+    hatches=None, dimensions=None, images=None, image_defs=None, viewports=None, layout=None, version="AC1015"
+))]
+pub fn write_dwg(
+    output_path: &str,
+    lines: Vec<LineEntityRow>,
+    arcs: Vec<ArcEntityRow>,
+    circles: Vec<CircleEntityRow>,
+    lwpolylines: Vec<LwPolylineEntityRow>,
+    texts: Vec<TextWriteRow>,
+    mtexts: Vec<MTextWriteRow>,
+    points: Option<Vec<PointWriteRow>>,
+    rays: Option<Vec<RayEntityRow>>,
+    xlines: Option<Vec<XLineEntityRow>>,
+    entity_attributes: Option<HashMap<u64, Bound<'_, PyDict>>>,
+    layers: Option<Vec<Bound<'_, PyDict>>>,
+    linetypes: Option<Vec<Bound<'_, PyDict>>>,
+    metadata: Option<Bound<'_, PyDict>>,
+    text_styles: Option<Vec<Bound<'_, PyDict>>>,
+    blocks: Option<Vec<Bound<'_, PyDict>>>,
+    inserts: Option<Vec<Bound<'_, PyDict>>>,
+    attdefs: Option<Vec<Bound<'_, PyDict>>>,
+    attribs: Option<Vec<Bound<'_, PyDict>>>,
+    entity_owners: Option<HashMap<u64, Bound<'_, PyAny>>>,
+    ellipses: Option<Vec<EllipseEntityRow>>,
+    polylines2d: Option<Vec<Bound<'_, PyDict>>>,
+    polylines3d: Option<Vec<Bound<'_, PyDict>>>,
+    solids: Option<Vec<SolidEntityRow>>,
+    traces: Option<Vec<TraceEntityRow>>,
+    faces3d: Option<Vec<Face3dEntityRow>>,
+    splines: Option<Vec<Bound<'_, PyDict>>>,
+    hatches: Option<Vec<Bound<'_, PyDict>>>,
+    dimensions: Option<Vec<Bound<'_, PyDict>>>,
+    images: Option<Vec<Bound<'_, PyDict>>>,
+    image_defs: Option<Vec<Bound<'_, PyDict>>>,
+    viewports: Option<Vec<Bound<'_, PyDict>>>,
+    layout: Option<Bound<'_, PyDict>>,
+    version: &str,
+) -> PyResult<()> {
     let points = points.unwrap_or_default();
     let rays = rays.unwrap_or_default();
     let xlines = xlines.unwrap_or_default();
@@ -338,6 +428,7 @@ pub fn write_ac1015_dwg(
                     &[
                         "name",
                         "color_index",
+                        "true_color",
                         "linetype",
                         "lineweight",
                         "frozen",
@@ -350,6 +441,7 @@ pub fn write_ac1015_dwg(
                 Ok(writer::LayerDef {
                     name: write_value(d, "name", "0".to_owned())?,
                     color_index: write_value(d, "color_index", 7)?,
+                    true_color: write_value(d, "true_color", None)?,
                     linetype: write_value(d, "linetype", "Continuous".to_owned())?,
                     lineweight: write_value(d, "lineweight", -3)?,
                     frozen: write_value(d, "frozen", false)?,
@@ -423,8 +515,12 @@ pub fn write_ac1015_dwg(
         m.auprec = write_value(&d, "auprec", m.auprec)?;
         m.ltscale = write_value(&d, "ltscale", m.ltscale)?;
     }
-    let bytes =
-        writer::r2000::write_document(&doc, &writer::WriterConfig::default()).map_err(to_py_err)?;
+    let encode = match version {
+        "AC1015" => writer::r2000::write_document,
+        "AC1032" => { doc.version = DwgVersion::R2018; writer::r2018::write_document },
+        _ => return Err(PyValueError::new_err(format!("unsupported DWG write version: {version}"))),
+    };
+    let bytes = encode(&doc, &writer::WriterConfig::default()).map_err(to_py_err)?;
 
     let out_path = Path::new(output_path);
     crate::atomic_write::atomic_write(out_path, &bytes)

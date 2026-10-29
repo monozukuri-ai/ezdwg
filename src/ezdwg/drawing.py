@@ -1,4 +1,4 @@
-"""Editable, in-memory drawings (model space, paper space, blocks) for the native AC1015 writer."""
+"""Editable drawings for the native AC1015 and AC1032 writers."""
 
 from __future__ import annotations
 
@@ -241,7 +241,7 @@ class Drawing:
     """
 
     def __init__(self, version: str = "AC1015") -> None:
-        if version != "AC1015":
+        if version not in {"AC1015", "AC1032"}:
             raise ValueError(f"unsupported DWG write version: {version}")
         self.version = version
         self.source_path: str | None = None
@@ -303,11 +303,13 @@ class Drawing:
         return name
 
     @classmethod
-    def from_document(cls, doc: Document, *, strict: bool = True) -> Drawing:
+    def from_document(
+        cls, doc: Document, *, strict: bool = True, version: str = "AC1015"
+    ) -> Drawing:
         """Snapshot model space, block definitions and their attached attributes."""
         from ._drawing_import import import_drawing
 
-        return import_drawing(doc, strict=strict)
+        return import_drawing(doc, strict=strict, version=version)
 
     @property
     def diagnostics(self) -> tuple[WriteDiagnostic, ...]:
@@ -453,7 +455,8 @@ class Drawing:
     ) -> WriteResult:
         return self.save(output_path, strict=strict)
 
-    def _prepare_write(self, entities: list[Entity], block_rows=None):
+    def _prepare_write(self, entities: list[Entity], block_rows=None, *, version=None):
+        version = self.version if version is None else version
         selected = {e.handle for e in entities}
         diagnostics = [
             d
@@ -499,8 +502,10 @@ class Drawing:
                 k: v for k, v in data.items() if k in common_keys and v is not None
             }
             # AC1015 has no true colour: round it to the nearest ACI and report.
-            true_color = attrs[entity.handle].pop("true_color", None)
-            if true_color is not None:
+            true_color = attrs[entity.handle].get("true_color")
+            if version == "AC1015":
+                attrs[entity.handle].pop("true_color", None)
+            if true_color is not None and version == "AC1015":
                 index = nearest_aci(true_color)
                 attrs[entity.handle]["color_index"] = index
                 diagnostics.append(
@@ -521,7 +526,11 @@ class Drawing:
                 if "name" in props:
                     raise ValueError("table name belongs in the dictionary key")
                 row = {"name": name, **deepcopy(props)}
-                if kind == "LAYER" and row.get("true_color") is not None:
+                if (
+                    kind == "LAYER"
+                    and row.get("true_color") is not None
+                    and version == "AC1015"
+                ):
                     index = nearest_aci(row.pop("true_color"))
                     row["color_index"] = index
                     diagnostics.append(
@@ -534,7 +543,7 @@ class Drawing:
                             "approximated",
                         )
                     )
-                elif kind == "LAYER":
+                elif kind == "LAYER" and row.get("true_color") is None:
                     row.pop("true_color", None)
                 result[name] = row
             return result
@@ -554,6 +563,7 @@ class Drawing:
             block_rows,
             image_rows,
             layout_row(self.layout),
+            version=version,
         )
 
 

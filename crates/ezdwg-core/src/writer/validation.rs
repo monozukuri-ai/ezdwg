@@ -135,7 +135,21 @@ pub fn lineweight_index(value: i16) -> Result<u8> {
             }),
     }
 }
-fn name(value: &str, codepage: u16) -> Result<()> {
+#[derive(Clone, Copy)]
+struct TextEncoding {
+    codepage: u16,
+    unicode: bool,
+}
+impl TextEncoding {
+    fn writer(self) -> BitWriter {
+        if self.unicode {
+            BitWriter::with_unicode()
+        } else {
+            BitWriter::with_codepage(self.codepage)
+        }
+    }
+}
+fn name(value: &str, encoding: TextEncoding) -> Result<()> {
     require(
         !value.is_empty()
             && value.chars().count() <= 255
@@ -144,11 +158,25 @@ fn name(value: &str, codepage: u16) -> Result<()> {
                 .any(|c| c.is_control() || "<>/\\\":;?*|,=`".contains(c)),
         "invalid table name",
     )?;
-    BitWriter::with_codepage(codepage).write_tv(value)
+    encoding.writer().write_tv(value)
 }
 
 pub fn validate_document(doc: &WriterDocument) -> Result<()> {
     let m = &doc.metadata;
+    let encoding = TextEncoding {
+        codepage: m.codepage,
+        unicode: matches!(doc.version, crate::dwg::version::DwgVersion::R2018),
+    };
+    if encoding.unicode {
+        require(
+            doc.paperspace.is_empty(),
+            "AC1032 writer currently supports model space and blocks only",
+        )?;
+        require(
+            doc.image_defs.is_empty(),
+            "AC1032 writer does not support image definitions",
+        )?;
+    }
     require(
         m.insunits <= 20
             && (1..=5).contains(&m.lunits)
@@ -163,10 +191,10 @@ pub fn validate_document(doc: &WriterDocument) -> Result<()> {
     for p in [m.ext_min, m.ext_max].into_iter().flatten() {
         point(p)?;
     }
-    validate_layout(&doc.layout, m.codepage)?;
+    validate_layout(&doc.layout, encoding)?;
     let mut names = HashSet::new();
     for l in &doc.layers {
-        name(&l.name, m.codepage)?;
+        name(&l.name, encoding)?;
         require(names.insert(l.name.to_uppercase()), "duplicate layer name")?;
         require(
             (1..=255).contains(&l.color_index),
@@ -180,10 +208,18 @@ pub fn validate_document(doc: &WriterDocument) -> Result<()> {
             "layer linetype must not inherit",
         )?;
         lineweight_index(l.lineweight)?;
+        require(
+            encoding.unicode || l.true_color.is_none(),
+            "AC1015 cannot preserve layer TrueColor",
+        )?;
+        require(
+            l.true_color.is_none_or(|v| v <= 0xffffff),
+            "layer TrueColor must be 24-bit RGB",
+        )?;
     }
     names.clear();
     for l in &doc.linetypes {
-        name(&l.name, m.codepage)?;
+        name(&l.name, encoding)?;
         require(
             !matches!(
                 l.name.to_uppercase().as_str(),
@@ -191,28 +227,28 @@ pub fn validate_document(doc: &WriterDocument) -> Result<()> {
             ) && names.insert(l.name.to_uppercase()),
             "duplicate/reserved linetype name",
         )?;
-        BitWriter::with_codepage(m.codepage).write_tv(&l.description)?;
+        encoding.writer().write_tv(&l.description)?;
         require(l.dashes.len() <= 12, "linetype supports at most 12 dashes")?;
         finite(&l.dashes)?;
         finite(&[l.dashes.iter().map(|v| v.abs()).sum()])?;
     }
     names.clear();
     for st in &doc.text_styles {
-        name(&st.name, m.codepage)?;
+        name(&st.name, encoding)?;
         require(names.insert(st.name.to_uppercase()), "duplicate text style")?;
         finite(&[st.height, st.width, st.oblique, st.last_height])?;
         require(
             st.height >= 0. && st.width > 0. && st.last_height >= 0. && st.generation & !6 == 0,
             "invalid text style",
         )?;
-        BitWriter::with_codepage(m.codepage).write_tv(&st.font)?;
-        BitWriter::with_codepage(m.codepage).write_tv(&st.bigfont)?;
+        encoding.writer().write_tv(&st.font)?;
+        encoding.writer().write_tv(&st.bigfont)?;
     }
     let mut blocks = HashMap::new();
     for (i, block) in doc.blocks.iter().enumerate() {
         name(
             block.name.strip_prefix('*').unwrap_or(&block.name),
-            m.codepage,
+            encoding,
         )?;
         require(
             !block.name.to_uppercase().starts_with("*MODEL_SPACE")
@@ -224,7 +260,7 @@ pub fn validate_document(doc: &WriterDocument) -> Result<()> {
             "duplicate block name",
         )?;
         point(block.base_point)?;
-        BitWriter::with_codepage(m.codepage).write_tv(&block.description)?;
+        encoding.writer().write_tv(&block.description)?;
     }
     names.clear();
     for def in &doc.image_defs {
@@ -240,7 +276,7 @@ pub fn validate_document(doc: &WriterDocument) -> Result<()> {
             !def.file_path.is_empty(),
             "image definition requires a file path",
         )?;
-        BitWriter::with_codepage(m.codepage).write_tv(&def.file_path)?;
+        encoding.writer().write_tv(&def.file_path)?;
         finite(&[def.size.0, def.size.1, def.pixel_size.0, def.pixel_size.1])?;
         require(
             def.size.0 > 0. && def.size.1 > 0. && def.pixel_size.0 > 0. && def.pixel_size.1 > 0.,
@@ -274,7 +310,7 @@ pub fn validate_document(doc: &WriterDocument) -> Result<()> {
                 !matches!(e, WriterEntity::Attrib(_)),
                 "ATTRIB must belong to INSERT",
             )?;
-            validate_entity(e, m.codepage)?;
+            validate_entity_encoded(e, encoding)?;
             if let WriterEntity::Viewport(viewport) = e {
                 require(
                     layout_index == WriterDocument::PAPER_LAYOUT,
@@ -321,7 +357,7 @@ pub fn validate_document(doc: &WriterDocument) -> Result<()> {
                 }
                 let mut tags = HashSet::new();
                 for attr in &insert.attributes {
-                    validate_attribute(attr, m.codepage)?;
+                    validate_attribute(attr, encoding)?;
                     require(
                         tags.insert(attr.tag.to_uppercase()),
                         "duplicate INSERT attribute tag",
@@ -352,13 +388,50 @@ pub fn validate_document(doc: &WriterDocument) -> Result<()> {
 }
 
 pub fn validate_entity(e: &WriterEntity, codepage: u16) -> Result<()> {
+    validate_entity_encoded(
+        e,
+        TextEncoding {
+            codepage,
+            unicode: false,
+        },
+    )
+}
+
+fn validate_entity_encoded(e: &WriterEntity, encoding: TextEncoding) -> Result<()> {
     let c = e.common();
     let f = c.formatting;
     require(
         c.color_index.unwrap_or(256) <= 256,
         "entity ACI must be in 0..256",
     )?;
-    require(c.true_color.is_none(), "AC1015 cannot preserve TrueColor")?;
+    require(
+        encoding.unicode || c.true_color.is_none(),
+        "AC1015 cannot preserve TrueColor",
+    )?;
+    require(
+        c.true_color.is_none_or(|v| v <= 0xffffff),
+        "TrueColor must be 24-bit RGB",
+    )?;
+    if encoding.unicode {
+        require(
+            matches!(
+                e,
+                WriterEntity::Line(_)
+                    | WriterEntity::Point(_)
+                    | WriterEntity::Arc(_)
+                    | WriterEntity::Circle(_)
+                    | WriterEntity::Ray(_)
+                    | WriterEntity::XLine(_)
+                    | WriterEntity::Ellipse(_)
+                    | WriterEntity::LwPolyline(_)
+                    | WriterEntity::Text(_)
+                    | WriterEntity::MText(_)
+                    | WriterEntity::Insert(_)
+                    | WriterEntity::Attdef(_)
+            ),
+            "entity is outside the AC1032 writer scope",
+        )?;
+    }
     lineweight_index(f.lineweight)?;
     finite(&[
         f.linetype_scale,
@@ -606,7 +679,7 @@ pub fn validate_entity(e: &WriterEntity, codepage: u16) -> Result<()> {
                 f.halign < 3 || f.valign == 0,
                 "aligned/middle/fit text requires baseline vertical alignment",
             )?;
-            BitWriter::with_codepage(codepage).write_tv(&v.text)?;
+            encoding.writer().write_tv(&v.text)?;
         }
         WriterEntity::Insert(v) => {
             point(v.insert)?;
@@ -617,11 +690,11 @@ pub fn validate_entity(e: &WriterEntity, codepage: u16) -> Result<()> {
                 "INSERT scale must be nonzero",
             )?;
         }
-        WriterEntity::Attdef(v) | WriterEntity::Attrib(v) => validate_attribute(v, codepage)?,
+        WriterEntity::Attdef(v) | WriterEntity::Attrib(v) => validate_attribute(v, encoding)?,
         WriterEntity::Hatch(v) => validate_hatch(v)?,
         WriterEntity::Dimension(v) => validate_dimension(v)?,
         WriterEntity::Image(v) => validate_image(v)?,
-        WriterEntity::Viewport(v) => validate_viewport(v, codepage)?,
+        WriterEntity::Viewport(v) => validate_viewport(v, encoding)?,
         WriterEntity::MText(v) => {
             point(v.insert)?;
             direction(v.text_direction)?;
@@ -639,14 +712,14 @@ pub fn validate_entity(e: &WriterEntity, codepage: u16) -> Result<()> {
                     && (0.25..=4.).contains(&f.line_spacing_factor),
                 "invalid MTEXT line spacing",
             )?;
-            BitWriter::with_codepage(codepage).write_tv(&v.text)?;
+            encoding.writer().write_tv(&v.text)?;
         }
     }
     Ok(())
 }
 
-fn validate_layout(layout: &LayoutSettings, codepage: u16) -> Result<()> {
-    name(&layout.name, codepage)?;
+fn validate_layout(layout: &LayoutSettings, encoding: TextEncoding) -> Result<()> {
+    name(&layout.name, encoding)?;
     require(
         !layout.name.eq_ignore_ascii_case("Model"),
         "layout name Model is reserved",
@@ -702,12 +775,12 @@ fn validate_layout(layout: &LayoutSettings, codepage: u16) -> Result<()> {
         &layout.plot_view_name,
         &layout.style_sheet,
     ] {
-        BitWriter::with_codepage(codepage).write_tv(text)?;
+        encoding.writer().write_tv(text)?;
     }
     Ok(())
 }
 
-fn validate_viewport(v: &ViewportEntity, codepage: u16) -> Result<()> {
+fn validate_viewport(v: &ViewportEntity, encoding: TextEncoding) -> Result<()> {
     point(v.center)?;
     point(v.view_target)?;
     direction(v.view_direction)?;
@@ -738,12 +811,15 @@ fn validate_viewport(v: &ViewportEntity, codepage: u16) -> Result<()> {
         "VIEWPORT width and height must be positive",
     )?;
     require(v.view_height > 0., "VIEWPORT view height must be positive")?;
-    require(v.lens_length >= 0., "VIEWPORT lens length must not be negative")?;
+    require(
+        v.lens_length >= 0.,
+        "VIEWPORT lens length must not be negative",
+    )?;
     require(
         v.render_mode <= 6 && v.ucs_ortho_view_type <= 6,
         "invalid VIEWPORT render mode or UCS view type",
     )?;
-    BitWriter::with_codepage(codepage).write_tv(&v.style_sheet)
+    encoding.writer().write_tv(&v.style_sheet)
 }
 
 fn validate_image(i: &ImageEntity) -> Result<()> {
@@ -1073,15 +1149,15 @@ fn validate_hatch(h: &HatchEntity) -> Result<()> {
     Ok(())
 }
 
-fn validate_attribute(attr: &AttributeEntity, codepage: u16) -> Result<()> {
-    validate_entity(&WriterEntity::Text(attr.text.clone()), codepage)?;
+fn validate_attribute(attr: &AttributeEntity, encoding: TextEncoding) -> Result<()> {
+    validate_entity_encoded(&WriterEntity::Text(attr.text.clone()), encoding)?;
     require(
         !attr.tag.is_empty() && !attr.tag.chars().any(|c| c.is_whitespace() || c == '!'),
         "invalid attribute tag",
     )?;
     require(attr.flags & !15 == 0, "unsupported attribute flags")?;
-    BitWriter::with_codepage(codepage).write_tv(&attr.tag)?;
-    BitWriter::with_codepage(codepage).write_tv(&attr.prompt)
+    encoding.writer().write_tv(&attr.tag)?;
+    encoding.writer().write_tv(&attr.prompt)
 }
 
 #[cfg(test)]

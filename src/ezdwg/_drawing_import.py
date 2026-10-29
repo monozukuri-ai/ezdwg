@@ -16,11 +16,13 @@ from ._dimension import kind_of
 from .entity import Entity
 
 
-def import_drawing(doc, *, strict=True, layout=None, types=None, all_blocks=True):
+def import_drawing(
+    doc, *, strict=True, layout=None, types=None, all_blocks=True, version="AC1015"
+):
     from .convert import _resolve_dwg_export_entities
     from .drawing import _COMMON, _FIELDS, Drawing, EditableLayout, _normalize
 
-    drawing = Drawing()
+    drawing = Drawing(version)
     drawing.source_path = fspath(doc.path)
     source = _resolve_dwg_export_entities(layout or doc.modelspace(), types)
     all_entities = {
@@ -181,7 +183,7 @@ def import_drawing(doc, *, strict=True, layout=None, types=None, all_blocks=True
     )
     # Paper space (layouts, viewports) of the source is not imported.
     prepared, attrs, layers, ltypes, styles, header, losses, image_defs, _layout = (
-        prepare_attributes(doc, list(selected.values()))
+        prepare_attributes(doc, list(selected.values()), version=version)
     )
     for row in image_defs:
         drawing.image_defs[row["name"]] = deepcopy(

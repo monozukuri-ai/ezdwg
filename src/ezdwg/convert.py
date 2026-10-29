@@ -242,7 +242,7 @@ def to_dwg(
     version: str = "AC1015",
     strict: bool = False,
 ) -> WriteResult:
-    if version != "AC1015":
+    if version not in {"AC1015", "AC1032"}:
         raise ValueError(f"unsupported DWG write version: {version}")
 
     from .drawing import Drawing, EditableLayout
@@ -259,7 +259,7 @@ def to_dwg(
             selected,
             include_all_blocks=isinstance(source, Drawing) and types is None,
         )
-        prepared = layout.doc._prepare_write(entities, block_rows)
+        prepared = layout.doc._prepare_write(entities, block_rows, version=version)
     else:
         if isinstance(source, Layout):
             source_path, layout = source.doc.path, source
@@ -273,14 +273,15 @@ def to_dwg(
             from ._drawing_import import import_drawing
 
             drawing = import_drawing(
-                layout.doc, strict=False, layout=layout, types=types, all_blocks=False
+                layout.doc, strict=False, layout=layout, types=types,
+                all_blocks=False, version=version,
             )
             entities, block_rows, entity_owners = drawing._write_selection(
                 list(drawing.modelspace())
             )
-            prepared = drawing._prepare_write(entities, block_rows)
+            prepared = drawing._prepare_write(entities, block_rows, version=version)
         else:
-            prepared = prepare_attributes(layout.doc, entities)
+            prepared = prepare_attributes(layout.doc, entities, version=version)
     (
         source_entities,
         attributes,
@@ -366,6 +367,12 @@ def to_dwg(
         if e.dxftype == "INSERT" and geometry_error(e) is not None
     }
     insert_rows, attdef_rows, attrib_rows = [], [], []
+    if version == "AC1032":
+        supported = {
+            "LINE", "POINT", "RAY", "XLINE", "ARC", "CIRCLE", "ELLIPSE",
+            "LWPOLYLINE", "TEXT", "MTEXT", "INSERT", "ATTDEF", "ATTRIB",
+        }
+        builders = {kind: entry for kind, entry in builders.items() if kind in supported}
     accepted_handles = set()
     for entity in source_entities:
         total += 1
@@ -453,7 +460,7 @@ def to_dwg(
 
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    raw.write_ac1015_dwg(
+    raw.write_dwg(
         str(out_path),
         line_rows,
         arc_rows,
@@ -495,6 +502,7 @@ def to_dwg(
         ],
         viewports=viewport_rows,
         layout=layout_row,
+        version=version,
     )
 
     # Python query caches are path-based; an atomic same-path replacement must

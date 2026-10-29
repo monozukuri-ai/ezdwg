@@ -2,7 +2,7 @@
 [![PyPI version](https://badge.fury.io/py/ezdwg.svg)](https://badge.fury.io/py/ezdwg)
 
 DWG (R13-R2018 / AC1012-AC1032) reader with a Python API inspired by [ezdxf](https://github.com/mozman/ezdxf).
-This project is a **DWG read-focused parser** with growing high-level entity coverage while providing a native **AC1015 writer** for basic entities and nested blocks.
+This project is a **DWG read-focused parser** with growing high-level entity coverage and native **AC1015 / AC1032 writers** for basic entities and nested blocks.
 
 Documentation: https://monozukuri-ai.github.io/ezdwg/
 
@@ -176,6 +176,21 @@ preserved. Referenced blocks and attached attributes are kept as a graph. Comple
 source document metadata remains outside the scope.
 See [native writer scope and external checks](docs/guide/convert.md#native-dwg-writer-ac1015).
 
+Use `AC1032` to preserve RGB colors and mixed-language Unicode text:
+
+```python
+drawing = ezdwg.new("AC1032")
+drawing.layers["図面_도면"] = {"true_color": 0x73B9FF}
+drawing.modelspace().add_text(
+    "日本語 한국어 العربية 😀", (0, 0), height=2,
+    layer="図面_도면", true_color=0x123456,
+)
+drawing.save("unicode.dwg")
+```
+
+AC1032 supports basic model-space entities and static blocks; see the
+[AC1032 writer scope](docs/guide/convert.md#native-dwg-writer-ac1032).
+
 ## Create and Edit DWG
 
 ```python
@@ -250,7 +265,7 @@ raw.decode_line_entities("path/to/file.dwg")
 ```
 
 ## Limitations
-- Native DWG write currently targets **AC1015** only
+- Native DWG write targets **AC1015** (default) and **AC1032** (RGB and Unicode; a smaller entity subset)
 - Native DWG write supports a subset of entities: **LINE/RAY/XLINE/POINT/ARC/CIRCLE/ELLIPSE/SPLINE/SOLID/TRACE/3DFACE/LWPOLYLINE/POLYLINE_2D/POLYLINE_3D/TEXT/MTEXT/INSERT/ATTDEF/ATTRIB/HATCH/DIMENSION/IMAGE/VIEWPORT**, including nested block definitions, rendered dimension blocks, raster image definitions and one paper-space layout (`Drawing.paperspace()`, `Drawing.set_paper()`); true colours are rounded to the nearest ACI
 - Paper space of an existing drawing is not imported by `Document.edit()` / `to_dwg`; only new paper-space content is written
 - High-level API supports R13 (AC1012, experimental), R14 (AC1014, experimental), R2000 (AC1015), R2004 (AC1018), R2007 (AC1021), R2010 (AC1024), R2013 (AC1027), and R2018 (AC1032)

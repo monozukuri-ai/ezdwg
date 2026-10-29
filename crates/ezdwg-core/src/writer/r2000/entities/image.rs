@@ -143,6 +143,8 @@ mod tests {
             linetype_flags: 0,
             linetype_handle: 0,
             codepage: 30,
+            modern: false,
+            true_color: None,
             formatting: EntityFormatting::default(),
             previous_handle: 0,
             next_handle: 0,

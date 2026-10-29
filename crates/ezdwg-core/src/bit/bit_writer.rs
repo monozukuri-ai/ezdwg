@@ -9,6 +9,8 @@ pub struct BitWriter {
     bit_pos: u8,
     max_bit_pos: u64,
     codepage: Option<u16>,
+    strings: Option<Box<BitWriter>>,
+    handles: Option<Box<BitWriter>>,
 }
 
 impl BitWriter {
@@ -30,7 +32,81 @@ impl BitWriter {
             bit_pos: 0,
             max_bit_pos: 0,
             codepage: None,
+            strings: None,
+            handles: None,
         }
+    }
+
+    /// R2007+ text is UTF-16 in a separate, bit-aligned string stream.
+    pub fn with_unicode() -> Self {
+        Self {
+            strings: Some(Box::new(Self::new())),
+            ..Self::default()
+        }
+    }
+
+    pub fn is_unicode(&self) -> bool {
+        self.strings.is_some()
+    }
+
+    pub fn with_unicode_handles() -> Self {
+        Self {
+            handles: Some(Box::new(Self::new())),
+            ..Self::with_unicode()
+        }
+    }
+
+    pub fn finish_handles(&mut self) -> Result<()> {
+        if let Some(h) = self.handles.take() {
+            self.write_bits_from_bytes(&h.to_bytes(), h.len_bits())?;
+        }
+        Ok(())
+    }
+
+    /// Append the string stream and its backwards-readable size trailer.
+    pub fn finish_strings(&mut self) -> Result<()> {
+        let strings = self.strings.take();
+        if let Some(strings) = strings {
+            let bits = u32::try_from(strings.len_bits()).map_err(|_| {
+                DwgError::new(
+                    ErrorKind::Unsupported,
+                    "Unicode string stream exceeds 4 Gbit",
+                )
+            })?;
+            if bits >= 0x4000_0000 {
+                return Err(DwgError::new(
+                    ErrorKind::Unsupported,
+                    "Unicode string stream exceeds supported trailer size",
+                ));
+            }
+            self.write_bits_from_bytes(&strings.to_bytes(), u64::from(bits))?;
+            if bits != 0 {
+                if bits >= 0x8000 {
+                    self.write_rs(Endian::Little, (bits >> 15) as u16)?;
+                    self.write_rs(Endian::Little, (bits as u16 & 0x7fff) | 0x8000)?;
+                } else {
+                    self.write_rs(Endian::Little, bits as u16)?;
+                }
+            }
+            self.write_b(u8::from(bits != 0))?;
+        }
+        Ok(())
+    }
+
+    /// CMC color for R2004+ table/header records (ENC is used by entities).
+    pub fn write_cmc(&mut self, index: u16, rgb: Option<u32>) -> Result<()> {
+        if !self.is_unicode() {
+            return self.write_bs(index);
+        }
+        self.write_bs(0)?;
+        self.write_bl(rgb.map(|v| 0xc200_0000 | v).unwrap_or_else(|| {
+            if index == 256 {
+                0xc000_0000
+            } else {
+                0xc300_0000 | u32::from(index)
+            }
+        }))?;
+        self.write_rc(0)
     }
 
     pub fn tell_bits(&self) -> u64 {
@@ -292,6 +368,13 @@ impl BitWriter {
     }
 
     pub fn write_h(&mut self, code: u8, value: u64) -> Result<()> {
+        if let Some(handles) = self.handles.as_mut() {
+            return handles.write_h(code, value);
+        }
+        self.write_inline_h(code, value)
+    }
+
+    pub fn write_inline_h(&mut self, code: u8, value: u64) -> Result<()> {
         let counter = if value == 0 {
             0
         } else {
@@ -317,21 +400,45 @@ impl BitWriter {
     }
 
     pub fn write_tv(&mut self, text: &str) -> Result<()> {
+        if let Some(strings) = self.strings.as_mut() {
+            if text.contains('\0') {
+                return Err(DwgError::new(
+                    ErrorKind::Format,
+                    "Unicode text contains NUL",
+                ));
+            }
+            let units: Vec<u16> = text.encode_utf16().collect();
+            let length = u16::try_from(units.len()).map_err(|_| {
+                DwgError::new(
+                    ErrorKind::Unsupported,
+                    "Unicode string exceeds 65535 UTF-16 code units",
+                )
+            })?;
+            strings.write_bs(length)?;
+            for unit in units {
+                strings.write_rs(Endian::Little, unit)?;
+            }
+            return Ok(());
+        }
         let codepage = self.codepage.unwrap_or(30);
         if crate::bit::bit_reader::dwg_codepage_encoding(Some(codepage)).is_none() {
-            return Err(DwgError::new(ErrorKind::Unsupported, "unsupported TV codepage"));
+            return Err(DwgError::new(
+                ErrorKind::Unsupported,
+                "unsupported TV codepage",
+            ));
         }
         if text.contains('\0') {
             return Err(DwgError::new(ErrorKind::Format, "TV text contains NUL"));
         }
         // Shared with the Python preflight; compares the bytes without BOM sniffing so
         // that cp1252 text starting with "ÿþ" (FF FE) is not mistaken for UTF-16.
-        let bytes = crate::bit::legacy_text::encode_legacy_text(codepage, text).ok_or_else(|| {
-            DwgError::new(
-                ErrorKind::Unsupported,
-                format!("text is not representable in DWG codepage {codepage}"),
-            )
-        })?;
+        let bytes =
+            crate::bit::legacy_text::encode_legacy_text(codepage, text).ok_or_else(|| {
+                DwgError::new(
+                    ErrorKind::Unsupported,
+                    format!("text is not representable in DWG codepage {codepage}"),
+                )
+            })?;
         if bytes.len() > u16::MAX as usize {
             return Err(DwgError::new(
                 ErrorKind::Unsupported,
@@ -425,6 +532,34 @@ fn encode_modular_char(value: i64) -> Result<Vec<u8>> {
 mod tests {
     use super::BitWriter;
     use crate::bit::{BitReader, Endian};
+
+    #[test]
+    fn unicode_stream_roundtrips_surrogates_and_extended_size_trailers() {
+        for text in [
+            "日本語 한국어 العربية 😀".to_owned(),
+            "日本語 😀".repeat(1000),
+        ] {
+            let mut w = BitWriter::with_unicode();
+            w.write_b(1).unwrap();
+            w.write_tv(&text).unwrap();
+            assert_eq!(w.tell_bits(), 1); // text does not enter the data stream
+            w.finish_strings().unwrap();
+            let end = w.len_bits() as u32;
+            let data = w.into_bytes();
+            let (mut strings, limit) =
+                crate::entities::common::string_stream_reader(&BitReader::new(&data), end).unwrap();
+            assert_eq!(strings.read_tu().unwrap(), text);
+            assert_eq!(strings.tell_bits(), u64::from(limit));
+        }
+    }
+
+    #[test]
+    fn unicode_text_limits_count_utf16_units() {
+        let mut w = BitWriter::with_unicode();
+        assert!(w.write_tv("nul\0text").is_err());
+        assert!(w.write_tv(&"😀".repeat(32768)).is_err());
+        w.write_tv(&"😀".repeat(32767)).unwrap();
+    }
 
     #[test]
     fn tv_encoding_is_explicit_and_lossless() {

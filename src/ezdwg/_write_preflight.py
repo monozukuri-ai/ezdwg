@@ -1,4 +1,4 @@
-"""AC1015 attribute preparation and loss reporting, independent of DXF export."""
+"""Native DWG attribute preparation and loss reporting, independent of DXF export."""
 
 from __future__ import annotations
 
@@ -298,7 +298,7 @@ def geometry_error(e: Entity) -> str | None:
     return None
 
 
-def prepare_attributes(doc: Any, entities: list[Entity]):
+def prepare_attributes(doc: Any, entities: list[Entity], *, version="AC1015"):
     diagnostics: list[WriteDiagnostic] = []
 
     def report(handle, kind, attr, message, action="defaulted"):
@@ -322,6 +322,20 @@ def prepare_attributes(doc: Any, entities: list[Entity]):
             "source style/linetype tables could not be decoded",
         )
     styles_by_handle = {r["handle"]: r for r in table_rows if r["kind"] == "STYLE"}
+    # The lossless table decoder can resolve a layer's linetype even when the
+    # general layer reader cannot interpret null material/plot-style slots.
+    layer_linetypes = {}
+    if version == "AC1032":
+        try:
+            ltype_names = {
+                r["handle"]: r["name"] for r in table_rows if r["kind"] == "LTYPE"
+            }
+            layer_linetypes = {
+                layer: ltype_names.get(ltype)
+                for layer, ltype in raw.decode_layer_linetypes(path)
+            }
+        except (OSError, ValueError, NotImplementedError):
+            pass
     extended_ltypes = {
         r["name"].upper()
         for r in table_rows
@@ -590,7 +604,11 @@ def prepare_attributes(doc: Any, entities: list[Entity]):
                 layer_rows[layer.name] = {
                     "name": layer.name,
                     "color_index": layer.color if layer.color in range(1, 256) else 7,
-                    "linetype": linetype(layer.linetype, layer.handle, "LAYER"),
+                    "linetype": linetype(
+                        layer.linetype or layer_linetypes.get(layer.handle),
+                        layer.handle,
+                        "LAYER",
+                    ),
                     "lineweight": layer.lineweight
                     if layer.lineweight in LINEWEIGHTS
                     else -3,
@@ -600,7 +618,9 @@ def prepare_attributes(doc: Any, entities: list[Entity]):
                     "locked": layer.locked,
                     "plot": layer.plot,
                 }
-                if layer.true_color is not None:
+                if layer.true_color is not None and version == "AC1032":
+                    layer_rows[layer.name]["true_color"] = layer.true_color
+                elif layer.true_color is not None:
                     index = nearest_aci(layer.true_color)
                     layer_rows[layer.name]["color_index"] = index
                     report(
@@ -646,13 +666,16 @@ def prepare_attributes(doc: Any, entities: list[Entity]):
                     "dropped",
                 )
             else:
-                report(
-                    handle,
-                    e.dxftype,
-                    "true_color",
-                    describe_approximation(d["true_color"], index),
-                    "approximated",
-                )
+                if version == "AC1032":
+                    a["true_color"] = d["true_color"]
+                else:
+                    report(
+                        handle,
+                        e.dxftype,
+                        "true_color",
+                        describe_approximation(d["true_color"], index),
+                        "approximated",
+                    )
         a["color_index"] = index
         for attr in (
             "transparency",
@@ -739,6 +762,7 @@ def prepare_attributes(doc: Any, entities: list[Entity]):
         diagnostics,
         block_rows=None,
         image_rows=image_rows,
+        version=version,
     )
 
 
@@ -887,6 +911,8 @@ def prepare_strings(
     block_rows=None,
     image_rows=None,
     layout_row=None,
+    *,
+    version="AC1015",
 ):
     """Prepare independent copies for legacy text encoding and report losses.
 
@@ -921,10 +947,16 @@ def prepare_strings(
     ]
 
     requested = metadata.get("codepage")
-    if requested is not None and requested not in _CODEPAGE_CODEC:
+    if (
+        version != "AC1032"
+        and requested is not None
+        and requested not in _CODEPAGE_CODEC
+    ):
         report(None, "HEADER", "codepage", "unsupported code page; selected automatically")
         requested = None
-    codec, metadata["codepage"] = select_codepage(strings, requested)
+    codec, metadata["codepage"] = (
+        ("utf-16-le", 30) if version == "AC1032" else select_codepage(strings, requested)
+    )
 
     codepage = metadata["codepage"]
 
@@ -932,11 +964,16 @@ def prepare_strings(
     def encode_text(value, handle, kind, attr):
         if (
             "\0" not in value
-            and _storable(codec, codepage, value)
-            and len(value.encode(codec)) <= 65535
+            and (version == "AC1032" or _storable(codec, codepage, value))
+            and len(value.encode(codec)) <= (131070 if version == "AC1032" else 65535)
         ):
             return value
         report(handle, kind, attr, f"string cannot be stored in {codec}", "replaced")
+        if version == "AC1032":
+            return (
+                value.replace("\0", " ").encode(codec)[:131070]
+                .decode(codec, errors="ignore")
+            )
         text, _ = replace_unrepresentable(codepage, value.replace("\0", " "))
         return (
             text.encode(codec, errors="replace")[:65535].decode(codec, errors="ignore")

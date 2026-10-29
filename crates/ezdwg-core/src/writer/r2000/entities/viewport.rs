@@ -82,6 +82,8 @@ mod tests {
             linetype_flags: 0,
             linetype_handle: 0,
             codepage: 30,
+            modern: false,
+            true_color: None,
             formatting: EntityFormatting::default(),
             previous_handle: 0x267,
             next_handle: 0,
@@ -311,6 +313,8 @@ mod tests {
                     linetype_flags: 0,
                     linetype_handle: 0,
                     codepage: 30,
+                    modern: false,
+                    true_color: None,
                     formatting: EntityFormatting::default(),
                     previous_handle: 0,
                     next_handle: 0,
@@ -328,7 +332,10 @@ mod tests {
             let mine: Vec<u8> = (start..u64::from(h2.obj_size))
                 .map(|_| r.read_b().unwrap())
                 .collect();
-            assert_eq!(mine, original, "viewport {handle:X} body differs from AutoCAD");
+            assert_eq!(
+                mine, original,
+                "viewport {handle:X} body differs from AutoCAD"
+            );
         }
     }
 

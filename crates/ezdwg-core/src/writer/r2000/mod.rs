@@ -1,6 +1,6 @@
-mod checksum;
+pub(crate) mod checksum;
 pub mod classes;
-mod database;
+pub(crate) mod database;
 pub mod entities;
 mod header;
 pub mod object_map;
@@ -12,9 +12,9 @@ use self::entities::{
     encode_arc_entity_payload, encode_circle_entity_payload, encode_ellipse_entity_payload,
     encode_line_entity_payload, encode_lwpolyline_entity_payload, encode_mtext_entity_payload,
     encode_point_entity_payload, encode_ray_entity_payload, encode_text_entity_payload,
-    encode_viewport_entity_payload, encode_xline_entity_payload, ArcEncodeInput, CircleEncodeInput, EllipseEncodeInput,
-    LineEncodeInput, LwPolylineEncodeInput, MTextEncodeInput, PointEncodeInput, RayEncodeInput,
-    TextEncodeInput, XLineEncodeInput,
+    encode_viewport_entity_payload, encode_xline_entity_payload, ArcEncodeInput, CircleEncodeInput,
+    EllipseEncodeInput, LineEncodeInput, LwPolylineEncodeInput, MTextEncodeInput, PointEncodeInput,
+    RayEncodeInput, TextEncodeInput, XLineEncodeInput,
 };
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
@@ -41,9 +41,29 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
         ));
     }
 
+    write_document_versioned(doc, config)
+}
+
+pub(crate) fn write_document_versioned(
+    doc: &WriterDocument,
+    config: &WriterConfig,
+) -> Result<Vec<u8>> {
+    let modern = matches!(doc.version, crate::dwg::version::DwgVersion::R2018);
+    let encode_object_record = |body: &[u8]| {
+        if modern {
+            crate::writer::r2018::streams::record(body)
+        } else {
+            object_record::encode_object_record(body)
+        }
+    };
+
     crate::writer::validation::validate_document(doc)?;
     let with_images = !doc.image_defs.is_empty();
-    let classes_section = encode_classes_section(with_images)?;
+    let classes_section = if modern {
+        classes::encode_unicode_classes_section()?
+    } else {
+        encode_classes_section(with_images)?
+    };
     let mut allocator = HandleAllocator::new(1);
     if config.preserve_input_handles {
         for entity in doc.layouts().flatten() {
@@ -134,6 +154,8 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
                 linetype_flags: 0,
                 linetype_handle: 0,
                 codepage: doc.metadata.codepage,
+                modern,
+                true_color: None,
                 formatting: Default::default(),
             };
             let payload =
@@ -148,10 +170,7 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
         }
         for (i, entity) in entities.iter().enumerate() {
             let handle = handles[i];
-            let previous_handle = i
-                .checked_sub(1)
-                .map(|j| handles[j])
-                .unwrap_or(first_handle);
+            let previous_handle = i.checked_sub(1).map(|j| handles[j]).unwrap_or(first_handle);
             let next_handle = handles.get(i + 1).copied().unwrap_or(0);
             let props = entity.common();
             let common = entities::common::CommonEntityEncodeInput {
@@ -171,6 +190,8 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
                 },
                 linetype_handle: database.linetype_handle(&props.linetype)?,
                 codepage: doc.metadata.codepage,
+                modern,
+                true_color: props.true_color,
                 formatting: props.formatting,
             };
             match entity {
@@ -548,6 +569,7 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
                             next_handle: attrs.get(i + 1).copied().unwrap_or(0),
                             layer_handle: database.layer_handle(&c.layer_name)?,
                             color_index: c.color_index.unwrap_or(256),
+                            true_color: c.true_color,
                             style_handle: database.style_handle(&c.style_name)?,
                             linetype_flags: match c.linetype.to_uppercase().as_str() {
                                 "" | "BYLAYER" => 0,
@@ -612,8 +634,31 @@ pub fn write_document(doc: &WriterDocument, config: &WriterConfig) -> Result<Vec
         .unwrap_or(0)
         .checked_add(1)
         .ok_or_else(|| DwgError::new(ErrorKind::Unsupported, "handle space exhausted"))?;
-    let header_section = header::encode_header(&database, handseed, &doc.metadata, &doc.layout)?;
+    let header_section = if modern {
+        crate::writer::r2018::encode_header(&database, handseed, &doc.metadata, &doc.layout)?
+    } else {
+        header::encode_header(&database, handseed, &doc.metadata, &doc.layout)?
+    };
     record_rows.sort_by_key(|(obj_ref, _)| obj_ref.handle.0);
+
+    if modern {
+        let mut objects = 0x0dcau32.to_le_bytes().to_vec();
+        for (obj, record) in &mut record_rows {
+            obj.offset = u32::try_from(objects.len()).map_err(|_| {
+                DwgError::new(ErrorKind::Unsupported, "AC1032 objects exceed 4 GiB")
+            })?;
+            objects.extend_from_slice(record);
+        }
+        objects.extend_from_slice(&[0, 0]);
+        let refs: Vec<_> = record_rows.iter().map(|(obj, _)| *obj).collect();
+        return crate::writer::r2018::write_container(vec![
+            ("AcDb:Header", header_section),
+            ("AcDb:Classes", classes_section),
+            ("AcDb:AcDbObjects", objects),
+            ("AcDb:Handles", encode_object_map_section(&refs)?),
+            ("AcDb:Template", vec![0, 0, 1, 0]),
+        ]);
+    }
 
     let record_count = 3usize;
     let directory_size = 0x15usize + 4 + record_count * 9 + 2 + SECTION_DIRECTORY_SENTINEL.len();

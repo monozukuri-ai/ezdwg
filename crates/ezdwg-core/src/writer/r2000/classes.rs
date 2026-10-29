@@ -15,6 +15,43 @@ pub const IMAGEDEF_CLASS: u16 = 504;
 pub const IMAGEDEF_REACTOR_CLASS: u16 = 505;
 pub const RASTERVARIABLES_CLASS: u16 = 506;
 
+pub fn encode_unicode_classes_section() -> Result<Vec<u8>> {
+    let mut data = BitWriter::with_unicode();
+    data.write_rl(Endian::Little, 0)?;
+    data.write_bl(502)?;
+    data.write_b(1)?;
+    for (number, cpp, dxf, count) in [
+        (500, "AcDbDictionaryWithDefault", "ACDBDICTIONARYWDFLT", 1),
+        (501, "AcDbPlaceHolder", "ACDBPLACEHOLDER", 1),
+        (502, "AcDbLayout", "LAYOUT", 2),
+    ] {
+        data.write_bs(number)?;
+        data.write_bs(0)?;
+        data.write_tv("ObjectDBX Classes")?;
+        data.write_tv(cpp)?;
+        data.write_tv(dxf)?;
+        data.write_b(0)?;
+        data.write_bs(0x1f3)?;
+        for v in [count, 32, 0, 0, 0] {
+            data.write_bl(v)?;
+        }
+    }
+    data.finish_strings()?;
+    let bits = data.len_bits() as u32;
+    data.set_bit_pos(0);
+    data.write_rl(Endian::Little, bits)?;
+    data.set_bit_pos(bits);
+    let bytes = data.into_bytes();
+    let mut out = SENTINEL_CLASSES_BEFORE.to_vec();
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&bytes);
+    let crc = crc16(0xc0c1, &out[16..]);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(&SENTINEL_CLASSES_AFTER);
+    Ok(out)
+}
+
 pub fn encode_minimal_classes_section() -> Result<Vec<u8>> {
     encode_classes_section(false)
 }

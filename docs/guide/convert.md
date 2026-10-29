@@ -239,6 +239,57 @@ keyword-only `entity_attributes` (keyed by nonzero input handle), `layers`,
 30 (Windows-1252). Attributes name table entries rather than reusing source table
 handles. Unknown keys, missing references and invalid values raise `ValueError`.
 
+## Native DWG Writer (AC1032)
+
+`AC1032` (AutoCAD 2018 format) preserves entity and layer RGB colors and uses
+UTF-16 strings. Text, layer/style/linetype names, block names and descriptions
+can mix languages within one drawing, including supplementary characters such
+as emoji. Fonts are not embedded; glyph display depends on installed fonts.
+
+```python
+import ezdwg
+
+drawing = ezdwg.new("AC1032")
+drawing.layers["図面_도면"] = {"true_color": 0x73B9FF}
+drawing.modelspace().add_text(
+    "日本語 한국어 Русский العربية 😀", (0, 0), height=2,
+    layer="図面_도면", true_color=0x123456,
+)
+drawing.save("unicode.dwg")
+
+# Select the output version when exporting or creating an editable snapshot.
+ezdwg.to_dwg("unicode.dwg", "copy.dwg", version="AC1032", strict=True)
+edited = ezdwg.read("unicode.dwg").edit(version="AC1032")
+edited.save("edited.dwg")
+```
+
+Supported entities are `LINE`, `POINT`, `RAY`, `XLINE`, `ARC`, `CIRCLE`,
+`ELLIPSE`, `LWPOLYLINE`, `TEXT`, `MTEXT`, static `INSERT`, and single-line
+`ATTDEF` / `ATTRIB`. Static blocks may be nested. Referenced layers, simple
+linetypes, basic text styles, units and common formatting are preserved.
+RGB values are stored as `0xRRGGBB`, without ACI approximation.
+
+Paper-space entities, `VIEWPORT`, `SPLINE`, legacy polylines, faces, `HATCH`,
+`DIMENSION`, `IMAGE`, dynamic blocks and extended metadata are outside this
+AC1032 writer's scope. Unsupported entity types are reported/skipped by
+non-strict exports and rejected by strict exports. A drawing containing
+paper-space entities is rejected. R2018 attribute imports retain the existing
+conservative diagnostic for unqualified embedded multiline properties.
+
+Strings are limited to 65,535 UTF-16 code units per field; supplementary
+characters use two units. NUL characters and overlong strings produce loss
+diagnostics and fail strict saves. The legacy `codepage` selection applies to
+AC1015; AC1032 uses Unicode regardless of that setting.
+
+The AC1032 writer is native and needs no external converter or template file.
+`ezdwg.new()` and exports without a version argument continue to use AC1015.
+The raw version-selecting entry point is `ezdwg.raw.write_dwg(...,
+version="AC1032")`; `write_ac1015_dwg` keeps its existing contract.
+
+```bash
+ezdwg write input.dwg output.dwg --dwg-version AC1032
+```
+
 ## Creating and Editing a Drawing
 
 `ezdwg.new()` returns an in-memory `Drawing` for AC1015. Its model space holds

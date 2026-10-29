@@ -208,7 +208,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     write_parser = subparsers.add_parser(
         "write",
-        help="Write a DWG file using the native AC1015 writer.",
+        help="Write a DWG file using the native AC1015/AC1032 writer.",
     )
     write_parser.add_argument("input_path", help="Path to input DWG file.")
     write_parser.add_argument("output_path", help="Path to output DWG file.")
@@ -220,7 +220,7 @@ def _build_parser() -> argparse.ArgumentParser:
     write_parser.add_argument(
         "--dwg-version",
         default="AC1015",
-        help="Output DWG version (currently AC1015 only).",
+        help="Output DWG version (default: AC1015).",
     )
     write_parser.add_argument(
         "--strict",
