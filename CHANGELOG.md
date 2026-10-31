@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### DWG reader
+- R2007: an empty entry at the start of the section map no longer ends the map.
+  Its position depends on the writer, and such files failed with
+  `R2007 section map has no entries`.
 - HATCH spline boundary edges of R2010+ drawings: the start/end tangent pair is
   stored only together with fit points. AutoCAD 2018 drawings with zero fit
   points (production files, 36 of 600 DWGs) were read 32 bytes off from the

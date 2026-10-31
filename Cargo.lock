@@ -25,14 +25,14 @@ dependencies = [
 
 [[package]]
 name = "ezdwg-core"
-version = "0.17.2"
+version = "0.17.3"
 dependencies = [
  "encoding_rs",
 ]
 
 [[package]]
 name = "ezdwg-python"
-version = "0.17.2"
+version = "0.17.3"
 dependencies = [
  "ezdwg-core",
  "pyo3",

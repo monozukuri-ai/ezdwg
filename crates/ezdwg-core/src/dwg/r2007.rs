@@ -802,16 +802,23 @@ fn read_section_map(
         header.sections_map_size_uncompressed,
         header.sections_map_correction_factor,
     )?;
+    parse_section_entries(&data, header.sections_amount)
+}
 
-    let mut reader = ByteReader::new(&data);
+fn parse_section_entries(data: &[u8], sections_amount: u64) -> Result<Vec<SectionEntry>> {
+    let mut reader = ByteReader::new(data);
     let mut sections = Vec::new();
-    let max_sections = if header.sections_amount > 0 {
-        header.sections_amount.saturating_sub(1) as usize
+    // The count includes one empty entry whose position depends on the writer (last or first
+    // in real files), so an empty entry does not end the map.
+    let entry_limit = if sections_amount > 0 {
+        sections_amount as usize
     } else {
         usize::MAX
     };
+    let mut entries_read = 0;
 
-    while reader.remaining() >= SECTION_ENTRY_SIZE && sections.len() < max_sections {
+    while reader.remaining() >= SECTION_ENTRY_SIZE && entries_read < entry_limit {
+        entries_read += 1;
         let size = reader.read_u64_le()?;
         let _max_size = reader.read_u64_le()?;
         let encrypted = reader.read_u64_le()?;
@@ -822,7 +829,7 @@ fn read_section_map(
         let page_count = reader.read_u64_le()?;
 
         if size == 0 && page_count == 0 && name_length == 0 {
-            break;
+            continue;
         }
 
         if encrypted == 1 {
@@ -1480,6 +1487,42 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join(path)
+    }
+
+    /// One 64-byte section entry of the R2007 section map, with a UTF-16 name and no pages.
+    fn section_entry(name: &str, size: u64) -> Vec<u8> {
+        let encoded_name: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut entry = Vec::new();
+        let page_count = 0u64;
+        for value in [size, 63488, 0, 0, encoded_name.len() as u64, 0, 4, page_count] {
+            entry.extend_from_slice(&value.to_le_bytes());
+        }
+        entry.extend_from_slice(&encoded_name);
+        entry
+    }
+
+    #[test]
+    fn empty_entry_first_does_not_end_the_section_map() {
+        // Seen in R2007 files from other writers; AutoCAD 2007 puts the empty entry last.
+        let mut map = section_entry("", 0);
+        map.extend(section_entry("AcDb:Header", 849));
+        map.extend(section_entry("AcDb:Classes", 998));
+        let sections = parse_section_entries(&map, 3).unwrap();
+        let names: Vec<_> = sections.iter().map(|section| section.name.as_str()).collect();
+        assert_eq!(names, ["AcDb:Header", "AcDb:Classes"]);
+    }
+
+    #[test]
+    fn empty_entry_last_keeps_every_section() {
+        let mut map = section_entry("AcDb:Header", 849);
+        map.extend(section_entry("AcDb:Classes", 998));
+        map.extend(section_entry("", 0));
+        assert_eq!(parse_section_entries(&map, 3).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn section_map_with_only_empty_entries_is_rejected() {
+        assert!(parse_section_entries(&section_entry("", 0), 1).is_err());
     }
 
     #[test]
