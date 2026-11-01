@@ -1,10 +1,9 @@
-/// IMAGE rows and IMAGEDEF table rows are dictionaries.
-fn append_write_images(
+/// IMAGEDEF table rows are dictionaries.
+fn append_image_defs(
     doc: &mut writer::WriterDocument,
-    images: Option<Vec<Bound<'_, PyDict>>>,
     image_defs: Option<Vec<Bound<'_, PyDict>>>,
 ) -> PyResult<()> {
-    use writer::ir::{ImageDef, ImageEntity};
+    use writer::ir::ImageDef;
     for d in image_defs.unwrap_or_default() {
         check_write_keys(
             &d,
@@ -26,6 +25,15 @@ fn append_write_images(
             pixel_size: write_value(&d, "pixel_size", (1., 1.))?,
         });
     }
+    Ok(())
+}
+
+/// IMAGE rows are dictionaries.
+fn build_write_images(
+    out: &mut Vec<writer::WriterEntity>,
+    images: Option<Vec<Bound<'_, PyDict>>>,
+) -> PyResult<()> {
+    use writer::ir::ImageEntity;
     for d in images.unwrap_or_default() {
         check_write_keys(
             &d,
@@ -52,7 +60,7 @@ fn append_write_images(
         if clip_type == 1 && clip_vertices.is_empty() {
             clip_vertices = vec![(-0.5, -0.5), (size.0 - 0.5, size.1 - 0.5)];
         }
-        doc.modelspace.push(writer::WriterEntity::Image(ImageEntity {
+        out.push(writer::WriterEntity::Image(Box::new(ImageEntity {
             common: writer::CommonEntityProps {
                 handle: (handle != 0).then_some(handle),
                 ..Default::default()
@@ -69,7 +77,7 @@ fn append_write_images(
             fade: write_value(&d, "fade", 0u8)?,
             clip_type,
             clip_vertices,
-        }));
+        })));
     }
     Ok(())
 }

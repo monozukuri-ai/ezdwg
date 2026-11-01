@@ -43,10 +43,68 @@ def decode_write_blocks(path: str) -> list[dict[str, Any]]: ...
 def decode_write_polylines(path: str) -> list[dict[str, Any]]: ...
 def decode_write_splines(path: str) -> list[dict[str, Any]]: ...
 def decode_attribute_links(path: str) -> list[tuple[int, int]]: ...
+def decode_entity_links(path: str) -> list[tuple[int, int | None, int | None]]: ...
 def decode_insert_write_properties(path: str) -> list[tuple[int, tuple[float, float, float], int | None, list[int] | None]]: ...
 def decode_write_tables(path: str) -> list[dict[str, Any]]: ...
 def decode_write_property_losses(path: str) -> list[tuple[int, list[str]]]: ...
 def write_ac1015_line_dwg(output_path: str, lines: list[tuple[int, float, float, float, float, float, float]]) -> None: ...
+
+class DwgWriter:
+    """Incremental DWG writer: tables once, entities in batches, then the file.
+
+    Entities keep the order of the ``add`` calls; ``order`` (one group tag per
+    entity, in the order of the ``add`` keyword groups) interleaves the groups
+    of one call. ``write`` consumes the document.
+    """
+
+    def __init__(self, version: str = ...) -> None: ...
+    @property
+    def entity_count(self) -> int: ...
+    def reserve(self, count: int) -> None: ...
+    def set_tables(
+        self,
+        *,
+        layers: list[dict[str, Any]] | None = ...,
+        linetypes: list[dict[str, Any]] | None = ...,
+        text_styles: list[dict[str, Any]] | None = ...,
+        metadata: dict[str, Any] | None = ...,
+        blocks: list[dict[str, Any]] | None = ...,
+        image_defs: list[dict[str, Any]] | None = ...,
+        layout: dict[str, Any] | None = ...,
+    ) -> None: ...
+    def add(
+        self,
+        *,
+        lines: list[tuple[int, float, float, float, float, float, float]] | None = ...,
+        arcs: list[tuple[int, float, float, float, float, float, float]] | None = ...,
+        circles: list[tuple[int, float, float, float, float]] | None = ...,
+        lwpolylines: list[tuple[int, int, list[tuple[float, float]], list[float], list[tuple[float, float]], float | None]] | None = ...,
+        texts: list[tuple[int, str, tuple[float, float, float], float, float]] | None = ...,
+        mtexts: list[tuple[int, str, tuple[float, float, float], tuple[float, float, float], float, float, int, int]] | None = ...,
+        points: list[tuple[int, float, float, float, float]] | None = ...,
+        rays: list[tuple[int, tuple[float, float, float], tuple[float, float, float]]] | None = ...,
+        xlines: list[tuple[int, tuple[float, float, float], tuple[float, float, float]]] | None = ...,
+        ellipses: list[tuple[int, tuple[float, float, float], tuple[float, float, float], tuple[float, float, float], float, float, float]] | None = ...,
+        solids: list[tuple[int, tuple[float, float, float], tuple[float, float, float], tuple[float, float, float], tuple[float, float, float], float, tuple[float, float, float]]] | None = ...,
+        traces: list[tuple[int, tuple[float, float, float], tuple[float, float, float], tuple[float, float, float], tuple[float, float, float], float, tuple[float, float, float]]] | None = ...,
+        faces3d: list[tuple[int, tuple[float, float, float], tuple[float, float, float], tuple[float, float, float], tuple[float, float, float], int]] | None = ...,
+        inserts: list[dict[str, Any]] | None = ...,
+        attdefs: list[dict[str, Any]] | None = ...,
+        attribs: list[dict[str, Any]] | None = ...,
+        polylines2d: list[dict[str, Any]] | None = ...,
+        polylines3d: list[dict[str, Any]] | None = ...,
+        splines: list[dict[str, Any]] | None = ...,
+        hatches: list[dict[str, Any]] | None = ...,
+        dimensions: list[dict[str, Any]] | None = ...,
+        images: list[dict[str, Any]] | None = ...,
+        viewports: list[dict[str, Any]] | None = ...,
+        entity_attributes: dict[int, dict[str, Any]] | None = ...,
+        entity_owners: dict[int, str | int] | None = ...,
+        order: bytes | None = ...,
+    ) -> int: ...
+    def write(self, output_path: str) -> None: ...
+
+def release_freed_heap() -> None: ...
 def list_section_locators(path: str) -> list[tuple[str, int, int]]: ...
 def read_section_bytes(path: str, index: int) -> bytes: ...
 def decode_header_variables(path: str) -> tuple[

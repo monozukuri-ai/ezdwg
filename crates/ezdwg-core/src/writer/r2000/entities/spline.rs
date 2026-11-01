@@ -106,7 +106,8 @@ mod tests {
                 weights: weights.clone(),
             },
         };
-        crate::writer::validation::validate_entity(&WriterEntity::Spline(s.clone()), 30).unwrap();
+        crate::writer::validation::validate_entity(&WriterEntity::Spline(Box::new(s.clone())), 30)
+            .unwrap();
         let bytes = encode_spline_entity_payload(common(), &s).unwrap();
         let mut r = BitReader::new(&bytes);
         r.set_pre_r2004_layout(true);
@@ -139,7 +140,8 @@ mod tests {
                 fit_points: points.clone(),
             },
         };
-        crate::writer::validation::validate_entity(&WriterEntity::Spline(s.clone()), 30).unwrap();
+        crate::writer::validation::validate_entity(&WriterEntity::Spline(Box::new(s.clone())), 30)
+            .unwrap();
         let bytes = encode_spline_entity_payload(common(), &s).unwrap();
         let mut r = BitReader::new(&bytes);
         r.set_pre_r2004_layout(true);
@@ -168,7 +170,10 @@ mod tests {
                 weights: vec![1., -1., 1.],
             },
         };
-        assert!(crate::writer::validation::validate_entity(&WriterEntity::Spline(s), 30).is_err());
+        assert!(
+            crate::writer::validation::validate_entity(&WriterEntity::Spline(Box::new(s)), 30)
+                .is_err()
+        );
         let s = SplineEntity {
             common: CommonEntityProps::default(),
             degree: 3,
@@ -179,6 +184,9 @@ mod tests {
                 fit_points: vec![(0., 0., 0.), (1., 2., 3.)],
             },
         };
-        assert!(crate::writer::validation::validate_entity(&WriterEntity::Spline(s), 30).is_err());
+        assert!(
+            crate::writer::validation::validate_entity(&WriterEntity::Spline(Box::new(s)), 30)
+                .is_err()
+        );
     }
 }

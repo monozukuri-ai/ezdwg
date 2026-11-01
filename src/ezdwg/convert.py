@@ -25,6 +25,7 @@ from .document import (
 )
 from ._write_preflight import (
     WriteDiagnostic,
+    WritePlan,
     geometry_error,
     prepare_attributes,
     strict_losses,
@@ -234,6 +235,76 @@ class _ConvertDecodeCache:
     )
 
 
+#: Keyword groups of ``raw.DwgWriter.add`` in tag order, and the group of each
+#: entity kind. The tags let one batch keep the drawing order across kinds.
+_WRITE_GROUPS = (
+    "lines",
+    "arcs",
+    "circles",
+    "lwpolylines",
+    "texts",
+    "mtexts",
+    "points",
+    "rays",
+    "xlines",
+    "ellipses",
+    "solids",
+    "traces",
+    "faces3d",
+    "inserts",
+    "attdefs",
+    "attribs",
+    "polylines2d",
+    "polylines3d",
+    "splines",
+    "hatches",
+    "dimensions",
+    "images",
+    "viewports",
+)
+_WRITE_TAG = {name: tag for tag, name in enumerate(_WRITE_GROUPS)}
+_WRITE_GROUP_OF = {
+    "LINE": "lines",
+    "ARC": "arcs",
+    "CIRCLE": "circles",
+    "LWPOLYLINE": "lwpolylines",
+    "TEXT": "texts",
+    "MTEXT": "mtexts",
+    "POINT": "points",
+    "RAY": "rays",
+    "XLINE": "xlines",
+    "ELLIPSE": "ellipses",
+    "SOLID": "solids",
+    "TRACE": "traces",
+    "3DFACE": "faces3d",
+    "INSERT": "inserts",
+    "ATTDEF": "attdefs",
+    "ATTRIB": "attribs",
+    "POLYLINE_2D": "polylines2d",
+    "POLYLINE_3D": "polylines3d",
+    "SPLINE": "splines",
+    "HATCH": "hatches",
+    "DIMENSION": "dimensions",
+    "IMAGE": "images",
+    "VIEWPORT": "viewports",
+}
+_AC1032_WRITE_KINDS = {
+    "LINE", "POINT", "RAY", "XLINE", "ARC", "CIRCLE", "ELLIPSE",
+    "LWPOLYLINE", "TEXT", "MTEXT", "INSERT", "ATTDEF", "ATTRIB",
+}
+
+
+def _attribute_write_row(entity: Entity) -> dict:
+    d = entity.dxf
+    row = {
+        k: d[k]
+        for k in ("text", "tag", "prompt", "insert", "height", "attribute_flags")
+        if k in d
+    }
+    row.update(handle=entity.handle, rotation=math.radians(d.get("rotation", 0.0)))
+    return row
+
+
 def to_dwg(
     source: str | Document | Layout | Drawing | EditableLayout,
     output_path: str,
@@ -242,6 +313,13 @@ def to_dwg(
     version: str = "AC1015",
     strict: bool = False,
 ) -> WriteResult:
+    """Write ``source`` as a native DWG.
+
+    Entities are prepared in batches and handed to the native writer as they
+    go (see ``Drawing._write_plan``), so the Python side of a save stays small
+    for drawings of any size. Entities of a ``Drawing`` are stored in their
+    drawing order, which is also their display (draw) order.
+    """
     if version not in {"AC1015", "AC1032"}:
         raise ValueError(f"unsupported DWG write version: {version}")
 
@@ -259,7 +337,7 @@ def to_dwg(
             selected,
             include_all_blocks=isinstance(source, Drawing) and types is None,
         )
-        prepared = layout.doc._prepare_write(entities, block_rows, version=version)
+        plan = layout.doc._write_plan(entities, block_rows, version=version)
     else:
         if isinstance(source, Layout):
             source_path, layout = source.doc.path, source
@@ -279,162 +357,60 @@ def to_dwg(
             entities, block_rows, entity_owners = drawing._write_selection(
                 list(drawing.modelspace())
             )
-            prepared = drawing._prepare_write(entities, block_rows, version=version)
+            plan = drawing._write_plan(entities, block_rows, version=version)
         else:
-            prepared = prepare_attributes(layout.doc, entities, version=version)
-    (
-        source_entities,
-        attributes,
-        layer_defs,
-        linetype_defs,
-        text_styles,
-        metadata,
-        diagnostics,
-        image_defs,
-        layout_row,
-    ) = prepared
+            plan = WritePlan.single_batch(
+                prepare_attributes(layout.doc, entities, version=version)
+            )
+    diagnostics = plan.diagnostics
 
+    writer = raw.DwgWriter(version)
+    writer.reserve(sum(1 for e in entities if e.handle not in entity_owners))
+    writer.set_tables(
+        layers=plan.layers,
+        linetypes=plan.linetypes,
+        text_styles=plan.text_styles,
+        metadata=plan.metadata,
+        blocks=list(block_rows.values()),
+        layout=plan.layout,
+    )
+
+    builders = {
+        "LINE": _as_line_row,
+        "POINT": _as_point_row,
+        "RAY": _as_ray_row,
+        "XLINE": _as_xline_row,
+        "ARC": _as_arc_row,
+        "CIRCLE": _as_circle_row,
+        "ELLIPSE": _as_ellipse_row,
+        "SPLINE": _as_spline_row,
+        "HATCH": _as_hatch_row,
+        "DIMENSION": _as_dimension_row,
+        "IMAGE": _as_image_row,
+        "VIEWPORT": _as_viewport_row,
+        "SOLID": _as_face_row,
+        "TRACE": _as_face_row,
+        "3DFACE": _as_face_row,
+        "POLYLINE_2D": _as_legacy_polyline_row,
+        "POLYLINE_3D": _as_legacy_polyline_row,
+        "LWPOLYLINE": _as_lwpolyline_row,
+        "TEXT": _as_text_row,
+        "MTEXT": _as_mtext_row,
+    }
+    if version == "AC1032":
+        builders = {
+            kind: entry for kind, entry in builders.items() if kind in _AC1032_WRITE_KINDS
+        }
     total = 0
     written = 0
     skipped_by_type: dict[str, int] = {}
-    line_rows: list[tuple[int, float, float, float, float, float, float]] = []
-    ray_rows: list[
-        tuple[int, tuple[float, float, float], tuple[float, float, float]]
-    ] = []
-    xline_rows: list[
-        tuple[int, tuple[float, float, float], tuple[float, float, float]]
-    ] = []
-    point_rows: list[tuple[int, float, float, float, float]] = []
-    arc_rows: list[tuple[int, float, float, float, float, float, float]] = []
-    circle_rows: list[tuple[int, float, float, float, float]] = []
-    ellipse_rows = []
-    spline_rows = []
-    hatch_rows: list[dict] = []
-    dimension_rows: list[dict] = []
-    image_rows: list[dict] = []
-    viewport_rows: list[dict] = []
-    solid_rows, trace_rows, face3d_rows = [], [], []
-    polyline2d_rows, polyline3d_rows = [], []
-    lwpolyline_rows: list[
-        tuple[
-            int,
-            int,
-            list[tuple[float, float]],
-            list[float],
-            list[tuple[float, float]],
-            float | None,
-        ]
-    ] = []
-    text_rows: list[tuple[int, str, tuple[float, float, float], float, float]] = []
-    mtext_rows: list[
-        tuple[
-            int,
-            str,
-            tuple[float, float, float],
-            tuple[float, float, float],
-            float,
-            float,
-            int,
-            int,
-        ]
-    ] = []
+    invalid_inserts: set[int] = set()
+    image_defs_used: set[str] = set()
+    # ATTRIBs follow their INSERTs; they are written after every batch so the
+    # skipped INSERTs are known.
+    deferred_attribs: list[tuple[Entity, dict | None]] = []
 
-    builders = {
-        "LINE": (_as_line_row, line_rows),
-        "POINT": (_as_point_row, point_rows),
-        "RAY": (_as_ray_row, ray_rows),
-        "XLINE": (_as_xline_row, xline_rows),
-        "ARC": (_as_arc_row, arc_rows),
-        "CIRCLE": (_as_circle_row, circle_rows),
-        "ELLIPSE": (_as_ellipse_row, ellipse_rows),
-        "SPLINE": (_as_spline_row, spline_rows),
-        "HATCH": (_as_hatch_row, hatch_rows),
-        "DIMENSION": (_as_dimension_row, dimension_rows),
-        "IMAGE": (_as_image_row, image_rows),
-        "VIEWPORT": (_as_viewport_row, viewport_rows),
-        "SOLID": (_as_face_row, solid_rows),
-        "TRACE": (_as_face_row, trace_rows),
-        "3DFACE": (_as_face_row, face3d_rows),
-        "POLYLINE_2D": (_as_legacy_polyline_row, polyline2d_rows),
-        "POLYLINE_3D": (_as_legacy_polyline_row, polyline3d_rows),
-        "LWPOLYLINE": (_as_lwpolyline_row, lwpolyline_rows),
-        "TEXT": (_as_text_row, text_rows),
-        "MTEXT": (_as_mtext_row, mtext_rows),
-    }
-    invalid_inserts = {
-        e.handle
-        for e in source_entities
-        if e.dxftype == "INSERT" and geometry_error(e) is not None
-    }
-    insert_rows, attdef_rows, attrib_rows = [], [], []
-    if version == "AC1032":
-        supported = {
-            "LINE", "POINT", "RAY", "XLINE", "ARC", "CIRCLE", "ELLIPSE",
-            "LWPOLYLINE", "TEXT", "MTEXT", "INSERT", "ATTDEF", "ATTRIB",
-        }
-        builders = {kind: entry for kind, entry in builders.items() if kind in supported}
-    accepted_handles = set()
-    for entity in source_entities:
-        total += 1
-        error = None
-        row = None
-        if entity.dxftype in {"INSERT", "ATTDEF", "ATTRIB"}:
-            error = geometry_error(entity)
-            if (
-                entity.dxftype == "ATTRIB"
-                and entity_owners.get(entity.handle) in invalid_inserts
-            ):
-                error = "owning INSERT was skipped"
-            if error is None:
-                d = entity.dxf
-                if entity.dxftype == "INSERT":
-                    insert_rows.append(
-                        {
-                            "handle": entity.handle,
-                            "name": d["name"],
-                            "insert": d["insert"],
-                            "scale": tuple(
-                                d.get(k, 1.0) for k in ("xscale", "yscale", "zscale")
-                            ),
-                            "rotation": math.radians(d.get("rotation", 0.0)),
-                        }
-                    )
-                else:
-                    row = {
-                        k: d[k]
-                        for k in (
-                            "text",
-                            "tag",
-                            "prompt",
-                            "insert",
-                            "height",
-                            "attribute_flags",
-                        )
-                        if k in d
-                    }
-                    row.update(
-                        handle=entity.handle,
-                        rotation=math.radians(d.get("rotation", 0.0)),
-                    )
-                    (attdef_rows if entity.dxftype == "ATTDEF" else attrib_rows).append(
-                        row
-                    )
-                accepted_handles.add(int(entity.handle))
-                written += 1
-                continue
-        if entity.dxftype in builders:
-            builder, rows = builders[entity.dxftype]
-            error = geometry_error(entity)
-            if error is None:
-                try:
-                    row = builder(entity)
-                except (ValueError, TypeError, OverflowError):
-                    error = "invalid geometry row"
-            if row is not None:
-                rows.append(row)
-                accepted_handles.add(int(entity.handle))
-                written += 1
-                continue
+    def skip(entity: Entity, error: str | None) -> None:
         skipped_by_type[entity.dxftype] = skipped_by_type.get(entity.dxftype, 0) + 1
         diagnostics.append(
             WriteDiagnostic(
@@ -445,6 +421,91 @@ def to_dwg(
                 "skipped",
             )
         )
+
+    def emit(prepared: list[Entity], attrs: dict) -> None:
+        """Convert one batch to writer rows and hand it to the native writer."""
+        nonlocal total, written
+        rows: dict[str, list] = {}
+        order = bytearray()
+        accepted: list[int] = []
+        for entity in prepared:
+            kind = entity.dxftype
+            if kind == "ATTRIB":
+                deferred_attribs.append((entity, attrs.get(entity.handle)))
+                continue
+            total += 1
+            error = None
+            row = None
+            if kind in {"INSERT", "ATTDEF"}:
+                error = geometry_error(entity)
+                if error is None:
+                    d = entity.dxf
+                    if kind == "INSERT":
+                        row = {
+                            "handle": entity.handle,
+                            "name": d["name"],
+                            "insert": d["insert"],
+                            "scale": tuple(
+                                d.get(k, 1.0) for k in ("xscale", "yscale", "zscale")
+                            ),
+                            "rotation": math.radians(d.get("rotation", 0.0)),
+                        }
+                    else:
+                        row = _attribute_write_row(entity)
+                elif kind == "INSERT":
+                    invalid_inserts.add(entity.handle)
+            elif kind in builders:
+                error = geometry_error(entity)
+                if error is None:
+                    try:
+                        row = builders[kind](entity)
+                    except (ValueError, TypeError, OverflowError):
+                        error = "invalid geometry row"
+            if row is None:
+                skip(entity, error)
+                continue
+            group = _WRITE_GROUP_OF[kind]
+            rows.setdefault(group, []).append(row)
+            order.append(_WRITE_TAG[group])
+            accepted.append(int(entity.handle))
+            written += 1
+            if kind == "IMAGE":
+                image_defs_used.add(row["image_def"])
+        if accepted:
+            writer.add(
+                **rows,
+                entity_attributes={h: attrs[h] for h in accepted if h in attrs},
+                entity_owners={
+                    h: entity_owners[h] for h in accepted if h in entity_owners
+                },
+                order=bytes(order),
+            )
+
+    for prepared, attrs in plan.chunks:
+        emit(prepared, attrs)
+    if deferred_attribs:
+        rows, attrs, accepted = [], {}, []
+        for entity, a in deferred_attribs:
+            total += 1
+            error = geometry_error(entity)
+            if error is None and entity_owners.get(entity.handle) in invalid_inserts:
+                error = "owning INSERT was skipped"
+            if error is not None:
+                skip(entity, error)
+                continue
+            rows.append(_attribute_write_row(entity))
+            accepted.append(int(entity.handle))
+            if a is not None:
+                attrs[int(entity.handle)] = a
+            written += 1
+        if rows:
+            writer.add(
+                attribs=rows,
+                entity_attributes=attrs,
+                entity_owners={
+                    h: entity_owners[h] for h in accepted if h in entity_owners
+                },
+            )
 
     skipped = total - written
     strict_diagnostics = strict_losses(diagnostics)
@@ -458,52 +519,12 @@ def to_dwg(
             f"failed to write {skipped} entities ({summary}); {len(strict_diagnostics)} diagnostics: {losses}"
         )
 
+    writer.set_tables(
+        image_defs=[d for d in plan.image_defs if d["name"] in image_defs_used]
+    )
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    raw.write_dwg(
-        str(out_path),
-        line_rows,
-        arc_rows,
-        circle_rows,
-        lwpolyline_rows,
-        text_rows,
-        mtext_rows,
-        point_rows,
-        ray_rows,
-        xline_rows,
-        entity_attributes={
-            h: a for h, a in attributes.items() if h in accepted_handles
-        },
-        layers=layer_defs,
-        linetypes=linetype_defs,
-        metadata=metadata,
-        text_styles=text_styles,
-        blocks=list(block_rows.values()),
-        inserts=insert_rows,
-        attdefs=attdef_rows,
-        attribs=attrib_rows,
-        entity_owners={
-            h: owner for h, owner in entity_owners.items() if h in accepted_handles
-        },
-        ellipses=ellipse_rows,
-        polylines2d=polyline2d_rows,
-        polylines3d=polyline3d_rows,
-        solids=solid_rows,
-        traces=trace_rows,
-        faces3d=face3d_rows,
-        splines=spline_rows,
-        hatches=hatch_rows,
-        dimensions=dimension_rows,
-        images=image_rows,
-        image_defs=[
-            d
-            for d in image_defs
-            if any(r["image_def"] == d["name"] for r in image_rows)
-        ],
-        viewports=viewport_rows,
-        layout=layout_row,
-        version=version,
-    )
+    writer.write(str(out_path))
 
     # Python query caches are path-based; an atomic same-path replacement must
     # become visible to subsequent reads in this process.
@@ -521,7 +542,6 @@ def to_dwg(
         skipped_by_type=dict(sorted(skipped_by_type.items())),
         diagnostics=tuple(diagnostics),
     )
-
 
 def to_dxf(
     source: str | Document | Layout,

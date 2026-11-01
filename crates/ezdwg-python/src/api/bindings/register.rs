@@ -5,6 +5,8 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(clear_decode_cache, module)?)?;
     module.add_function(wrap_pyfunction!(write_ac1015_dwg, module)?)?;
     module.add_function(wrap_pyfunction!(write_dwg, module)?)?;
+    module.add_class::<DwgWriter>()?;
+    module.add_function(wrap_pyfunction!(release_freed_heap, module)?)?;
     module.add_function(wrap_pyfunction!(decode_write_geometry, module)?)?;
     module.add_function(wrap_pyfunction!(decode_mtext_write_properties, module)?)?;
     module.add_function(wrap_pyfunction!(decode_write_tables, module)?)?;
@@ -12,6 +14,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_write_polylines, module)?)?;
     module.add_function(wrap_pyfunction!(decode_write_splines, module)?)?;
     module.add_function(wrap_pyfunction!(decode_attribute_links, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_entity_links, module)?)?;
     module.add_function(wrap_pyfunction!(decode_insert_write_properties, module)?)?;
     module.add_function(wrap_pyfunction!(decode_write_property_losses, module)?)?;
     module.add_function(wrap_pyfunction!(write_ac1015_line_dwg, module)?)?;

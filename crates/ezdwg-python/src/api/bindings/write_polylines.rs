@@ -1,10 +1,11 @@
-fn append_write_polylines(
-    doc: &mut writer::WriterDocument,
-    polylines2d: Option<Vec<Bound<'_, PyDict>>>,
-    polylines3d: Option<Vec<Bound<'_, PyDict>>>,
+/// Legacy POLYLINE_2D (`is_3d` false) or POLYLINE_3D rows.
+fn build_write_polylines(
+    out: &mut Vec<writer::WriterEntity>,
+    rows: Option<Vec<Bound<'_, PyDict>>>,
+    is_3d: bool,
 ) -> PyResult<()> {
     use writer::ir::{PolylineEntity, PolylineVertex};
-    for (is_3d, rows) in [(false, polylines2d), (true, polylines3d)] {
+    {
         for d in rows.unwrap_or_default() {
             check_write_keys(
                 &d,
@@ -52,7 +53,7 @@ fn append_write_polylines(
                     })
                     .collect(),
             };
-            doc.modelspace.push(if is_3d {
+            out.push(if is_3d {
                 writer::WriterEntity::Polyline3d(poly)
             } else {
                 writer::WriterEntity::Polyline2d(poly)

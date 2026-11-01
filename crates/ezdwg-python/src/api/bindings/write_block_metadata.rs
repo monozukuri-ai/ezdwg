@@ -138,6 +138,35 @@ pub fn decode_write_blocks(py: Python<'_>, path: &str) -> PyResult<Vec<PyObject>
     Ok(rows)
 }
 
+/// Entity chain links `(handle, previous, next)` of every entity record, in
+/// object map order. Following `next` from a layout's first entity gives the
+/// order in which the entities are stored and drawn.
+#[pyfunction]
+pub fn decode_entity_links(path: &str) -> PyResult<Vec<(u64, Option<u64>, Option<u64>)>> {
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best = shared.best_effort;
+    let index = &shared.index;
+    let mut rows = Vec::new();
+    for obj in &index.objects {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best)? else {
+            continue;
+        };
+        let type_name = resolved_type_name(header.type_code, &shared.dynamic_types);
+        if resolved_type_class(header.type_code, &type_name, &shared.dynamic_type_classes)
+            != "E"
+        {
+            continue;
+        }
+        if let Some((_common, handles)) =
+            decode_common_entity_header_and_handles(&record, decoder.version(), &header)
+        {
+            rows.push((obj.handle.0, handles.previous, handles.next));
+        }
+    }
+    Ok(rows)
+}
+
 #[pyfunction]
 pub fn decode_attribute_links(path: &str) -> PyResult<Vec<(u64, u64)>> {
     let shared = decoded_file(path)?;

@@ -17,6 +17,11 @@
   decode failure instead of an entity with empty paths.
 
 ### Rust crate distribution
+- `writer::WriterEntity` boxes its large variants (`Spline`, `Face3d`,
+  `Insert`, `Attdef`, `Attrib`, `Hatch`, `Dimension`, `Image`, `Viewport`),
+  so the enum is 328 bytes instead of 568 and a document of a million lines
+  and polylines is a quarter smaller. Code that constructs or matches these
+  variants needs `Box::new(...)` / `*boxed` (hence 0.18.0).
 - Prepare `ezdwg-core` for crates.io with package metadata, a Rust README and
   the MIT license. Verify the packaged crate and its documentation examples
   in CI, and publish tagged releases with `CARGO_REGISTRY_TOKEN`.
@@ -24,6 +29,37 @@
   to use the local Rust core and the shared workspace version.
 
 ### Native DWG writer
+- Saving a large drawing no longer builds every Python-side copy of every
+  entity at once. `to_dwg` / `Drawing.save` now prepare entities in batches
+  of 4,096 (normalise, validate, encode strings, build rows) and hand each
+  batch to the new incremental `ezdwg.raw.DwgWriter`, which converts it to
+  the compact Rust document before the next batch is built. The code page is
+  still selected from every string first, strict saves still fail before
+  anything is written, and the output of a drawing that fits in one batch is
+  unchanged. A synthetic drawing of 850,000 three-point LWPOLYLINEs saved
+  with a peak of 1,516 MB RSS instead of 3,023 MB (document 834 MB; 682 MB
+  for the save instead of 2,189 MB), in 34 s instead of 40 s; the resident
+  size after the save dropped from 1,178 MB to 856 MB because the writer
+  returns its freed heap to the operating system (glibc). A converter writing
+  a 3-sheet DWF plot set of 850,000 entities as DWG peaked at 2,648 MB
+  instead of 4,624 MB for the whole process.
+- Entities of a `Drawing` are now stored in their drawing (insertion) order,
+  which AutoCAD uses as the draw order, instead of grouped by kind. Texts
+  drawn before a solid hatch no longer end up on top of it. The one-shot raw
+  `write_dwg` / `write_ac1015_dwg` keep their documented grouping by kind.
+- `ezdwg.raw.DwgWriter(version)`: `set_tables(...)`, any number of
+  `add(...)` batches (the `write_dwg` keyword groups plus `entity_attributes`,
+  `entity_owners` and an optional `order` of group tags that interleaves the
+  groups of one batch), then `write(path)`. ATTRIBs may arrive in a later
+  batch than their INSERT; `reserve(count)` sizes the entity list once. The
+  writer returns freed heap to the operating system when it is created (so a
+  parsed source document the caller already dropped does not count towards
+  its peak) and after it has written. `ezdwg.raw.decode_entity_links(path)`
+  returns the `(handle, previous, next)` chain of every entity, i.e. the
+  stored draw order, and `ezdwg.raw.release_freed_heap()` exposes the trim.
+- `Drawing` copies entity dictionaries with a JSON-like copy instead of
+  `deepcopy` when adding, updating and saving entities (same result for the
+  numbers, strings, tuples, lists and dicts they hold; several times faster).
 - Add native AC1032 output with exact entity/layer RGB colors and UTF-16
   strings, including mixed-language names and supplementary characters.
   Select it with `ezdwg.new("AC1032")`, `to_dwg(..., version="AC1032")`,

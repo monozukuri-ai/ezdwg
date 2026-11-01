@@ -239,6 +239,40 @@ keyword-only `entity_attributes` (keyed by nonzero input handle), `layers`,
 30 (Windows-1252). Attributes name table entries rather than reusing source table
 handles. Unknown keys, missing references and invalid values raise `ValueError`.
 
+### Large drawings
+
+`to_dwg` and `Drawing.save` prepare entities in batches of 4,096 and hand each
+batch to the incremental writer `ezdwg.raw.DwgWriter` before the next one is
+built, so the Python side of a save stays at a few megabytes whatever the
+drawing size; the Rust document keeps a few hundred bytes per entity. The code
+page is still chosen from every string of the drawing first, and a strict save
+still fails before anything is written. A drawing of 850,000 short polylines
+saves with a peak of about 1.5 GB (the drawing itself is 0.8 GB) and the freed
+heap is returned to the operating system afterwards.
+
+Entities of a `Drawing` are stored in their drawing order, which is the order
+AutoCAD draws them in: a text added before a solid hatch stays underneath it.
+`ezdwg.raw.decode_entity_links(path)` returns the stored `(handle, previous,
+next)` chain of every entity. The one-shot `write_dwg` / `write_ac1015_dwg`
+keep their grouping by kind; callers that want both batches and an exact
+order use `DwgWriter` directly:
+
+```python
+writer = ezdwg.raw.DwgWriter("AC1015")
+writer.set_tables(layers=[{"name": "0", "color_index": 7}], blocks=[...])
+writer.reserve(total_model_space_entities)   # optional: grow the entity list once
+for batch in batches:                       # any number of batches
+    writer.add(lines=batch.lines, texts=batch.texts,
+               entity_attributes=batch.attributes,   # by handle, this batch only
+               entity_owners=batch.owners,           # block name, "*PAPER_SPACE" or INSERT handle
+               order=batch.order)                    # one group tag per entity, optional
+writer.write("large.dwg")                   # validates, encodes, replaces atomically
+```
+
+`order` tags index the `add` keyword groups in their declared order (`lines` is
+0, `arcs` 1, ... `viewports` 22); without it the groups of one batch follow
+the legacy order. `write` consumes the document.
+
 ## Native DWG Writer (AC1032)
 
 `AC1032` (AutoCAD 2018 format) preserves entity and layer RGB colors and uses

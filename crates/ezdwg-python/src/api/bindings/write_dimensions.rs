@@ -1,7 +1,7 @@
 /// DIMENSION rows are dictionaries: kind-specific definition points (3D WCS
 /// tuples), angles in radians, and the DIMSTYLE/anonymous block names.
-fn append_write_dimensions(
-    doc: &mut writer::WriterDocument,
+fn build_write_dimensions(
+    out: &mut Vec<writer::WriterEntity>,
     rows: Option<Vec<Bound<'_, PyDict>>>,
 ) -> PyResult<()> {
     use writer::ir::{DimensionEntity, DimensionKind};
@@ -98,29 +98,28 @@ fn append_write_dimensions(
             }
         };
         let handle = write_value(&d, "handle", 0u64)?;
-        doc.modelspace
-            .push(writer::WriterEntity::Dimension(DimensionEntity {
-                common: writer::CommonEntityProps {
-                    handle: (handle != 0).then_some(handle),
-                    ..Default::default()
-                },
-                kind,
-                text_midpoint: write_value(&d, "text_midpoint", (0., 0.))?,
-                elevation: write_value(&d, "elevation", 0.)?,
-                flags: write_value(&d, "flags", 3u8)?,
-                user_text: write_value(&d, "user_text", String::new())?,
-                text_rotation: write_value(&d, "text_rotation", 0.)?,
-                horizontal_direction: write_value(&d, "horizontal_direction", 0.)?,
-                insert_scale: write_value(&d, "insert_scale", (1., 1., 1.))?,
-                insert_rotation: write_value(&d, "insert_rotation", 0.)?,
-                attachment_point: write_value(&d, "attachment_point", 5u16)?,
-                line_spacing_style: write_value(&d, "line_spacing_style", 1u16)?,
-                line_spacing_factor: write_value(&d, "line_spacing_factor", 1.)?,
-                actual_measurement: write_value(&d, "actual_measurement", 0.)?,
-                insert_point: write_value(&d, "insert_point", (0., 0.))?,
-                dimstyle: write_value(&d, "dimstyle", "Standard".to_owned())?,
-                block_name: write_value(&d, "block_name", String::new())?,
-            }));
+        out.push(writer::WriterEntity::Dimension(Box::new(DimensionEntity {
+            common: writer::CommonEntityProps {
+                handle: (handle != 0).then_some(handle),
+                ..Default::default()
+            },
+            kind,
+            text_midpoint: write_value(&d, "text_midpoint", (0., 0.))?,
+            elevation: write_value(&d, "elevation", 0.)?,
+            flags: write_value(&d, "flags", 3u8)?,
+            user_text: write_value(&d, "user_text", String::new())?,
+            text_rotation: write_value(&d, "text_rotation", 0.)?,
+            horizontal_direction: write_value(&d, "horizontal_direction", 0.)?,
+            insert_scale: write_value(&d, "insert_scale", (1., 1., 1.))?,
+            insert_rotation: write_value(&d, "insert_rotation", 0.)?,
+            attachment_point: write_value(&d, "attachment_point", 5u16)?,
+            line_spacing_style: write_value(&d, "line_spacing_style", 1u16)?,
+            line_spacing_factor: write_value(&d, "line_spacing_factor", 1.)?,
+            actual_measurement: write_value(&d, "actual_measurement", 0.)?,
+            insert_point: write_value(&d, "insert_point", (0., 0.))?,
+            dimstyle: write_value(&d, "dimstyle", "Standard".to_owned())?,
+            block_name: write_value(&d, "block_name", String::new())?,
+        })));
     }
     Ok(())
 }

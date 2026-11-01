@@ -1,7 +1,7 @@
 /// VIEWPORT rows are dictionaries (angles in radians); `layout` holds the
 /// paper-space LAYOUT settings in millimetres.
-fn append_write_viewports(
-    doc: &mut writer::WriterDocument,
+fn build_write_viewports(
+    out: &mut Vec<writer::WriterEntity>,
     viewports: Option<Vec<Bound<'_, PyDict>>>,
 ) -> PyResult<()> {
     use writer::ir::ViewportEntity;
@@ -41,40 +41,39 @@ fn append_write_viewports(
         )?;
         let handle = write_value(&d, "handle", 0u64)?;
         let v = ViewportEntity::default();
-        doc.modelspace
-            .push(writer::WriterEntity::Viewport(ViewportEntity {
-                common: writer::CommonEntityProps {
-                    handle: (handle != 0).then_some(handle),
-                    ..Default::default()
-                },
-                center: write_value(&d, "center", v.center)?,
-                width: write_value(&d, "width", v.width)?,
-                height: write_value(&d, "height", v.height)?,
-                view_target: write_value(&d, "view_target", v.view_target)?,
-                view_direction: write_value(&d, "view_direction", v.view_direction)?,
-                twist_angle: write_value(&d, "twist_angle", v.twist_angle)?,
-                view_height: write_value(&d, "view_height", v.view_height)?,
-                lens_length: write_value(&d, "lens_length", v.lens_length)?,
-                front_clip_z: write_value(&d, "front_clip_z", v.front_clip_z)?,
-                back_clip_z: write_value(&d, "back_clip_z", v.back_clip_z)?,
-                snap_angle: write_value(&d, "snap_angle", v.snap_angle)?,
-                view_center: write_value(&d, "view_center", v.view_center)?,
-                snap_base: write_value(&d, "snap_base", v.snap_base)?,
-                snap_spacing: write_value(&d, "snap_spacing", v.snap_spacing)?,
-                grid_spacing: write_value(&d, "grid_spacing", v.grid_spacing)?,
-                circle_zoom: write_value(&d, "circle_zoom", v.circle_zoom)?,
-                status_flags: write_value(&d, "status_flags", v.status_flags)?,
-                style_sheet: write_value(&d, "style_sheet", v.style_sheet)?,
-                render_mode: write_value(&d, "render_mode", v.render_mode)?,
-                ucs_at_origin: write_value(&d, "ucs_at_origin", v.ucs_at_origin)?,
-                ucs_per_viewport: write_value(&d, "ucs_per_viewport", v.ucs_per_viewport)?,
-                ucs_origin: write_value(&d, "ucs_origin", v.ucs_origin)?,
-                ucs_x_axis: write_value(&d, "ucs_x_axis", v.ucs_x_axis)?,
-                ucs_y_axis: write_value(&d, "ucs_y_axis", v.ucs_y_axis)?,
-                ucs_elevation: write_value(&d, "ucs_elevation", v.ucs_elevation)?,
-                ucs_ortho_view_type: write_value(&d, "ucs_ortho_view_type", v.ucs_ortho_view_type)?,
-                frozen_layers: write_value(&d, "frozen_layers", Vec::new())?,
-            }));
+        out.push(writer::WriterEntity::Viewport(Box::new(ViewportEntity {
+            common: writer::CommonEntityProps {
+                handle: (handle != 0).then_some(handle),
+                ..Default::default()
+            },
+            center: write_value(&d, "center", v.center)?,
+            width: write_value(&d, "width", v.width)?,
+            height: write_value(&d, "height", v.height)?,
+            view_target: write_value(&d, "view_target", v.view_target)?,
+            view_direction: write_value(&d, "view_direction", v.view_direction)?,
+            twist_angle: write_value(&d, "twist_angle", v.twist_angle)?,
+            view_height: write_value(&d, "view_height", v.view_height)?,
+            lens_length: write_value(&d, "lens_length", v.lens_length)?,
+            front_clip_z: write_value(&d, "front_clip_z", v.front_clip_z)?,
+            back_clip_z: write_value(&d, "back_clip_z", v.back_clip_z)?,
+            snap_angle: write_value(&d, "snap_angle", v.snap_angle)?,
+            view_center: write_value(&d, "view_center", v.view_center)?,
+            snap_base: write_value(&d, "snap_base", v.snap_base)?,
+            snap_spacing: write_value(&d, "snap_spacing", v.snap_spacing)?,
+            grid_spacing: write_value(&d, "grid_spacing", v.grid_spacing)?,
+            circle_zoom: write_value(&d, "circle_zoom", v.circle_zoom)?,
+            status_flags: write_value(&d, "status_flags", v.status_flags)?,
+            style_sheet: write_value(&d, "style_sheet", v.style_sheet)?,
+            render_mode: write_value(&d, "render_mode", v.render_mode)?,
+            ucs_at_origin: write_value(&d, "ucs_at_origin", v.ucs_at_origin)?,
+            ucs_per_viewport: write_value(&d, "ucs_per_viewport", v.ucs_per_viewport)?,
+            ucs_origin: write_value(&d, "ucs_origin", v.ucs_origin)?,
+            ucs_x_axis: write_value(&d, "ucs_x_axis", v.ucs_x_axis)?,
+            ucs_y_axis: write_value(&d, "ucs_y_axis", v.ucs_y_axis)?,
+            ucs_elevation: write_value(&d, "ucs_elevation", v.ucs_elevation)?,
+            ucs_ortho_view_type: write_value(&d, "ucs_ortho_view_type", v.ucs_ortho_view_type)?,
+            frozen_layers: write_value(&d, "frozen_layers", Vec::new())?,
+        })));
     }
     Ok(())
 }

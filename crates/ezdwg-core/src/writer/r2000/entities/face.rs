@@ -156,15 +156,15 @@ mod tests {
             points,
             invisible_edge_flags: 15,
         };
-        assert!(check(WriterEntity::Face3d(good.clone())).is_ok());
+        assert!(check(WriterEntity::Face3d(Box::new(good.clone()))).is_ok());
         let mut v = good.clone();
         v.invisible_edge_flags = 16;
-        assert!(check(WriterEntity::Face3d(v)).is_err());
+        assert!(check(WriterEntity::Face3d(Box::new(v))).is_err());
         let mut v = good.clone();
         v.common.formatting.thickness = 1.;
-        assert!(check(WriterEntity::Face3d(v)).is_err());
+        assert!(check(WriterEntity::Face3d(Box::new(v))).is_err());
         let mut v = good;
         v.common.formatting.extrusion = (0., 1., 0.);
-        assert!(check(WriterEntity::Face3d(v)).is_err());
+        assert!(check(WriterEntity::Face3d(Box::new(v))).is_err());
     }
 }

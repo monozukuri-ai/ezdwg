@@ -1,6 +1,6 @@
 /// HATCH rows are dictionaries: boundary paths, pattern definition and seeds.
-fn append_write_hatches(
-    doc: &mut writer::WriterDocument,
+fn build_write_hatches(
+    out: &mut Vec<writer::WriterEntity>,
     rows: Option<Vec<Bound<'_, PyDict>>>,
 ) -> PyResult<()> {
     use writer::ir::{
@@ -124,7 +124,7 @@ fn append_write_hatches(
             }
             None => None,
         };
-        doc.modelspace.push(writer::WriterEntity::Hatch(HatchEntity {
+        out.push(writer::WriterEntity::Hatch(Box::new(HatchEntity {
             common: writer::CommonEntityProps {
                 handle: (handle != 0).then_some(handle),
                 ..Default::default()
@@ -137,7 +137,7 @@ fn append_write_hatches(
             pattern,
             pixel_size: write_value(&d, "pixel_size", None)?,
             seed_points: write_value(&d, "seed_points", Vec::new())?,
-        }));
+        })));
     }
     Ok(())
 }

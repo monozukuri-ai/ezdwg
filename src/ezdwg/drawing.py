@@ -25,9 +25,12 @@ from ._viewport import (
 )
 from ._write_preflight import (
     ATTRIBUTES,
+    TextEncoder,
     WriteDiagnostic,
+    WritePlan,
+    entity_strings,
     geometry_error,
-    prepare_strings,
+    row_strings,
 )
 from ._write_spline import FIELDS as _SPLINE_FIELDS
 from .entity import Entity
@@ -37,6 +40,10 @@ if TYPE_CHECKING:
     from .document import Document
 
 _TABLE_KINDS = {"DOCUMENT", "HEADER", "LAYER", "LTYPE", "STYLE", "BLOCK"}
+#: Entities prepared and handed to the native writer at a time on save. Each
+#: prepared entity is a few copies of its dictionary, so this bounds the Python
+#: side of a save to a few megabytes regardless of the drawing size.
+WRITE_BATCH = 4096
 _COMMON = {
     "layer",
     "color_index",
@@ -184,8 +191,23 @@ def new(version: str = "AC1015") -> Drawing:
     return Drawing(version)
 
 
+def _copy(value: Any) -> Any:
+    """Fresh containers at every level; scalars (numbers, strings) are shared.
+
+    Entity dictionaries hold JSON-like data, for which this equals ``deepcopy``
+    at a fraction of its cost (a large drawing copies every entity on save).
+    """
+    if isinstance(value, list):
+        return [_copy(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_copy(v) for v in value)
+    if isinstance(value, dict):
+        return {k: _copy(v) for k, v in value.items()}
+    return value
+
+
 def _normalize(data: Mapping[str, Any]) -> dict[str, Any]:
-    result = deepcopy(dict(data))
+    result = _copy(dict(data))
     for key in _POINTS | _VECTORS:
         value = result.get(key)
         if isinstance(value, (list, tuple)):
@@ -455,7 +477,21 @@ class Drawing:
     ) -> WriteResult:
         return self.save(output_path, strict=strict)
 
-    def _prepare_write(self, entities: list[Entity], block_rows=None, *, version=None):
+    def _write_plan(
+        self,
+        entities: list[Entity],
+        block_rows=None,
+        *,
+        version=None,
+        batch: int = WRITE_BATCH,
+    ) -> WritePlan:
+        """Tables plus batches of prepared entities for ``to_dwg``.
+
+        The code page is selected from every string first; entities are then
+        normalised, validated and encoded ``batch`` at a time while the native
+        writer consumes them, so a drawing of a million entities never holds
+        more than one batch of prepared copies.
+        """
         version = self.version if version is None else version
         selected = {e.handle for e in entities}
         diagnostics = [
@@ -463,62 +499,6 @@ class Drawing:
             for d in self.diagnostics
             if d.dxftype in _TABLE_KINDS or d.handle in selected
         ]
-        attrs, prepared = {}, []
-        for entity in entities:
-            allowed = _FIELDS.get(entity.dxftype, set()) | _COMMON
-            for key in entity.dxf.keys() - allowed:
-                diagnostics.append(
-                    WriteDiagnostic(
-                        entity.handle,
-                        entity.dxftype,
-                        key,
-                        "unsupported editable attribute",
-                        "dropped",
-                    )
-                )
-            data = _normalize({k: v for k, v in entity.dxf.items() if k in allowed})
-            copy = Entity(entity.dxftype, entity.handle, data)
-            # Direct dictionary mutations receive the same validation as update().
-            if entity.dxftype in _FIELDS:
-                try:
-                    _check_entity(copy)
-                except ValueError as exc:
-                    diagnostics.append(
-                        WriteDiagnostic(
-                            entity.handle,
-                            entity.dxftype,
-                            "geometry",
-                            str(exc),
-                            "skipped",
-                        )
-                    )
-                    copy = Entity(entity.dxftype, entity.handle, {})
-            prepared.append(copy)
-            # VIEWPORT ``width`` is the window size, not the text width factor.
-            common_keys = (
-                _COMMON if entity.dxftype == "VIEWPORT" else _COMMON | ATTRIBUTES | {"style"}
-            )
-            attrs[entity.handle] = {
-                k: v for k, v in data.items() if k in common_keys and v is not None
-            }
-            # AC1015 has no true colour: round it to the nearest ACI and report.
-            true_color = attrs[entity.handle].get("true_color")
-            if version == "AC1015":
-                attrs[entity.handle].pop("true_color", None)
-            if true_color is not None and version == "AC1015":
-                index = nearest_aci(true_color)
-                attrs[entity.handle]["color_index"] = index
-                diagnostics.append(
-                    WriteDiagnostic(
-                        entity.handle,
-                        entity.dxftype,
-                        "true_color",
-                        describe_approximation(true_color, index),
-                        "approximated",
-                    )
-                )
-            # New entities default to ByLayer (the raw tuple API defaults to ACI 7).
-            attrs[entity.handle].setdefault("color_index", 256)
 
         def rows(table, kind=None):
             result = {}
@@ -552,20 +532,103 @@ class Drawing:
         for name, props in self.image_defs.items():
             image_def_error(name, props)
             image_rows[name] = {"name": name, **deepcopy(props)}
-        return prepare_strings(
-            prepared,
-            attrs,
-            rows(self.layers, "LAYER"),
-            rows(self.linetypes),
-            rows(self.text_styles),
-            deepcopy(self.header),
-            diagnostics,
-            block_rows,
-            image_rows,
-            layout_row(self.layout),
-            version=version,
+        layer_rows = rows(self.layers, "LAYER")
+        ltype_rows = rows(self.linetypes)
+        style_rows = rows(self.text_styles)
+        block_rows = block_rows or {}
+        metadata = deepcopy(self.header)
+        layout = layout_row(self.layout)
+        strings = entity_strings(entities) + row_strings(
+            layer_rows.values(),
+            ltype_rows.values(),
+            style_rows.values(),
+            block_rows.values(),
+            image_rows.values(),
+            [layout],
+        )
+        encoder = TextEncoder(strings, metadata, diagnostics, version=version)
+        for table, kind in (
+            (layer_rows, "LAYER"),
+            (ltype_rows, "LTYPE"),
+            (style_rows, "STYLE"),
+            (block_rows, "BLOCK"),
+            (image_rows, "IMAGEDEF"),
+            ({"layout": layout}, "LAYOUT"),
+        ):
+            encoder.rows(table.values(), kind)
+        return WritePlan(
+            layers=list(layer_rows.values()),
+            linetypes=list(ltype_rows.values()),
+            text_styles=list(style_rows.values()),
+            metadata=metadata,
+            diagnostics=diagnostics,
+            image_defs=list(image_rows.values()),
+            layout=layout,
+            chunks=self._write_batches(entities, encoder, diagnostics, version, batch),
         )
 
+    def _write_batches(self, entities, encoder, diagnostics, version, size):
+        """Yield ``(prepared entities, attributes by handle)`` per batch."""
+        for start in range(0, len(entities), size):
+            attrs, prepared = {}, []
+            for entity in entities[start : start + size]:
+                allowed = _FIELDS.get(entity.dxftype, set()) | _COMMON
+                for key in entity.dxf.keys() - allowed:
+                    diagnostics.append(
+                        WriteDiagnostic(
+                            entity.handle,
+                            entity.dxftype,
+                            key,
+                            "unsupported editable attribute",
+                            "dropped",
+                        )
+                    )
+                data = _normalize({k: v for k, v in entity.dxf.items() if k in allowed})
+                copy = Entity(entity.dxftype, entity.handle, data)
+                # Direct dictionary mutations receive the same validation as update().
+                if entity.dxftype in _FIELDS:
+                    try:
+                        _check_entity(copy)
+                    except ValueError as exc:
+                        diagnostics.append(
+                            WriteDiagnostic(
+                                entity.handle,
+                                entity.dxftype,
+                                "geometry",
+                                str(exc),
+                                "skipped",
+                            )
+                        )
+                        copy = Entity(entity.dxftype, entity.handle, {})
+                prepared.append(encoder.entity(copy))
+                # VIEWPORT ``width`` is the window size, not the text width factor.
+                common_keys = (
+                    _COMMON if entity.dxftype == "VIEWPORT" else _COMMON | ATTRIBUTES | {"style"}
+                )
+                attrs[entity.handle] = {
+                    k: v for k, v in data.items() if k in common_keys and v is not None
+                }
+                # AC1015 has no true colour: round it to the nearest ACI and report.
+                true_color = attrs[entity.handle].get("true_color")
+                if version == "AC1015":
+                    attrs[entity.handle].pop("true_color", None)
+                if true_color is not None and version == "AC1015":
+                    index = nearest_aci(true_color)
+                    attrs[entity.handle]["color_index"] = index
+                    diagnostics.append(
+                        WriteDiagnostic(
+                            entity.handle,
+                            entity.dxftype,
+                            "true_color",
+                            describe_approximation(true_color, index),
+                            "approximated",
+                        )
+                    )
+                # New entities default to ByLayer (the raw tuple API defaults to ACI 7).
+                attrs[entity.handle].setdefault("color_index", 256)
+            # References must use exactly the same encoded names as the table records.
+            encoder.attributes(attrs)
+            yield prepared, attrs
 
 class EditableLayout:
     """Persistent entities of one space or block with stable, unique integer handles."""

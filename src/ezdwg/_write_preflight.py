@@ -900,6 +900,183 @@ def select_codepage(strings, requested=None):
     return (best[1], best[2]) if best else ("cp1252", 30)
 
 
+_ENTITY_STRING_KEYS = ("text", "raw_text", "tag", "prompt", "name", "image_def", "style_sheet")
+
+
+def entity_strings(entities) -> list[str]:
+    """The entity strings the writer stores, for code page selection."""
+    return [
+        value
+        for e in entities
+        for key in _ENTITY_STRING_KEYS
+        if isinstance(value := e.dxf.get(key), str)
+    ]
+
+
+def row_strings(*tables) -> list[str]:
+    """The string values of table rows (each table is an iterable of dicts)."""
+    return [
+        value
+        for rows in tables
+        for row in rows
+        for value in row.values()
+        if isinstance(value, str)
+    ]
+
+
+class TextEncoder:
+    """Legacy text encoding of one document, applied in batches.
+
+    The code page is chosen once from every string the file will contain
+    (``select_codepage``); entities, table rows and attribute dictionaries are
+    then encoded in any number of batches, so a large drawing never holds all
+    its encoded copies at once. Losses are appended to ``diagnostics``.
+    ``metadata["codepage"]`` receives the selected code page.
+    """
+
+    def __init__(self, strings, metadata, diagnostics, *, version="AC1015"):
+        self.version = version
+        self.diagnostics = diagnostics
+        requested = metadata.get("codepage")
+        if (
+            version != "AC1032"
+            and requested is not None
+            and requested not in _CODEPAGE_CODEC
+        ):
+            self.report(None, "HEADER", "codepage", "unsupported code page; selected automatically")
+            requested = None
+        self.codec, metadata["codepage"] = (
+            ("utf-16-le", 30) if version == "AC1032" else select_codepage(strings, requested)
+        )
+        self.codepage = metadata["codepage"]
+
+    def report(self, handle, kind, attr, message, action="defaulted"):
+        self.diagnostics.append(WriteDiagnostic(handle, kind, attr, message, action))
+
+    def text(self, value, handle, kind, attr):
+        """Encode one string, replacing only with an explicit diagnostic."""
+        codec, codepage, version = self.codec, self.codepage, self.version
+        if (
+            "\0" not in value
+            and (version == "AC1032" or _storable(codec, codepage, value))
+            and len(value.encode(codec)) <= (131070 if version == "AC1032" else 65535)
+        ):
+            return value
+        self.report(handle, kind, attr, f"string cannot be stored in {codec}", "replaced")
+        if version == "AC1032":
+            return (
+                value.replace("\0", " ").encode(codec)[:131070]
+                .decode(codec, errors="ignore")
+            )
+        text, _ = replace_unrepresentable(codepage, value.replace("\0", " "))
+        return (
+            text.encode(codec, errors="replace")[:65535].decode(codec, errors="ignore")
+        )
+
+    def entity(self, e) -> Entity:
+        """An independent copy of ``e`` with its strings encoded."""
+        d = dict(e.dxf)
+        for key in ("text", "raw_text", "tag", "prompt", "name", "style_sheet"):
+            if isinstance(d.get(key), str):
+                d[key] = self.text(d[key], e.handle, e.dxftype, key)
+        # Frozen layer references must match the encoded LAYER record names.
+        if e.dxftype == "VIEWPORT" and isinstance(d.get("frozen_layers"), list):
+            codec = self.codec
+            d["frozen_layers"] = [
+                name.encode(codec, errors="replace").decode(codec)
+                for name in d["frozen_layers"]
+            ]
+        # Only the legacy raw tuple accepts DXF bit 1 as closure. Decoded DWG
+        # flag 1 is an explicit normal; carry closure independently here.
+        if e.dxftype == "LWPOLYLINE":
+            d["flags"] = (int(d.get("flags", 0)) & 0x80) | (
+                0x200 if d.get("closed", int(d.get("flags", 0)) & 0x200) else 0
+            )
+        return Entity(e.dxftype, e.handle, d)
+
+    def rows(self, rows, kind) -> None:
+        """Encode the string values of table rows in place."""
+        for row in rows:
+            for key, value in row.items():
+                if isinstance(value, str):
+                    row[key] = self.text(value, None, kind, key)
+
+    def attributes(self, attrs) -> None:
+        """Re-encode table references so they match the encoded record names."""
+        codec = self.codec
+        for a in attrs.values():
+            for key in ("layer", "linetype", "style"):
+                if key in a:
+                    a[key] = a[key].encode(codec, errors="replace").decode(codec)
+
+
+class WritePlan:
+    """Everything ``to_dwg`` hands to the native writer.
+
+    The tables are complete dictionaries; ``chunks`` yields batches of
+    ``(prepared entities, attributes by handle)`` so that only one batch of
+    prepared copies exists at a time. ``diagnostics`` keeps growing while the
+    batches are consumed.
+    """
+
+    __slots__ = (
+        "layers",
+        "linetypes",
+        "text_styles",
+        "metadata",
+        "diagnostics",
+        "image_defs",
+        "layout",
+        "chunks",
+    )
+
+    def __init__(
+        self,
+        *,
+        layers,
+        linetypes,
+        text_styles,
+        metadata,
+        diagnostics,
+        image_defs,
+        layout,
+        chunks,
+    ):
+        self.layers = layers
+        self.linetypes = linetypes
+        self.text_styles = text_styles
+        self.metadata = metadata
+        self.diagnostics = diagnostics
+        self.image_defs = image_defs
+        self.layout = layout
+        self.chunks = chunks
+
+    @classmethod
+    def single_batch(cls, prepared) -> WritePlan:
+        """Wrap the tuple of ``prepare_strings`` / ``prepare_attributes``."""
+        (
+            entities,
+            attrs,
+            layers,
+            linetypes,
+            text_styles,
+            metadata,
+            diagnostics,
+            image_defs,
+            layout,
+        ) = prepared
+        return cls(
+            layers=layers,
+            linetypes=linetypes,
+            text_styles=text_styles,
+            metadata=metadata,
+            diagnostics=diagnostics,
+            image_defs=image_defs,
+            layout=layout,
+            chunks=[(entities, attrs)],
+        )
+
+
 def prepare_strings(
     entities,
     attrs,
@@ -919,85 +1096,20 @@ def prepare_strings(
     ``layout_row`` (paper-space LAYOUT settings) is encoded like the table rows
     and returned as the last element; ``None`` keeps the writer defaults.
     """
-
-    def report(handle, kind, attr, message, action="defaulted"):
-        diagnostics.append(WriteDiagnostic(handle, kind, attr, message, action))
-
     # Select a legacy encoding for all strings, including table and font names.
     block_rows = block_rows or {}
     image_rows = image_rows or {}
     layout_row = dict(layout_row) if layout_row is not None else None
-    strings = [
-        str(e.dxf.get(k, ""))
-        for e in entities
-        for k in ("text", "raw_text", "tag", "prompt", "name", "image_def", "style_sheet")
-    ]
-    strings += [
-        v
-        for r in (
-            *layer_rows.values(),
-            *ltype_rows.values(),
-            *style_rows.values(),
-            *block_rows.values(),
-            *image_rows.values(),
-            *([layout_row] if layout_row else []),
-        )
-        for v in r.values()
-        if isinstance(v, str)
-    ]
-
-    requested = metadata.get("codepage")
-    if (
-        version != "AC1032"
-        and requested is not None
-        and requested not in _CODEPAGE_CODEC
-    ):
-        report(None, "HEADER", "codepage", "unsupported code page; selected automatically")
-        requested = None
-    codec, metadata["codepage"] = (
-        ("utf-16-le", 30) if version == "AC1032" else select_codepage(strings, requested)
+    strings = entity_strings(entities) + row_strings(
+        layer_rows.values(),
+        ltype_rows.values(),
+        style_rows.values(),
+        block_rows.values(),
+        image_rows.values(),
+        [layout_row] if layout_row else [],
     )
-
-    codepage = metadata["codepage"]
-
-    # Replace only with explicit diagnostics; strict will reject before writing.
-    def encode_text(value, handle, kind, attr):
-        if (
-            "\0" not in value
-            and (version == "AC1032" or _storable(codec, codepage, value))
-            and len(value.encode(codec)) <= (131070 if version == "AC1032" else 65535)
-        ):
-            return value
-        report(handle, kind, attr, f"string cannot be stored in {codec}", "replaced")
-        if version == "AC1032":
-            return (
-                value.replace("\0", " ").encode(codec)[:131070]
-                .decode(codec, errors="ignore")
-            )
-        text, _ = replace_unrepresentable(codepage, value.replace("\0", " "))
-        return (
-            text.encode(codec, errors="replace")[:65535].decode(codec, errors="ignore")
-        )
-
-    prepared = []
-    for e in entities:
-        d = dict(e.dxf)
-        for key in ("text", "raw_text", "tag", "prompt", "name", "style_sheet"):
-            if isinstance(d.get(key), str):
-                d[key] = encode_text(d[key], e.handle, e.dxftype, key)
-        # Frozen layer references must match the encoded LAYER record names.
-        if e.dxftype == "VIEWPORT" and isinstance(d.get("frozen_layers"), list):
-            d["frozen_layers"] = [
-                name.encode(codec, errors="replace").decode(codec)
-                for name in d["frozen_layers"]
-            ]
-        # Only the legacy raw tuple accepts DXF bit 1 as closure. Decoded DWG
-        # flag 1 is an explicit normal; carry closure independently here.
-        if e.dxftype == "LWPOLYLINE":
-            d["flags"] = (int(d.get("flags", 0)) & 0x80) | (
-                0x200 if d.get("closed", int(d.get("flags", 0)) & 0x200) else 0
-            )
-        prepared.append(Entity(e.dxftype, e.handle, d))
+    encoder = TextEncoder(strings, metadata, diagnostics, version=version)
+    prepared = [encoder.entity(e) for e in entities]
     for rows, kind in (
         (layer_rows, "LAYER"),
         (ltype_rows, "LTYPE"),
@@ -1006,15 +1118,9 @@ def prepare_strings(
         (image_rows, "IMAGEDEF"),
         ({"layout": layout_row} if layout_row else {}, "LAYOUT"),
     ):
-        for row in rows.values():
-            for key, value in row.items():
-                if isinstance(value, str):
-                    row[key] = encode_text(value, None, kind, key)
+        encoder.rows(rows.values(), kind)
     # References must use exactly the same encoded names as the table records.
-    for a in attrs.values():
-        for key in ("layer", "linetype", "style"):
-            if key in a:
-                a[key] = a[key].encode(codec, errors="replace").decode(codec)
+    encoder.attributes(attrs)
     return (
         prepared,
         attrs,

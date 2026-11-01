@@ -1,5 +1,5 @@
-fn append_write_splines(
-    doc: &mut writer::WriterDocument,
+fn build_write_splines(
+    out: &mut Vec<writer::WriterEntity>,
     rows: Option<Vec<Bound<'_, PyDict>>>,
 ) -> PyResult<()> {
     use writer::ir::{SplineData, SplineEntity};
@@ -83,15 +83,14 @@ fn append_write_splines(
             _ => return Err(PyValueError::new_err("SPLINE scenario must be 1 or 2")),
         };
         let handle = write_value(&d, "handle", 0u64)?;
-        doc.modelspace
-            .push(writer::WriterEntity::Spline(SplineEntity {
-                common: writer::CommonEntityProps {
-                    handle: (handle != 0).then_some(handle),
-                    ..Default::default()
-                },
-                degree: write_value(&d, "degree", 3u32)?,
-                data,
-            }));
+        out.push(writer::WriterEntity::Spline(Box::new(SplineEntity {
+            common: writer::CommonEntityProps {
+                handle: (handle != 0).then_some(handle),
+                ..Default::default()
+            },
+            degree: write_value(&d, "degree", 3u32)?,
+            data,
+        })));
     }
     Ok(())
 }

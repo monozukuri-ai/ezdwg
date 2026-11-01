@@ -380,6 +380,10 @@ pub struct CommonEntityProps {
     pub formatting: EntityFormatting,
 }
 
+/// One entity of a layout. The rarer, larger kinds are boxed so that the enum
+/// stays at the size of a line-work entity (see `MAX_ENTITY_SIZE`): a drawing
+/// with a million lines and polylines keeps a few hundred bytes per entity
+/// instead of the size of the largest variant.
 #[derive(Debug, Clone)]
 pub enum WriterEntity {
     Line(LineEntity),
@@ -389,23 +393,26 @@ pub enum WriterEntity {
     Arc(ArcEntity),
     Circle(CircleEntity),
     Ellipse(EllipseEntity),
-    Spline(SplineEntity),
+    Spline(Box<SplineEntity>),
     Solid(PlanarFaceEntity),
     Trace(PlanarFaceEntity),
-    Face3d(Face3dEntity),
+    Face3d(Box<Face3dEntity>),
     Polyline2d(PolylineEntity),
     Polyline3d(PolylineEntity),
     LwPolyline(LwPolylineEntity),
     Text(TextEntity),
     MText(MTextEntity),
-    Insert(InsertEntity),
-    Attdef(AttributeEntity),
-    Attrib(AttributeEntity),
-    Hatch(HatchEntity),
-    Dimension(DimensionEntity),
-    Image(ImageEntity),
-    Viewport(ViewportEntity),
+    Insert(Box<InsertEntity>),
+    Attdef(Box<AttributeEntity>),
+    Attrib(Box<AttributeEntity>),
+    Hatch(Box<HatchEntity>),
+    Dimension(Box<DimensionEntity>),
+    Image(Box<ImageEntity>),
+    Viewport(Box<ViewportEntity>),
 }
+
+/// Upper bound of `size_of::<WriterEntity>()`, kept by boxing the large variants.
+pub const MAX_ENTITY_SIZE: usize = 336;
 
 impl WriterEntity {
     pub fn common(&self) -> &CommonEntityProps {
@@ -874,4 +881,14 @@ impl WriterDocument {
     pub const PAPER_LAYOUT: usize = 1;
     /// First block definition index in `layouts()`.
     pub const FIRST_BLOCK_LAYOUT: usize = 2;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entity_enum_stays_small() {
+        assert!(std::mem::size_of::<WriterEntity>() <= MAX_ENTITY_SIZE);
+    }
 }
