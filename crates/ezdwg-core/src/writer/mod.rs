@@ -1,4 +1,5 @@
 pub mod config;
+pub mod encoder;
 pub mod error;
 pub mod handle_allocator;
 pub mod ir;
@@ -8,6 +9,7 @@ pub mod r2018;
 pub mod validation;
 
 pub use config::WriterConfig;
+pub use encoder::{DocumentEncoder, DocumentTables, EncodedDocument, LayoutId};
 pub use handle_allocator::HandleAllocator;
 pub use ir::{
     ArcEntity, AttributeEntity, BlockDef, CircleEntity, CommonEntityProps, EllipseEntity,

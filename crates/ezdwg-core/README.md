@@ -72,6 +72,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+For large drawings, feed the entities to the incremental encoder instead of
+building a `WriterDocument`: each entity is written to its object record as
+it arrives and only the records stay in memory. The encoder needs the largest
+entity handle up front so it can number the tables above it.
+
+```rust
+use ezdwg_core::writer::{
+    DocumentEncoder, DocumentTables, LayoutId, LineEntity, WriterConfig, WriterEntity,
+};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut encoder = DocumentEncoder::new(DocumentTables::default(), WriterConfig::default(), 1_000)?;
+    for handle in 1..=1_000u64 {
+        let mut line = LineEntity {
+            start: (0.0, handle as f64, 0.0),
+            end: (10.0, handle as f64, 0.0),
+            ..Default::default()
+        };
+        line.common.handle = Some(handle);
+        encoder.push(LayoutId::Model, WriterEntity::Line(line))?;
+    }
+    let bytes = encoder.finish()?.into_bytes()?;
+    assert_eq!(&bytes[..6], b"AC1015");
+    Ok(())
+}
+```
+
 The Rust API is evolving and follows the shared ezdwg release version.
 See the [API reference](https://docs.rs/ezdwg-core) and the
 [project documentation](https://monozukuri-ai.github.io/ezdwg/) for details.

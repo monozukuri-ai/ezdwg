@@ -52,12 +52,16 @@ def write_ac1015_line_dwg(output_path: str, lines: list[tuple[int, float, float,
 class DwgWriter:
     """Incremental DWG writer: tables once, entities in batches, then the file.
 
+    With ``max_handle`` (the largest entity handle that will be added) every
+    batch is encoded to object records as it arrives and only those records
+    are kept; without it the entities wait in a document until ``write``.
     Entities keep the order of the ``add`` calls; ``order`` (one group tag per
     entity, in the order of the ``add`` keyword groups) interleaves the groups
-    of one call. ``write`` consumes the document.
+    of one call. Tables are fixed once entities have been added, and ``write``
+    consumes the document.
     """
 
-    def __init__(self, version: str = ...) -> None: ...
+    def __init__(self, version: str = ..., max_handle: int | None = ...) -> None: ...
     @property
     def entity_count(self) -> int: ...
     def reserve(self, count: int) -> None: ...
@@ -71,6 +75,15 @@ class DwgWriter:
         blocks: list[dict[str, Any]] | None = ...,
         image_defs: list[dict[str, Any]] | None = ...,
         layout: dict[str, Any] | None = ...,
+    ) -> None: ...
+    def add_tables(
+        self,
+        *,
+        layers: list[dict[str, Any]] | None = ...,
+        linetypes: list[dict[str, Any]] | None = ...,
+        text_styles: list[dict[str, Any]] | None = ...,
+        blocks: list[dict[str, Any]] | None = ...,
+        image_defs: list[dict[str, Any]] | None = ...,
     ) -> None: ...
     def add(
         self,

@@ -500,41 +500,13 @@ class Drawing:
             if d.dxftype in _TABLE_KINDS or d.handle in selected
         ]
 
-        def rows(table, kind=None):
-            result = {}
-            for name, props in table.items():
-                if "name" in props:
-                    raise ValueError("table name belongs in the dictionary key")
-                row = {"name": name, **deepcopy(props)}
-                if (
-                    kind == "LAYER"
-                    and row.get("true_color") is not None
-                    and version == "AC1015"
-                ):
-                    index = nearest_aci(row.pop("true_color"))
-                    row["color_index"] = index
-                    diagnostics.append(
-                        WriteDiagnostic(
-                            None,
-                            "LAYER",
-                            "true_color",
-                            f"layer {name!r}: "
-                            + describe_approximation(props["true_color"], index),
-                            "approximated",
-                        )
-                    )
-                elif kind == "LAYER" and row.get("true_color") is None:
-                    row.pop("true_color", None)
-                result[name] = row
-            return result
-
         image_rows = {}
         for name, props in self.image_defs.items():
             image_def_error(name, props)
             image_rows[name] = {"name": name, **deepcopy(props)}
-        layer_rows = rows(self.layers, "LAYER")
-        ltype_rows = rows(self.linetypes)
-        style_rows = rows(self.text_styles)
+        layer_rows = _table_rows(self.layers, "LAYER", version, diagnostics)
+        ltype_rows = _table_rows(self.linetypes, None, version, diagnostics)
+        style_rows = _table_rows(self.text_styles, None, version, diagnostics)
         block_rows = block_rows or {}
         metadata = deepcopy(self.header)
         layout = layout_row(self.layout)
@@ -630,6 +602,31 @@ class Drawing:
             encoder.attributes(attrs)
             yield prepared, attrs
 
+def _table_rows(table, kind, version, diagnostics) -> dict[str, dict[str, Any]]:
+    """Writer rows of a name → properties table; AC1015 rounds layer true colours."""
+    result = {}
+    for name, props in table.items():
+        if "name" in props:
+            raise ValueError("table name belongs in the dictionary key")
+        row = {"name": name, **deepcopy(props)}
+        if kind == "LAYER" and row.get("true_color") is not None and version == "AC1015":
+            index = nearest_aci(row.pop("true_color"))
+            row["color_index"] = index
+            diagnostics.append(
+                WriteDiagnostic(
+                    None,
+                    "LAYER",
+                    "true_color",
+                    f"layer {name!r}: " + describe_approximation(props["true_color"], index),
+                    "approximated",
+                )
+            )
+        elif kind == "LAYER" and row.get("true_color") is None:
+            row.pop("true_color", None)
+        result[name] = row
+    return result
+
+
 class EditableLayout:
     """Persistent entities of one space or block with stable, unique integer handles."""
 
@@ -699,6 +696,14 @@ class EditableLayout:
         self, dxftype: str, dxf: Mapping[str, Any], *, handle: int | None = None
     ) -> Entity:
         """Copy geometry/attributes and allocate a handle, or validate an explicit one."""
+        entity = self._new_entity(dxftype, dxf, handle)
+        self._store(entity)
+        return entity
+
+    def _new_entity(
+        self, dxftype: str, dxf: Mapping[str, Any], handle: int | None
+    ) -> Entity:
+        """A validated entity with its handle, not yet part of the layout."""
         kind = dxftype.upper()
         if (kind == "ATTRIB") != (self._attribute_owner is not None):
             raise ValueError("ATTRIB must be attached with add_attrib to an INSERT")
@@ -722,9 +727,11 @@ class EditableLayout:
         }
         entity = Entity(kind, handle, data)
         _check_entity(entity)
-        self._entities[handle] = entity
         self.doc._next_handle = max(self.doc._next_handle, handle + 1)
         return entity
+
+    def _store(self, entity: Entity) -> None:
+        self._entities[entity.handle] = entity
 
     def _resolve(self, entity: Entity | int) -> Entity:
         if isinstance(entity, Entity):
@@ -1069,9 +1076,10 @@ class EditableLayout:
         ``text="<>"`` to prefix/suffix the measurement, ``text=" "`` for no text.
         """
         data = {"dimtype": kind_of(dimtype), **attributes}
-        entity = self.add_entity("DIMENSION", data)
+        entity = self._new_entity("DIMENSION", data, None)
         if render and not data.get("geometry"):
             self.doc.render_dimension(entity)
+        self._store(entity)
         return entity
 
     def add_linear_dim(

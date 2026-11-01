@@ -15,18 +15,21 @@ impl Drop for Temporary {
 }
 
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    atomic_write_with(
-        path,
-        bytes,
-        |file, data| file.write_all(data),
-        |from, to| fs::rename(from, to),
-    )
+    atomic_write_streaming(path, |file| file.write_all(bytes))
+}
+
+/// Like `atomic_write`, with the contents produced by `write` directly into
+/// the temporary file (a large document need not be assembled in memory).
+pub(crate) fn atomic_write_streaming(
+    path: &Path,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<()> {
+    atomic_write_with(path, write, |from, to| fs::rename(from, to))
 }
 
 fn atomic_write_with(
     path: &Path,
-    bytes: &[u8],
-    write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
     replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
 ) -> io::Result<()> {
     let permissions = match fs::symlink_metadata(path) {
@@ -82,7 +85,7 @@ fn atomic_write_with(
             file.set_permissions(permissions)?;
         }
         // Apply existing private permissions before any contents are written.
-        write(&mut file, bytes)?;
+        write(&mut file)?;
         file.sync_all()
     })();
     // Close before rename or cleanup, including on Windows.
@@ -109,8 +112,7 @@ mod tests {
         fs::write(&path, b"original").unwrap();
         let result = atomic_write_with(
             &path,
-            b"replacement",
-            |file, _| {
+            |file| {
                 file.write_all(b"partial")?;
                 Err(io::Error::other("injected disk full"))
             },
@@ -121,8 +123,7 @@ mod tests {
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
         let result = atomic_write_with(
             &path,
-            b"replacement",
-            |file, data| file.write_all(data),
+            |file| file.write_all(b"replacement"),
             |_, _| {
                 Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -157,10 +158,9 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         atomic_write_with(
             &path,
-            b"private",
-            |file, data| {
+            |file| {
                 assert_eq!(file.metadata()?.permissions().mode() & 0o777, 0o600);
-                file.write_all(data)
+                file.write_all(b"private")
             },
             |from, to| fs::rename(from, to),
         )

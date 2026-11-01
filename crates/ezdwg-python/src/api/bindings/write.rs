@@ -1,5 +1,6 @@
 use pyo3::types::{PyBytes, PyDict};
 use std::collections::VecDeque;
+use writer::encoder::{DocumentEncoder, DocumentTables, LayoutId};
 use writer::ir::{AttributeEntity, EntityFormatting, LinetypeDef};
 
 /// Entity groups of `DwgWriter.add`, in the order the legacy `write_dwg`
@@ -223,7 +224,7 @@ pub fn write_dwg(
     layout: Option<Bound<'_, PyDict>>,
     version: &str,
 ) -> PyResult<()> {
-    let mut writer = DwgWriter::new(version)?;
+    let mut writer = DwgWriter::new(version, None)?;
     writer.set_tables(
         layers,
         linetypes,
@@ -264,14 +265,32 @@ pub fn write_dwg(
     writer.write(output_path)
 }
 
+/// Where the entities of a writer go.
+enum Entities {
+    /// `max_handle` was given: every batch is encoded to object records at
+    /// once by the incremental encoder; nothing but the records stays behind.
+    Streaming(DocumentEncoder),
+    /// No handle ceiling: entities wait in a document and are encoded on `write`.
+    Buffered {
+        document: writer::WriterDocument,
+        /// ATTRIB rows by owning INSERT handle, attached on `write`.
+        attributes: HashMap<u64, Vec<AttributeEntity>>,
+    },
+    Written,
+}
+
 /// Incremental DWG writer behind `ezdwg.raw.write_dwg` and `ezdwg.to_dwg`.
 ///
 /// Tables are set with `set_tables`, entities arrive in any number of `add`
 /// batches, and `write` encodes the document and atomically replaces the
 /// destination. Each batch is converted to the writer's Rust representation
 /// at once, so a caller can drop the Python rows of one batch before building
-/// the next; a drawing of a million entities then never holds more than one
-/// batch of Python rows besides the compact Rust document.
+/// the next.
+///
+/// With ``max_handle`` (the largest entity handle that will be added) the
+/// batches are encoded to object records as they arrive and only those
+/// records are kept, about a hundred bytes per entity; without it the entities
+/// wait in a document until `write`.
 ///
 /// Entities keep the order of the `add` calls. Within one call ``order``
 /// (one group tag per entity, see `GROUP_NAMES`) interleaves the groups;
@@ -279,19 +298,19 @@ pub fn write_dwg(
 #[pyclass(module = "ezdwg._core")]
 pub struct DwgWriter {
     version: String,
-    /// `None` once `write` has consumed the document.
-    doc: Option<writer::WriterDocument>,
-    /// ATTRIB rows by owning INSERT handle; the INSERT may arrive in a later
-    /// batch, so they are attached when the document is written.
-    attributes: HashMap<u64, Vec<AttributeEntity>>,
+    max_handle: Option<u64>,
+    /// Collected until the first `add`; fixed from then on.
+    tables: Option<DocumentTables>,
+    entities: Option<Entities>,
+    block_index: HashMap<String, usize>,
     entity_count: usize,
 }
 
 #[pymethods]
 impl DwgWriter {
     #[new]
-    #[pyo3(signature = (version="AC1015"))]
-    fn new(version: &str) -> PyResult<Self> {
+    #[pyo3(signature = (version="AC1015", max_handle=None))]
+    fn new(version: &str, max_handle: Option<u64>) -> PyResult<Self> {
         let doc_version = match version {
             "AC1015" => DwgVersion::R2000,
             "AC1032" => DwgVersion::R2018,
@@ -307,11 +326,13 @@ impl DwgWriter {
         release_freed_heap();
         Ok(Self {
             version: version.to_owned(),
-            doc: Some(writer::WriterDocument {
+            max_handle,
+            tables: Some(DocumentTables {
                 version: doc_version,
-                ..writer::WriterDocument::default()
+                ..DocumentTables::default()
             }),
-            attributes: HashMap::new(),
+            entities: None,
+            block_index: HashMap::new(),
             entity_count: 0,
         })
     }
@@ -322,16 +343,23 @@ impl DwgWriter {
         self.entity_count
     }
 
-    /// Reserve room for ``count`` more model-space entities, so that the
-    /// entity list grows once instead of doubling (a doubling keeps two
-    /// copies alive and leaves up to half the capacity unused).
+    /// Reserve room for ``count`` more model-space entities of a buffered
+    /// writer (without ``max_handle``); a streaming writer keeps no entities,
+    /// so this is a no-op there.
     fn reserve(&mut self, count: usize) -> PyResult<()> {
-        self.document()?.modelspace.reserve_exact(count);
+        self.begin()?;
+        if let Some(Entities::Buffered { document, .. }) = self.entities.as_mut() {
+            document.modelspace.reserve_exact(count);
+        }
         Ok(())
     }
 
     /// Replace the layer, linetype and text style tables and the header
-    /// metadata; append block and image definitions; set the paper-space layout.
+    /// metadata; append block and image definitions; set the paper-space
+    /// layout. Once entities have been added, layers, linetypes and text
+    /// styles can only be added through `add_tables`; blocks, image
+    /// definitions, the layout and the metadata (with the same code page) may
+    /// still change, because their records are written last.
     #[pyo3(signature = (*, layers=None, linetypes=None, text_styles=None, metadata=None, blocks=None, image_defs=None, layout=None))]
     #[allow(clippy::too_many_arguments)]
     fn set_tables(
@@ -344,22 +372,136 @@ impl DwgWriter {
         image_defs: Option<Vec<Bound<'_, PyDict>>>,
         layout: Option<Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let doc = self.document()?;
+        if self.entities.is_some() {
+            if layers.is_some() || linetypes.is_some() || text_styles.is_some() {
+                return Err(PyValueError::new_err(
+                    "DwgWriter layers, linetypes and text styles are fixed once entities have \
+                     been added; add rows with add_tables",
+                ));
+            }
+            self.add_tables(None, None, None, blocks, image_defs)?;
+            if let Some(d) = metadata {
+                let mut m = self.current_metadata()?;
+                apply_write_metadata(&mut m, &d)?;
+                self.store_metadata(m)?;
+            }
+            if let Some(d) = layout {
+                let mut l = self.current_layout()?;
+                apply_write_layout(&mut l, Some(d))?;
+                self.store_layout(l)?;
+            }
+            return Ok(());
+        }
+        let tables = self.tables.as_mut().ok_or_else(spent_writer)?;
         if let Some(rows) = layers {
-            doc.layers = parse_layers(&rows)?;
+            tables.layers = parse_layers(&rows)?;
         }
         if let Some(rows) = linetypes {
-            doc.linetypes = parse_linetypes(&rows)?;
+            tables.linetypes = parse_linetypes(&rows)?;
         }
         if let Some(rows) = text_styles {
-            doc.text_styles = parse_text_styles(&rows)?;
+            tables.text_styles = parse_text_styles(&rows)?;
         }
         if let Some(d) = metadata {
-            apply_write_metadata(doc, &d)?;
+            apply_write_metadata(&mut tables.metadata, &d)?;
         }
-        append_block_defs(doc, blocks)?;
-        append_image_defs(doc, image_defs)?;
-        apply_write_layout(doc, layout)
+        append_block_defs(&mut tables.blocks, blocks)?;
+        append_image_defs(&mut tables.image_defs, image_defs)?;
+        apply_write_layout(&mut tables.layout, layout)
+    }
+
+    /// Add table rows at any time, also between batches of entities: a layer,
+    /// linetype, text style or image definition with a known (case-insensitive)
+    /// name replaces that row; a block definition must be new. Entities of a
+    /// batch may reference rows added before it.
+    #[pyo3(signature = (*, layers=None, linetypes=None, text_styles=None, blocks=None, image_defs=None))]
+    fn add_tables(
+        &mut self,
+        layers: Option<Vec<Bound<'_, PyDict>>>,
+        linetypes: Option<Vec<Bound<'_, PyDict>>>,
+        text_styles: Option<Vec<Bound<'_, PyDict>>>,
+        blocks: Option<Vec<Bound<'_, PyDict>>>,
+        image_defs: Option<Vec<Bound<'_, PyDict>>>,
+    ) -> PyResult<()> {
+        let layers = layers
+            .map(|r| parse_layers(&r))
+            .transpose()?
+            .unwrap_or_default();
+        let linetypes = linetypes
+            .map(|r| parse_linetypes(&r))
+            .transpose()?
+            .unwrap_or_default();
+        let text_styles = text_styles
+            .map(|r| parse_text_styles(&r))
+            .transpose()?
+            .unwrap_or_default();
+        let mut block_rows = Vec::new();
+        append_block_defs(&mut block_rows, blocks)?;
+        let mut image_def_rows = Vec::new();
+        append_image_defs(&mut image_def_rows, image_defs)?;
+        let Self {
+            entities,
+            tables,
+            block_index,
+            ..
+        } = self;
+        match entities.as_mut() {
+            None => {
+                let tables = tables.as_mut().ok_or_else(spent_writer)?;
+                for row in layers {
+                    upsert(&mut tables.layers, row, |l| l.name.to_uppercase());
+                }
+                for row in linetypes {
+                    upsert(&mut tables.linetypes, row, |l| l.name.to_uppercase());
+                }
+                for row in text_styles {
+                    upsert(&mut tables.text_styles, row, |st| st.name.to_uppercase());
+                }
+                tables.blocks.extend(block_rows);
+                for row in image_def_rows {
+                    upsert(&mut tables.image_defs, row, |d| d.name.to_uppercase());
+                }
+            }
+            Some(Entities::Streaming(encoder)) => {
+                for row in layers {
+                    encoder.add_layer(row).map_err(to_py_err)?;
+                }
+                for row in linetypes {
+                    encoder.add_linetype(row).map_err(to_py_err)?;
+                }
+                for row in text_styles {
+                    encoder.add_text_style(row).map_err(to_py_err)?;
+                }
+                for row in block_rows {
+                    let key = row.name.to_uppercase();
+                    let index = encoder.add_block(row).map_err(to_py_err)?;
+                    block_index.insert(key, index);
+                }
+                for row in image_def_rows {
+                    encoder.add_image_def(row).map_err(to_py_err)?;
+                }
+            }
+            Some(Entities::Buffered { document, .. }) => {
+                for row in layers {
+                    upsert(&mut document.layers, row, |l| l.name.to_uppercase());
+                }
+                for row in linetypes {
+                    upsert(&mut document.linetypes, row, |l| l.name.to_uppercase());
+                }
+                for row in text_styles {
+                    upsert(&mut document.text_styles, row, |st| st.name.to_uppercase());
+                }
+                for row in block_rows {
+                    block_index.insert(row.name.to_uppercase(), document.blocks.len());
+                    document.blocks.push(row);
+                }
+                for row in image_def_rows {
+                    upsert(&mut document.image_defs, row, |d| d.name.to_uppercase());
+                }
+            }
+            Some(Entities::Written) => return Err(spent_writer()),
+        }
+        Ok(())
     }
 
     /// Add one batch of entities and return how many were added.
@@ -403,7 +545,7 @@ impl DwgWriter {
         entity_owners: Option<HashMap<u64, Bound<'_, PyAny>>>,
         order: Option<Bound<'_, PyBytes>>,
     ) -> PyResult<usize> {
-        if self.doc.is_none() {
+        if matches!(self.entities, Some(Entities::Written)) {
             return Err(spent_writer());
         }
         let mut groups: Vec<Vec<writer::WriterEntity>> =
@@ -437,8 +579,8 @@ impl DwgWriter {
         let mut entities = interleave(groups, order.as_ref().map(|o| o.as_bytes()))?;
         apply_entity_attributes(&mut entities, entity_attributes)?;
         let added = entities.len();
-        let doc = self.doc.as_mut().ok_or_else(spent_writer)?;
-        distribute(doc, &mut self.attributes, entities, entity_owners)?;
+        self.begin()?;
+        self.distribute(entities, entity_owners)?;
         self.entity_count += added;
         Ok(added)
     }
@@ -449,35 +591,38 @@ impl DwgWriter {
     /// operating system where the allocator supports it) before the file is
     /// written, so the writer cannot be used again.
     fn write(&mut self, output_path: &str) -> PyResult<()> {
-        let mut doc = self.doc.take().ok_or_else(spent_writer)?;
-        let mut pending = std::mem::take(&mut self.attributes);
-        if !pending.is_empty() {
-            let blocks = doc.blocks.iter_mut().flat_map(|b| b.entities.iter_mut());
-            for entity in doc
-                .modelspace
-                .iter_mut()
-                .chain(doc.paperspace.iter_mut())
-                .chain(blocks)
-            {
-                if let writer::WriterEntity::Insert(insert) = entity {
-                    if let Some(attrs) = insert.common.handle.and_then(|h| pending.remove(&h)) {
-                        insert.attributes = attrs;
-                    }
-                }
+        self.begin()?;
+        let out_path = Path::new(output_path);
+        match self.entities.replace(Entities::Written) {
+            Some(Entities::Streaming(encoder)) => {
+                let encoded = encoder.finish().map_err(to_py_err)?;
+                crate::atomic_write::atomic_write_streaming(out_path, |file| {
+                    // Records are small; buffer them into page-sized writes.
+                    let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
+                    encoded
+                        .write_to(&mut out)
+                        .map_err(|err| std::io::Error::other(err.to_string()))?;
+                    std::io::Write::flush(&mut out)
+                })
+                .map_err(|err| PyIOError::new_err(err.to_string()))?;
             }
-            if !pending.is_empty() {
-                return Err(PyValueError::new_err("unknown entity/INSERT owner handle"));
+            Some(Entities::Buffered {
+                mut document,
+                attributes,
+            }) => {
+                attach_attributes(&mut document, attributes)?;
+                let encode = match self.version.as_str() {
+                    "AC1032" => writer::r2018::write_document,
+                    _ => writer::r2000::write_document,
+                };
+                let bytes =
+                    encode(&document, &writer::WriterConfig::default()).map_err(to_py_err)?;
+                drop(document);
+                crate::atomic_write::atomic_write(out_path, &bytes)
+                    .map_err(|err| PyIOError::new_err(err.to_string()))?;
             }
+            _ => return Err(spent_writer()),
         }
-        let encode = match self.version.as_str() {
-            "AC1032" => writer::r2018::write_document,
-            _ => writer::r2000::write_document,
-        };
-        let bytes = encode(&doc, &writer::WriterConfig::default()).map_err(to_py_err)?;
-        drop(doc);
-        crate::atomic_write::atomic_write(Path::new(output_path), &bytes)
-            .map_err(|err| PyIOError::new_err(err.to_string()))?;
-        drop(bytes);
         clear_decode_cache()?;
         release_freed_heap();
         Ok(())
@@ -485,13 +630,193 @@ impl DwgWriter {
 }
 
 impl DwgWriter {
-    fn document(&mut self) -> PyResult<&mut writer::WriterDocument> {
-        self.doc.as_mut().ok_or_else(spent_writer)
+    fn current_metadata(&self) -> PyResult<writer::WriterMetadata> {
+        match (&self.tables, &self.entities) {
+            (Some(tables), _) => Ok(tables.metadata.clone()),
+            (None, Some(Entities::Streaming(encoder))) => Ok(encoder.metadata().clone()),
+            (None, Some(Entities::Buffered { document, .. })) => Ok(document.metadata.clone()),
+            _ => Err(spent_writer()),
+        }
     }
+
+    fn store_metadata(&mut self, metadata: writer::WriterMetadata) -> PyResult<()> {
+        match (&mut self.tables, &mut self.entities) {
+            (Some(tables), _) => tables.metadata = metadata,
+            (None, Some(Entities::Streaming(encoder))) => {
+                encoder.set_metadata(metadata).map_err(to_py_err)?
+            }
+            (None, Some(Entities::Buffered { document, .. })) => document.metadata = metadata,
+            _ => return Err(spent_writer()),
+        }
+        Ok(())
+    }
+
+    fn current_layout(&self) -> PyResult<writer::LayoutSettings> {
+        match (&self.tables, &self.entities) {
+            (Some(tables), _) => Ok(tables.layout.clone()),
+            (None, Some(Entities::Streaming(encoder))) => Ok(encoder.layout().clone()),
+            (None, Some(Entities::Buffered { document, .. })) => Ok(document.layout.clone()),
+            _ => Err(spent_writer()),
+        }
+    }
+
+    fn store_layout(&mut self, layout: writer::LayoutSettings) -> PyResult<()> {
+        match (&mut self.tables, &mut self.entities) {
+            (Some(tables), _) => tables.layout = layout,
+            (None, Some(Entities::Streaming(encoder))) => {
+                encoder.set_layout(layout).map_err(to_py_err)?
+            }
+            (None, Some(Entities::Buffered { document, .. })) => document.layout = layout,
+            _ => return Err(spent_writer()),
+        }
+        Ok(())
+    }
+
+    /// Fix the tables and open the entity store on the first batch.
+    fn begin(&mut self) -> PyResult<()> {
+        if self.entities.is_some() {
+            return Ok(());
+        }
+        let tables = self.tables.take().ok_or_else(spent_writer)?;
+        self.block_index = tables
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (b.name.to_uppercase(), i))
+            .collect();
+        self.entities = Some(match self.max_handle {
+            Some(ceiling) => Entities::Streaming(
+                DocumentEncoder::new(tables, writer::WriterConfig::default(), ceiling)
+                    .map_err(to_py_err)?,
+            ),
+            None => Entities::Buffered {
+                document: writer::WriterDocument {
+                    version: tables.version.clone(),
+                    modelspace: Vec::new(),
+                    blocks: tables.blocks,
+                    layers: tables.layers,
+                    linetypes: tables.linetypes,
+                    text_styles: tables.text_styles,
+                    metadata: tables.metadata,
+                    image_defs: tables.image_defs,
+                    paperspace: Vec::new(),
+                    layout: tables.layout,
+                },
+                attributes: HashMap::new(),
+            },
+        });
+        Ok(())
+    }
+
+    /// Owner values are block names for definition contents, `*PAPER_SPACE`
+    /// for paper-space entities, or INSERT handles for ATTRIB.
+    fn distribute(
+        &mut self,
+        entities: Vec<writer::WriterEntity>,
+        owners: Option<HashMap<u64, Bound<'_, PyAny>>>,
+    ) -> PyResult<()> {
+        let mut owners = owners.unwrap_or_default();
+        let store = self.entities.as_mut().ok_or_else(spent_writer)?;
+        for entity in entities {
+            if let writer::WriterEntity::Attrib(attr) = entity {
+                let owner = attr
+                    .text
+                    .common
+                    .handle
+                    .and_then(|h| owners.remove(&h))
+                    .ok_or_else(|| PyValueError::new_err("ATTRIB requires an INSERT owner"))?;
+                let handle = owner
+                    .extract::<u64>()
+                    .map_err(|_| PyValueError::new_err("ATTRIB owner must be an INSERT handle"))?;
+                match store {
+                    Entities::Streaming(encoder) => encoder.push_attribute(handle, *attr),
+                    Entities::Buffered { attributes, .. } => {
+                        attributes.entry(handle).or_default().push(*attr)
+                    }
+                    Entities::Written => return Err(spent_writer()),
+                }
+                continue;
+            }
+            let layout = match entity.common().handle.and_then(|h| owners.remove(&h)) {
+                None => LayoutId::Model,
+                Some(owner) => {
+                    let name = owner
+                        .extract::<String>()
+                        .map_err(|_| PyValueError::new_err("entity owner must be a block name"))?;
+                    if name.eq_ignore_ascii_case("*PAPER_SPACE") {
+                        LayoutId::Paper
+                    } else {
+                        LayoutId::Block(
+                            self.block_index
+                                .get(&name.to_uppercase())
+                                .copied()
+                                .ok_or_else(|| {
+                                    PyValueError::new_err(format!("undefined owner block: {name}"))
+                                })?,
+                        )
+                    }
+                }
+            };
+            match store {
+                Entities::Streaming(encoder) => {
+                    encoder.push(layout, entity).map_err(to_py_err)?;
+                }
+                Entities::Buffered { document, .. } => match layout {
+                    LayoutId::Model => document.modelspace.push(entity),
+                    LayoutId::Paper => document.paperspace.push(entity),
+                    LayoutId::Block(index) => document.blocks[index].entities.push(entity),
+                },
+                Entities::Written => return Err(spent_writer()),
+            }
+        }
+        if !owners.is_empty() {
+            return Err(PyValueError::new_err("unknown entity/INSERT owner handle"));
+        }
+        Ok(())
+    }
+}
+
+/// Attach the late ATTRIBs of a buffered document to their INSERTs.
+fn attach_attributes(
+    document: &mut writer::WriterDocument,
+    mut pending: HashMap<u64, Vec<AttributeEntity>>,
+) -> PyResult<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let blocks = document
+        .blocks
+        .iter_mut()
+        .flat_map(|b| b.entities.iter_mut());
+    for entity in document
+        .modelspace
+        .iter_mut()
+        .chain(document.paperspace.iter_mut())
+        .chain(blocks)
+    {
+        if let writer::WriterEntity::Insert(insert) = entity {
+            if let Some(attrs) = insert.common.handle.and_then(|h| pending.remove(&h)) {
+                insert.attributes = attrs;
+            }
+        }
+    }
+    if !pending.is_empty() {
+        return Err(PyValueError::new_err("unknown entity/INSERT owner handle"));
+    }
+    Ok(())
 }
 
 fn spent_writer() -> PyErr {
     PyValueError::new_err("DwgWriter has already written its document")
+}
+
+/// Replace the row with the same key, or append.
+fn upsert<T>(rows: &mut Vec<T>, row: T, key: impl Fn(&T) -> String) {
+    let name = key(&row);
+    match rows.iter_mut().find(|r| key(r) == name) {
+        Some(existing) => *existing = row,
+        None => rows.push(row),
+    }
 }
 
 /// Common properties of the raw tuple rows: layer `0`, ACI 7 (the attribute
@@ -724,58 +1049,6 @@ fn apply_entity_attributes(
     Ok(())
 }
 
-/// Owner values are block names for definition contents, `*PAPER_SPACE` for
-/// paper-space entities, or INSERT handles for ATTRIB.
-fn distribute(
-    doc: &mut writer::WriterDocument,
-    pending_attributes: &mut HashMap<u64, Vec<AttributeEntity>>,
-    entities: Vec<writer::WriterEntity>,
-    owners: Option<HashMap<u64, Bound<'_, PyAny>>>,
-) -> PyResult<()> {
-    let mut owners = owners.unwrap_or_default();
-    let blocks: HashMap<String, usize> = doc
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.name.to_uppercase(), i))
-        .collect();
-    for entity in entities {
-        if let writer::WriterEntity::Attrib(attr) = entity {
-            let owner = attr
-                .text
-                .common
-                .handle
-                .and_then(|h| owners.remove(&h))
-                .ok_or_else(|| PyValueError::new_err("ATTRIB requires an INSERT owner"))?;
-            let handle = owner
-                .extract::<u64>()
-                .map_err(|_| PyValueError::new_err("ATTRIB owner must be an INSERT handle"))?;
-            pending_attributes.entry(handle).or_default().push(*attr);
-            continue;
-        }
-        let Some(owner) = entity.common().handle.and_then(|h| owners.remove(&h)) else {
-            doc.modelspace.push(entity);
-            continue;
-        };
-        let name = owner
-            .extract::<String>()
-            .map_err(|_| PyValueError::new_err("entity owner must be a block name"))?;
-        if name.eq_ignore_ascii_case("*PAPER_SPACE") {
-            doc.paperspace.push(entity);
-            continue;
-        }
-        let index = blocks
-            .get(&name.to_uppercase())
-            .copied()
-            .ok_or_else(|| PyValueError::new_err(format!("undefined owner block: {name}")))?;
-        doc.blocks[index].entities.push(entity);
-    }
-    if !owners.is_empty() {
-        return Err(PyValueError::new_err("unknown entity/INSERT owner handle"));
-    }
-    Ok(())
-}
-
 fn parse_layers(rows: &[Bound<'_, PyDict>]) -> PyResult<Vec<writer::LayerDef>> {
     rows.iter()
         .map(|d| {
@@ -856,14 +1129,13 @@ fn parse_text_styles(rows: &[Bound<'_, PyDict>]) -> PyResult<Vec<writer::ir::Tex
         .collect()
 }
 
-fn apply_write_metadata(doc: &mut writer::WriterDocument, d: &Bound<'_, PyDict>) -> PyResult<()> {
+fn apply_write_metadata(m: &mut writer::WriterMetadata, d: &Bound<'_, PyDict>) -> PyResult<()> {
     check_write_keys(
         d,
         &[
             "codepage", "insunits", "lunits", "luprec", "aunits", "auprec", "ltscale",
         ],
     )?;
-    let m = &mut doc.metadata;
     m.codepage = write_value(d, "codepage", m.codepage)?;
     m.insunits = write_value(d, "insunits", m.insunits)?;
     m.lunits = write_value(d, "lunits", m.lunits)?;

@@ -1,13 +1,13 @@
 /// Block definitions (`name`, `base_point`, `description`); their contents arrive
 /// as entities whose `entity_owners` entry names the block.
 fn append_block_defs(
-    doc: &mut writer::WriterDocument,
+    out: &mut Vec<writer::ir::BlockDef>,
     blocks: Option<Vec<Bound<'_, PyDict>>>,
 ) -> PyResult<()> {
     use writer::ir::BlockDef;
     for d in blocks.unwrap_or_default() {
         check_write_keys(&d, &["name", "base_point", "description"])?;
-        doc.blocks.push(BlockDef {
+        out.push(BlockDef {
             name: write_value(&d, "name", String::new())?,
             base_point: write_value(&d, "base_point", (0., 0., 0.))?,
             description: write_value(&d, "description", String::new())?,

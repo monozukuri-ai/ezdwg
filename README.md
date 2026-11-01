@@ -168,6 +168,11 @@ doc = ezdwg.read("examples/data/line_2000.dwg")
 doc.export_dwg("/tmp/line_2000_rewrite.dwg", version="AC1015")
 ```
 
+New drawings are built with `ezdwg.new()` (editable, see the guide) or, for
+converters that only write, `ezdwg.new_streaming()`: the same tables and
+`add_*` methods, but every entity goes to the native writer at once and the
+Python side stays small whatever the drawing size.
+
 Path/Document exports select model space. Use `strict=True` to reject unsupported
 or undecoded entities and detected attribute loss before writing. Otherwise inspect
 `result.skipped_by_type` and `result.diagnostics`. Referenced layers, simple line

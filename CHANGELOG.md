@@ -29,20 +29,48 @@
   to use the local Rust core and the shared workspace version.
 
 ### Native DWG writer
-- Saving a large drawing no longer builds every Python-side copy of every
-  entity at once. `to_dwg` / `Drawing.save` now prepare entities in batches
-  of 4,096 (normalise, validate, encode strings, build rows) and hand each
-  batch to the new incremental `ezdwg.raw.DwgWriter`, which converts it to
-  the compact Rust document before the next batch is built. The code page is
-  still selected from every string first, strict saves still fail before
-  anything is written, and the output of a drawing that fits in one batch is
-  unchanged. A synthetic drawing of 850,000 three-point LWPOLYLINEs saved
-  with a peak of 1,516 MB RSS instead of 3,023 MB (document 834 MB; 682 MB
-  for the save instead of 2,189 MB), in 34 s instead of 40 s; the resident
-  size after the save dropped from 1,178 MB to 856 MB because the writer
-  returns its freed heap to the operating system (glibc). A converter writing
-  a 3-sheet DWF plot set of 850,000 entities as DWG peaked at 2,648 MB
-  instead of 4,624 MB for the whole process.
+- (0.18.0, extended in 0.18.1) Saving a large drawing no longer builds every
+  Python-side copy of every entity at once, nor a Rust document of every
+  entity. `to_dwg` /
+  `Drawing.save` prepare entities in batches of 4,096 (normalise, validate,
+  encode strings, build rows) and hand each batch to the new incremental
+  `ezdwg.raw.DwgWriter`. The writer knows the largest entity handle up front
+  (`max_handle`), allocates the handles of tables and generated objects above
+  it, and encodes every entity to its object record as soon as the next
+  entity of its layout fixes the chain (`writer::DocumentEncoder`); only the
+  record bytes, about a hundred per entity, and a handle index stay in memory
+  until the tables, header and object map are written, and AC1015 files are
+  streamed to the destination section by section. INSERTs wait for their
+  ATTRIBs until the end. The code page is still selected from every string
+  first, strict saves still fail before anything is written, and the output
+  does not depend on the batch size. A synthetic drawing of 850,000
+  three-point LWPOLYLINEs saves with a peak of 993 MB RSS instead of
+  3,023 MB (document 834 MB), in 39 s instead of 40 s; the resident
+  size after the save drops to 856 MB from 1,178 MB because the
+  writer returns its freed heap to the operating system (glibc). A converter
+  writing a 3-sheet DWF plot set of 850,000 entities as DWG peaked at
+  2,479 MB instead of 4,624 MB for the whole process, and the save itself no
+  longer sets the peak (it adds about 100 MB to the 2,000 MB the parsed
+  drawing and the Python `Drawing` occupy).
+- (0.19.0) `ezdwg.new_streaming(version, max_entities=16_777_216)` returns a
+  write-only `StreamingDrawing`: the tables and `add_*` methods of `Drawing`,
+  but no entity is kept. Each one is validated, normalised, encoded and queued,
+  and every 4,096 the queue is written to object records by `raw.DwgWriter`,
+  so a converter's Python side stays at a few megabytes whatever the drawing
+  size (a 1.7-million-entity plot set used to hold 1.4 GB of entity
+  dictionaries). Layers, linetypes, text styles, blocks and image definitions
+  may still be added after entities (`raw.DwgWriter.add_tables`; a known name
+  replaces that row), `set_paper` may follow the paper-space entities, and
+  ATTRIBs attach to INSERTs written earlier. Set `header["codepage"]` before
+  the first entity; `query`, `update`, `delete` and `attribs` are not available
+  and `save` finishes the drawing. Entity handles are numbered from 1 up to
+  `max_entities`; tables and generated objects follow.
+- (0.18.1) Fresh handles (tables, polyline vertices, SEQENDs, image reactors,
+  the paper viewport) are allocated above the largest input handle in arrival
+  order, so files holding those objects get different handle numbers than
+  0.17 wrote (same content), and image definitions no IMAGE references are no
+  longer written. Without `max_handle` (the one-shot `write_dwg`) the
+  entities are buffered in a document and encoded on `write`.
 - Entities of a `Drawing` are now stored in their drawing (insertion) order,
   which AutoCAD uses as the draw order, instead of grouped by kind. Texts
   drawn before a solid hatch no longer end up on top of it. The one-shot raw
@@ -51,10 +79,9 @@
   `add(...)` batches (the `write_dwg` keyword groups plus `entity_attributes`,
   `entity_owners` and an optional `order` of group tags that interleaves the
   groups of one batch), then `write(path)`. ATTRIBs may arrive in a later
-  batch than their INSERT; `reserve(count)` sizes the entity list once. The
-  writer returns freed heap to the operating system when it is created (so a
-  parsed source document the caller already dropped does not count towards
-  its peak) and after it has written. `ezdwg.raw.decode_entity_links(path)`
+  batch than their INSERT. The writer returns freed heap to the operating
+  system when it is created (so a parsed source document the caller already
+  dropped does not count towards its peak) and after it has written. `ezdwg.raw.decode_entity_links(path)`
   returns the `(handle, previous, next)` chain of every entity, i.e. the
   stored draw order, and `ezdwg.raw.release_freed_heap()` exposes the trim.
 - `Drawing` copies entity dictionaries with a JSON-like copy instead of

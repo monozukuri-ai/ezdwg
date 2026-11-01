@@ -244,11 +244,37 @@ handles. Unknown keys, missing references and invalid values raise `ValueError`.
 `to_dwg` and `Drawing.save` prepare entities in batches of 4,096 and hand each
 batch to the incremental writer `ezdwg.raw.DwgWriter` before the next one is
 built, so the Python side of a save stays at a few megabytes whatever the
-drawing size; the Rust document keeps a few hundred bytes per entity. The code
-page is still chosen from every string of the drawing first, and a strict save
-still fails before anything is written. A drawing of 850,000 short polylines
-saves with a peak of about 1.5 GB (the drawing itself is 0.8 GB) and the freed
-heap is returned to the operating system afterwards.
+drawing size. The writer knows the largest entity handle up front
+(`max_handle`), so it allocates the handles of tables and generated objects
+above it and encodes every entity to its object record as soon as it arrives;
+only those records, about a hundred bytes per entity, stay in memory until the
+file is written section by section. The code page is still chosen from every
+string of the drawing first, and a strict save still fails before anything is
+written. A drawing of 850,000 short polylines saves with a peak of about
+1.0 GB (the drawing itself is 0.8 GB) and the freed heap is returned
+to the operating system afterwards.
+
+A `Drawing` and its layouts reference each other, so Python frees them only
+when the cyclic garbage collector runs. A converter that goes on to other
+work after `save` should drop the drawing and every layout it kept and call
+`gc.collect()` to release the memory at once.
+
+A converter that only ever writes can skip the `Drawing` altogether:
+`ezdwg.new_streaming()` returns a write-only drawing with the same tables and
+`add_*` methods that hands every 4,096 entities to the writer and keeps none.
+Set the code page first; tables may still grow afterwards, and `set_paper`
+may follow the paper-space entities. Entities cannot be queried, updated or
+deleted, and `save` finishes the file.
+
+```python
+drawing = ezdwg.new_streaming("AC1015", max_entities=1 << 24)
+drawing.header["codepage"] = 38                 # fixed by the first entity
+msp = drawing.modelspace()
+for x, y in points:                             # millions of them
+    msp.add_line((x, y), (x + 1, y + 1), layer="A")
+drawing.layers["A"] = {"color_index": 3}        # tables may come late
+drawing.save("large.dwg", strict=False)
+```
 
 Entities of a `Drawing` are stored in their drawing order, which is the order
 AutoCAD draws them in: a text added before a solid hatch stays underneath it.
@@ -258,9 +284,8 @@ keep their grouping by kind; callers that want both batches and an exact
 order use `DwgWriter` directly:
 
 ```python
-writer = ezdwg.raw.DwgWriter("AC1015")
+writer = ezdwg.raw.DwgWriter("AC1015", max_handle=largest_entity_handle)
 writer.set_tables(layers=[{"name": "0", "color_index": 7}], blocks=[...])
-writer.reserve(total_model_space_entities)   # optional: grow the entity list once
 for batch in batches:                       # any number of batches
     writer.add(lines=batch.lines, texts=batch.texts,
                entity_attributes=batch.attributes,   # by handle, this batch only
@@ -271,7 +296,9 @@ writer.write("large.dwg")                   # validates, encodes, replaces atomi
 
 `order` tags index the `add` keyword groups in their declared order (`lines` is
 0, `arcs` 1, ... `viewports` 22); without it the groups of one batch follow
-the legacy order. `write` consumes the document.
+the legacy order. Tables are fixed once the first batch is added, and `write`
+consumes the document. Without `max_handle` the entities are buffered in a
+document until `write`, which is what the one-shot `write_dwg` does.
 
 ## Native DWG Writer (AC1032)
 

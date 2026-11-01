@@ -1,4 +1,5 @@
 //! Fail before serializing or opening the destination, including through the raw API.
+use super::encoder::DocumentTables;
 use super::ir::*;
 use crate::bit::BitWriter;
 use crate::core::error::{DwgError, ErrorKind};
@@ -136,11 +137,14 @@ pub fn lineweight_index(value: i16) -> Result<u8> {
     }
 }
 #[derive(Clone, Copy)]
-struct TextEncoding {
-    codepage: u16,
-    unicode: bool,
+pub(crate) struct TextEncoding {
+    pub(crate) codepage: u16,
+    pub(crate) unicode: bool,
 }
 impl TextEncoding {
+    pub(crate) fn new(codepage: u16, unicode: bool) -> Self {
+        Self { codepage, unicode }
+    }
     fn writer(self) -> BitWriter {
         if self.unicode {
             BitWriter::with_unicode()
@@ -161,22 +165,7 @@ fn name(value: &str, encoding: TextEncoding) -> Result<()> {
     encoding.writer().write_tv(value)
 }
 
-pub fn validate_document(doc: &WriterDocument) -> Result<()> {
-    let m = &doc.metadata;
-    let encoding = TextEncoding {
-        codepage: m.codepage,
-        unicode: matches!(doc.version, crate::dwg::version::DwgVersion::R2018),
-    };
-    if encoding.unicode {
-        require(
-            doc.paperspace.is_empty(),
-            "AC1032 writer currently supports model space and blocks only",
-        )?;
-        require(
-            doc.image_defs.is_empty(),
-            "AC1032 writer does not support image definitions",
-        )?;
-    }
+pub(crate) fn validate_metadata(m: &WriterMetadata) -> Result<()> {
     require(
         m.insunits <= 20
             && (1..=5).contains(&m.lunits)
@@ -191,180 +180,253 @@ pub fn validate_document(doc: &WriterDocument) -> Result<()> {
     for p in [m.ext_min, m.ext_max].into_iter().flatten() {
         point(p)?;
     }
-    validate_layout(&doc.layout, encoding)?;
-    let mut names = HashSet::new();
-    for l in &doc.layers {
-        name(&l.name, encoding)?;
-        require(names.insert(l.name.to_uppercase()), "duplicate layer name")?;
+    Ok(())
+}
+
+pub(crate) fn validate_layout_settings(
+    layout: &LayoutSettings,
+    encoding: TextEncoding,
+) -> Result<()> {
+    validate_layout(layout, encoding)
+}
+
+pub(crate) fn validate_layer(l: &LayerDef, encoding: TextEncoding) -> Result<()> {
+    name(&l.name, encoding)?;
+    require(
+        (1..=255).contains(&l.color_index),
+        "layer ACI must be in 1..255",
+    )?;
+    require(
+        !matches!(
+            l.linetype.to_uppercase().as_str(),
+            "BYLAYER" | "BYBLOCK" | ""
+        ),
+        "layer linetype must not inherit",
+    )?;
+    lineweight_index(l.lineweight)?;
+    require(
+        encoding.unicode || l.true_color.is_none(),
+        "AC1015 cannot preserve layer TrueColor",
+    )?;
+    require(
+        l.true_color.is_none_or(|v| v <= 0xffffff),
+        "layer TrueColor must be 24-bit RGB",
+    )
+}
+
+pub(crate) fn validate_linetype(l: &LinetypeDef, encoding: TextEncoding) -> Result<()> {
+    name(&l.name, encoding)?;
+    require(
+        !matches!(
+            l.name.to_uppercase().as_str(),
+            "BYLAYER" | "BYBLOCK" | "CONTINUOUS"
+        ),
+        "duplicate/reserved linetype name",
+    )?;
+    encoding.writer().write_tv(&l.description)?;
+    require(l.dashes.len() <= 12, "linetype supports at most 12 dashes")?;
+    finite(&l.dashes)?;
+    finite(&[l.dashes.iter().map(|v| v.abs()).sum()])
+}
+
+pub(crate) fn validate_text_style(st: &TextStyleDef, encoding: TextEncoding) -> Result<()> {
+    name(&st.name, encoding)?;
+    finite(&[st.height, st.width, st.oblique, st.last_height])?;
+    require(
+        st.height >= 0. && st.width > 0. && st.last_height >= 0. && st.generation & !6 == 0,
+        "invalid text style",
+    )?;
+    encoding.writer().write_tv(&st.font)?;
+    encoding.writer().write_tv(&st.bigfont)
+}
+
+pub(crate) fn validate_block(block: &BlockDef, encoding: TextEncoding) -> Result<()> {
+    name(
+        block.name.strip_prefix('*').unwrap_or(&block.name),
+        encoding,
+    )?;
+    require(
+        !block.name.to_uppercase().starts_with("*MODEL_SPACE")
+            && !block.name.to_uppercase().starts_with("*PAPER_SPACE"),
+        "reserved block name",
+    )?;
+    point(block.base_point)?;
+    encoding.writer().write_tv(&block.description)
+}
+
+pub(crate) fn validate_image_def(def: &ImageDef, encoding: TextEncoding) -> Result<()> {
+    require(
+        !def.name.is_empty() && def.name.len() <= 255,
+        "image definition name must be 1..255 bytes",
+    )?;
+    require(
+        !def.file_path.is_empty(),
+        "image definition requires a file path",
+    )?;
+    encoding.writer().write_tv(&def.file_path)?;
+    finite(&[def.size.0, def.size.1, def.pixel_size.0, def.pixel_size.1])?;
+    require(
+        def.size.0 > 0. && def.size.1 > 0. && def.pixel_size.0 > 0. && def.pixel_size.1 > 0.,
+        "image definition size and pixel size must be positive",
+    )?;
+    require(
+        matches!(def.resolution_units, 0 | 2 | 5),
+        "image resolution units must be 0 (none), 2 (cm) or 5 (inch)",
+    )
+}
+
+/// Validate the tables (everything but the entities) of a document.
+pub(crate) fn validate_tables(t: &DocumentTables) -> Result<()> {
+    let encoding = TextEncoding {
+        codepage: t.metadata.codepage,
+        unicode: matches!(t.version, crate::dwg::version::DwgVersion::R2018),
+    };
+    if encoding.unicode {
         require(
-            (1..=255).contains(&l.color_index),
-            "layer ACI must be in 1..255",
-        )?;
-        require(
-            !matches!(
-                l.linetype.to_uppercase().as_str(),
-                "BYLAYER" | "BYBLOCK" | ""
-            ),
-            "layer linetype must not inherit",
-        )?;
-        lineweight_index(l.lineweight)?;
-        require(
-            encoding.unicode || l.true_color.is_none(),
-            "AC1015 cannot preserve layer TrueColor",
-        )?;
-        require(
-            l.true_color.is_none_or(|v| v <= 0xffffff),
-            "layer TrueColor must be 24-bit RGB",
+            t.image_defs.is_empty(),
+            "AC1032 writer does not support image definitions",
         )?;
     }
+    validate_metadata(&t.metadata)?;
+    validate_layout(&t.layout, encoding)?;
+    let mut names = HashSet::new();
+    for l in &t.layers {
+        validate_layer(l, encoding)?;
+        require(names.insert(l.name.to_uppercase()), "duplicate layer name")?;
+    }
     names.clear();
-    for l in &doc.linetypes {
-        name(&l.name, encoding)?;
+    for l in &t.linetypes {
+        validate_linetype(l, encoding)?;
         require(
-            !matches!(
-                l.name.to_uppercase().as_str(),
-                "BYLAYER" | "BYBLOCK" | "CONTINUOUS"
-            ) && names.insert(l.name.to_uppercase()),
+            names.insert(l.name.to_uppercase()),
             "duplicate/reserved linetype name",
         )?;
-        encoding.writer().write_tv(&l.description)?;
-        require(l.dashes.len() <= 12, "linetype supports at most 12 dashes")?;
-        finite(&l.dashes)?;
-        finite(&[l.dashes.iter().map(|v| v.abs()).sum()])?;
     }
     names.clear();
-    for st in &doc.text_styles {
-        name(&st.name, encoding)?;
+    for st in &t.text_styles {
+        validate_text_style(st, encoding)?;
         require(names.insert(st.name.to_uppercase()), "duplicate text style")?;
-        finite(&[st.height, st.width, st.oblique, st.last_height])?;
-        require(
-            st.height >= 0. && st.width > 0. && st.last_height >= 0. && st.generation & !6 == 0,
-            "invalid text style",
-        )?;
-        encoding.writer().write_tv(&st.font)?;
-        encoding.writer().write_tv(&st.bigfont)?;
     }
-    let mut blocks = HashMap::new();
-    for (i, block) in doc.blocks.iter().enumerate() {
-        name(
-            block.name.strip_prefix('*').unwrap_or(&block.name),
-            encoding,
-        )?;
+    names.clear();
+    for block in &t.blocks {
+        validate_block(block, encoding)?;
         require(
-            !block.name.to_uppercase().starts_with("*MODEL_SPACE")
-                && !block.name.to_uppercase().starts_with("*PAPER_SPACE"),
-            "reserved block name",
-        )?;
-        require(
-            blocks.insert(block.name.to_uppercase(), i).is_none(),
+            names.insert(block.name.to_uppercase()),
             "duplicate block name",
         )?;
-        point(block.base_point)?;
-        encoding.writer().write_tv(&block.description)?;
     }
     names.clear();
-    for def in &doc.image_defs {
-        require(
-            !def.name.is_empty() && def.name.len() <= 255,
-            "image definition name must be 1..255 bytes",
-        )?;
+    for def in &t.image_defs {
+        validate_image_def(def, encoding)?;
         require(
             names.insert(def.name.to_uppercase()),
             "duplicate image definition name",
         )?;
+    }
+    Ok(())
+}
+
+/// What an entity may reference: the tables it is validated against and the
+/// layout it is placed in.
+pub(crate) struct EntityContext<'a> {
+    /// Upper-case block names to their index.
+    pub(crate) blocks: &'a HashMap<String, usize>,
+    /// Upper-case layer names (including `0`).
+    pub(crate) layer_names: &'a HashSet<String>,
+    /// Upper-case image definition names.
+    pub(crate) image_defs: &'a HashSet<String>,
+    pub(crate) is_paper: bool,
+    pub(crate) encoding: TextEncoding,
+}
+
+/// Validate an entity placed in a layout. Returns the index of the block
+/// definition an INSERT or DIMENSION references.
+pub(crate) fn validate_layout_entity(
+    e: &WriterEntity,
+    context: &EntityContext<'_>,
+) -> Result<Option<usize>> {
+    require(
+        !matches!(e, WriterEntity::Attrib(_)),
+        "ATTRIB must belong to INSERT",
+    )?;
+    if context.encoding.unicode {
         require(
-            !def.file_path.is_empty(),
-            "image definition requires a file path",
-        )?;
-        encoding.writer().write_tv(&def.file_path)?;
-        finite(&[def.size.0, def.size.1, def.pixel_size.0, def.pixel_size.1])?;
-        require(
-            def.size.0 > 0. && def.size.1 > 0. && def.pixel_size.0 > 0. && def.pixel_size.1 > 0.,
-            "image definition size and pixel size must be positive",
-        )?;
-        require(
-            matches!(def.resolution_units, 0 | 2 | 5),
-            "image resolution units must be 0 (none), 2 (cm) or 5 (inch)",
+            !context.is_paper,
+            "AC1032 writer currently supports model space and blocks only",
         )?;
     }
-    for e in doc.layouts().flatten() {
-        if let WriterEntity::Image(image) = e {
+    validate_entity_encoded(e, context.encoding)?;
+    if let WriterEntity::Image(image) = e {
+        require(
+            context.image_defs.contains(&image.image_def.to_uppercase()),
+            "IMAGE references an undefined image definition",
+        )?;
+    }
+    if let WriterEntity::Viewport(viewport) = e {
+        require(context.is_paper, "VIEWPORT requires paper space")?;
+        let mut frozen = HashSet::new();
+        for layer in &viewport.frozen_layers {
             require(
-                names.contains(&image.image_def.to_uppercase()),
-                "IMAGE references an undefined image definition",
+                context.layer_names.contains(&layer.to_uppercase()),
+                "VIEWPORT freezes an undefined layer",
+            )?;
+            require(
+                frozen.insert(layer.to_uppercase()),
+                "VIEWPORT freezes a layer twice",
             )?;
         }
     }
-    let layer_names: HashSet<String> = doc
-        .layers
-        .iter()
-        .map(|l| l.name.to_uppercase())
-        .chain(std::iter::once("0".to_string()))
-        .collect();
-    let mut incoming = vec![0usize; doc.blocks.len()];
-    let mut edges = vec![Vec::new(); doc.blocks.len()];
-    for (layout_index, entities) in doc.layouts().enumerate() {
-        let in_block = layout_index >= WriterDocument::FIRST_BLOCK_LAYOUT;
-        for e in entities {
-            require(
-                !matches!(e, WriterEntity::Attrib(_)),
-                "ATTRIB must belong to INSERT",
-            )?;
-            validate_entity_encoded(e, encoding)?;
-            if let WriterEntity::Viewport(viewport) = e {
-                require(
-                    layout_index == WriterDocument::PAPER_LAYOUT,
-                    "VIEWPORT requires paper space",
-                )?;
-                let mut frozen = HashSet::new();
-                for layer in &viewport.frozen_layers {
-                    require(
-                        layer_names.contains(&layer.to_uppercase()),
-                        "VIEWPORT freezes an undefined layer",
-                    )?;
-                    require(
-                        frozen.insert(layer.to_uppercase()),
-                        "VIEWPORT freezes a layer twice",
-                    )?;
-                }
-            }
-            if let WriterEntity::Dimension(dim) = e {
-                let Some(&target) = blocks.get(&dim.block_name.to_uppercase()) else {
-                    return Err(DwgError::new(
-                        ErrorKind::Format,
-                        format!("undefined dimension block: {}", dim.block_name),
-                    ));
-                };
-                require(
-                    dim.dimstyle.eq_ignore_ascii_case("Standard"),
-                    "AC1015 writer supports the Standard DIMSTYLE only",
-                )?;
-                if in_block {
-                    edges[layout_index - WriterDocument::FIRST_BLOCK_LAYOUT].push(target);
-                    incoming[target] += 1;
-                }
-            }
-            if let WriterEntity::Insert(insert) = e {
-                let Some(&target) = blocks.get(&insert.block_name.to_uppercase()) else {
-                    return Err(DwgError::new(
-                        ErrorKind::Format,
-                        format!("undefined block: {}", insert.block_name),
-                    ));
-                };
-                if in_block {
-                    edges[layout_index - WriterDocument::FIRST_BLOCK_LAYOUT].push(target);
-                    incoming[target] += 1;
-                }
-                let mut tags = HashSet::new();
-                for attr in &insert.attributes {
-                    validate_attribute(attr, encoding)?;
-                    require(
-                        tags.insert(attr.tag.to_uppercase()),
-                        "duplicate INSERT attribute tag",
-                    )?;
-                    require(attr.prompt.is_empty(), "ATTRIB cannot store ATTDEF prompt")?;
-                }
-            }
+    let mut target = None;
+    if let WriterEntity::Dimension(dim) = e {
+        let Some(&index) = context.blocks.get(&dim.block_name.to_uppercase()) else {
+            return Err(DwgError::new(
+                ErrorKind::Format,
+                format!("undefined dimension block: {}", dim.block_name),
+            ));
+        };
+        require(
+            dim.dimstyle.eq_ignore_ascii_case("Standard"),
+            "AC1015 writer supports the Standard DIMSTYLE only",
+        )?;
+        target = Some(index);
+    }
+    if let WriterEntity::Insert(insert) = e {
+        let Some(&index) = context.blocks.get(&insert.block_name.to_uppercase()) else {
+            return Err(DwgError::new(
+                ErrorKind::Format,
+                format!("undefined block: {}", insert.block_name),
+            ));
+        };
+        validate_insert_attributes(insert, context.encoding)?;
+        target = Some(index);
+    }
+    Ok(target)
+}
+
+/// The attributes attached to an INSERT: valid, unique tags, no prompts.
+pub(crate) fn validate_insert_attributes(
+    insert: &crate::writer::ir::InsertEntity,
+    encoding: TextEncoding,
+) -> Result<()> {
+    let mut tags = HashSet::new();
+    for attr in &insert.attributes {
+        validate_attribute(attr, encoding)?;
+        require(
+            tags.insert(attr.tag.to_uppercase()),
+            "duplicate INSERT attribute tag",
+        )?;
+        require(attr.prompt.is_empty(), "ATTRIB cannot store ATTDEF prompt")?;
+    }
+    Ok(())
+}
+
+/// Reject block definitions that (indirectly) contain themselves. `edges[i]`
+/// lists the blocks referenced from inside block `i`.
+pub(crate) fn check_block_cycles(edges: &[Vec<usize>]) -> Result<()> {
+    let mut incoming = vec![0usize; edges.len()];
+    for targets in edges {
+        for &j in targets {
+            incoming[j] += 1;
         }
     }
     // Iterative topological walk bounds stack use even for very deep block DAGs.
@@ -383,8 +445,52 @@ pub fn validate_document(doc: &WriterDocument) -> Result<()> {
             }
         }
     }
-    require(visited == doc.blocks.len(), "cyclic block references")?;
-    Ok(())
+    require(visited == edges.len(), "cyclic block references")
+}
+
+pub fn validate_document(doc: &WriterDocument) -> Result<()> {
+    let tables = DocumentTables::from_document(doc);
+    validate_tables(&tables)?;
+    let encoding = TextEncoding {
+        codepage: tables.metadata.codepage,
+        unicode: matches!(doc.version, crate::dwg::version::DwgVersion::R2018),
+    };
+    let blocks: HashMap<String, usize> = doc
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.name.to_uppercase(), i))
+        .collect();
+    let layer_names: HashSet<String> = doc
+        .layers
+        .iter()
+        .map(|l| l.name.to_uppercase())
+        .chain(std::iter::once("0".to_string()))
+        .collect();
+    let image_defs: HashSet<String> = doc
+        .image_defs
+        .iter()
+        .map(|d| d.name.to_uppercase())
+        .collect();
+    let mut edges = vec![Vec::new(); doc.blocks.len()];
+    for (layout_index, entities) in doc.layouts().enumerate() {
+        let in_block = layout_index >= WriterDocument::FIRST_BLOCK_LAYOUT;
+        let context = EntityContext {
+            blocks: &blocks,
+            layer_names: &layer_names,
+            image_defs: &image_defs,
+            is_paper: layout_index == WriterDocument::PAPER_LAYOUT,
+            encoding,
+        };
+        for e in entities {
+            if let Some(target) = validate_layout_entity(e, &context)? {
+                if in_block {
+                    edges[layout_index - WriterDocument::FIRST_BLOCK_LAYOUT].push(target);
+                }
+            }
+        }
+    }
+    check_block_cycles(&edges)
 }
 
 pub fn validate_entity(e: &WriterEntity, codepage: u16) -> Result<()> {

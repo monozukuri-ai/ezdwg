@@ -14,7 +14,7 @@ pub fn write_document(
             "r2018 writer requires AC1032",
         ));
     }
-    super::r2000::write_document_versioned(doc, config)
+    super::encoder::encode_document(doc, config)?.into_bytes()
 }
 
 pub(crate) use container::write_container;

@@ -80,7 +80,7 @@ fn build_write_viewports(
 
 /// Paper size and plot settings of the paper-space layout (`Layout1`).
 fn apply_write_layout(
-    doc: &mut writer::WriterDocument,
+    l: &mut writer::ir::LayoutSettings,
     layout: Option<Bound<'_, PyDict>>,
 ) -> PyResult<()> {
     let Some(d) = layout else {
@@ -110,7 +110,6 @@ fn apply_write_layout(
             "style_sheet",
         ],
     )?;
-    let l = &mut doc.layout;
     l.name = write_value(&d, "name", l.name.clone())?;
     l.paper_width = write_value(&d, "paper_width", l.paper_width)?;
     l.paper_height = write_value(&d, "paper_height", l.paper_height)?;

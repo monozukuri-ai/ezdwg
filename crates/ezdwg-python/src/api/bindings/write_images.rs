@@ -1,6 +1,6 @@
 /// IMAGEDEF table rows are dictionaries.
 fn append_image_defs(
-    doc: &mut writer::WriterDocument,
+    out: &mut Vec<writer::ir::ImageDef>,
     image_defs: Option<Vec<Bound<'_, PyDict>>>,
 ) -> PyResult<()> {
     use writer::ir::ImageDef;
@@ -16,7 +16,7 @@ fn append_image_defs(
                 "pixel_size",
             ],
         )?;
-        doc.image_defs.push(ImageDef {
+        out.push(ImageDef {
             name: write_value(&d, "name", String::new())?,
             file_path: write_value(&d, "file_path", String::new())?,
             size: write_value(&d, "size", (0., 0.))?,

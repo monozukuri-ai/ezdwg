@@ -9,6 +9,7 @@ from ._write_preflight import (
 )
 from .document import Document, Layout, clear_decode_caches, read
 from .drawing import BlockLayout, BlockTable, Drawing, EditableLayout, new
+from .streaming import StreamingBlockLayout, StreamingDrawing, StreamingLayout, new_streaming
 from .entity import Entity
 from .layers import Layer, LayerTable, LayerPropertyNotImplemented
 from .layer_states import (
@@ -40,7 +41,11 @@ __all__ = [
     "replace_unrepresentable",
     "read",
     "new",
+    "new_streaming",
     "Drawing",
+    "StreamingDrawing",
+    "StreamingLayout",
+    "StreamingBlockLayout",
     "BlockLayout",
     "BlockTable",
     "EditableLayout",

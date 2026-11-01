@@ -147,6 +147,48 @@ def test_writer_order_matches_separate_batches(tmp_path):
     assert grouped.read_bytes() != interleaved.read_bytes()
 
 
+def test_streaming_and_buffered_writers_produce_the_same_bytes(tmp_path, monkeypatch):
+    """With ``max_handle`` the writer encodes each batch on arrival; the file
+    is the same as the buffered document's."""
+    drawing = mixed_drawing()
+    streamed = tmp_path / "streamed.dwg"
+    assert drawing.save(streamed).skipped_entities == 0  # to_dwg passes max_handle
+
+    def buffered_writer(version, max_handle=None):
+        return real_writer(version)
+
+    real_writer = ezdwg.raw.DwgWriter
+    monkeypatch.setattr(convert_module.raw, "DwgWriter", buffered_writer)
+    buffered = tmp_path / "buffered.dwg"
+    assert drawing.save(buffered).skipped_entities == 0
+    assert buffered.read_bytes() == streamed.read_bytes()
+
+
+def test_streaming_writer_guards_its_handles(tmp_path):
+    line = (5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    writer = ezdwg.raw.DwgWriter(max_handle=4)
+    with pytest.raises(ValueError, match="exceeds the declared maximum"):
+        writer.add(lines=[line])
+    writer = ezdwg.raw.DwgWriter(max_handle=5)
+    writer.add(lines=[line])
+    with pytest.raises(ValueError, match="duplicate handle"):
+        writer.add(lines=[line])
+    writer = ezdwg.raw.DwgWriter(max_handle=5)
+    writer.add(lines=[line])
+    with pytest.raises(ValueError, match="fixed once"):
+        writer.set_tables(layers=[{"name": "0", "color_index": 7}])
+    # Sparse raw handles work in both modes; fresh handles go above the ceiling.
+    sparse = [(0x1000, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0), (0x3000, 1.0, 1.0, 0.0, 2.0, 2.0, 0.0)]
+    for max_handle, name in ((0x3000, "stream.dwg"), (None, "buffer.dwg")):
+        writer = ezdwg.raw.DwgWriter(max_handle=max_handle)
+        writer.add(lines=sparse, polylines2d=[{"handle": 0x2000, "points": [(0, 0), (1, 1), (2, 0)]}])
+        writer.write(str(tmp_path / name))
+        doc = ezdwg.read(str(tmp_path / name))
+        assert {e.handle for e in doc.modelspace().query("LINE")} == {0x1000, 0x3000}
+        (poly,) = doc.modelspace().query("POLYLINE_2D")
+        assert poly.handle == 0x2000 and all(h > 0x3000 for h in poly.dxf["vertex_handles"])
+
+
 def test_writer_rejects_misuse(tmp_path):
     with pytest.raises(ValueError, match="version"):
         ezdwg.raw.DwgWriter("AC1027")

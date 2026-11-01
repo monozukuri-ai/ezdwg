@@ -294,6 +294,139 @@ _AC1032_WRITE_KINDS = {
 }
 
 
+class _WriteSink:
+    """Turn prepared entities into writer rows, batch by batch.
+
+    ``emit`` converts one batch (prepared entities, their attribute dictionaries
+    and their owners) to the rows of ``raw.DwgWriter.add`` in drawing order and
+    hands it over; ATTRIBs wait for ``finish`` so that the INSERTs the writer
+    skipped are known. Counts and skip diagnostics accumulate on the sink.
+    """
+
+    def __init__(self, writer, version: str, diagnostics: list) -> None:
+        self.writer = writer
+        self.diagnostics = diagnostics
+        builders = {
+            "LINE": _as_line_row,
+            "POINT": _as_point_row,
+            "RAY": _as_ray_row,
+            "XLINE": _as_xline_row,
+            "ARC": _as_arc_row,
+            "CIRCLE": _as_circle_row,
+            "ELLIPSE": _as_ellipse_row,
+            "SPLINE": _as_spline_row,
+            "HATCH": _as_hatch_row,
+            "DIMENSION": _as_dimension_row,
+            "IMAGE": _as_image_row,
+            "VIEWPORT": _as_viewport_row,
+            "SOLID": _as_face_row,
+            "TRACE": _as_face_row,
+            "3DFACE": _as_face_row,
+            "POLYLINE_2D": _as_legacy_polyline_row,
+            "POLYLINE_3D": _as_legacy_polyline_row,
+            "LWPOLYLINE": _as_lwpolyline_row,
+            "TEXT": _as_text_row,
+            "MTEXT": _as_mtext_row,
+        }
+        if version == "AC1032":
+            builders = {k: v for k, v in builders.items() if k in _AC1032_WRITE_KINDS}
+        self.builders = builders
+        self.total = 0
+        self.written = 0
+        self.skipped_by_type: dict[str, int] = {}
+        self.invalid_inserts: set[int] = set()
+        self.deferred_attribs: list[tuple[Entity, dict | None]] = []
+
+    def skip(self, entity: Entity, error: str | None) -> None:
+        self.skipped_by_type[entity.dxftype] = self.skipped_by_type.get(entity.dxftype, 0) + 1
+        self.diagnostics.append(
+            WriteDiagnostic(
+                entity.handle,
+                entity.dxftype,
+                "geometry",
+                error or "unsupported or undecoded entity",
+                "skipped",
+            )
+        )
+
+    def emit(self, prepared: list[Entity], attrs: dict, owners: dict) -> None:
+        rows: dict[str, list] = {}
+        order = bytearray()
+        accepted: list[int] = []
+        for entity in prepared:
+            kind = entity.dxftype
+            if kind == "ATTRIB":
+                self.deferred_attribs.append((entity, attrs.get(entity.handle)))
+                continue
+            self.total += 1
+            error = None
+            row = None
+            if kind in {"INSERT", "ATTDEF"}:
+                error = geometry_error(entity)
+                if error is None:
+                    d = entity.dxf
+                    if kind == "INSERT":
+                        row = {
+                            "handle": entity.handle,
+                            "name": d["name"],
+                            "insert": d["insert"],
+                            "scale": tuple(
+                                d.get(k, 1.0) for k in ("xscale", "yscale", "zscale")
+                            ),
+                            "rotation": math.radians(d.get("rotation", 0.0)),
+                        }
+                    else:
+                        row = _attribute_write_row(entity)
+                elif kind == "INSERT":
+                    self.invalid_inserts.add(entity.handle)
+            elif kind in self.builders:
+                error = geometry_error(entity)
+                if error is None:
+                    try:
+                        row = self.builders[kind](entity)
+                    except (ValueError, TypeError, OverflowError):
+                        error = "invalid geometry row"
+            if row is None:
+                self.skip(entity, error)
+                continue
+            group = _WRITE_GROUP_OF[kind]
+            rows.setdefault(group, []).append(row)
+            order.append(_WRITE_TAG[group])
+            accepted.append(int(entity.handle))
+            self.written += 1
+        if accepted:
+            self.writer.add(
+                **rows,
+                entity_attributes={h: attrs[h] for h in accepted if h in attrs},
+                entity_owners={h: owners[h] for h in accepted if h in owners},
+                order=bytes(order),
+            )
+
+    def finish(self, owners: dict) -> None:
+        """Write the ATTRIBs whose INSERT was accepted."""
+        rows, attrs, accepted = [], {}, []
+        for entity, a in self.deferred_attribs:
+            self.total += 1
+            error = geometry_error(entity)
+            if error is None and owners.get(entity.handle) in self.invalid_inserts:
+                error = "owning INSERT was skipped"
+            if error is not None:
+                self.skip(entity, error)
+                continue
+            rows.append(_attribute_write_row(entity))
+            accepted.append(int(entity.handle))
+            if a is not None:
+                attrs[int(entity.handle)] = a
+            self.written += 1
+        self.deferred_attribs = []
+        if rows:
+            self.writer.add(
+                attribs=rows,
+                entity_attributes=attrs,
+                entity_owners={h: owners[h] for h in accepted if h in owners},
+            )
+
+
 def _attribute_write_row(entity: Entity) -> dict:
     d = entity.dxf
     row = {
@@ -364,148 +497,26 @@ def to_dwg(
             )
     diagnostics = plan.diagnostics
 
-    writer = raw.DwgWriter(version)
-    writer.reserve(sum(1 for e in entities if e.handle not in entity_owners))
+    # With the largest handle known up front, the native writer encodes each
+    # batch to object records as it arrives and keeps nothing else.
+    writer = raw.DwgWriter(
+        version, max_handle=max((int(e.handle) for e in entities), default=0)
+    )
     writer.set_tables(
         layers=plan.layers,
         linetypes=plan.linetypes,
         text_styles=plan.text_styles,
         metadata=plan.metadata,
         blocks=list(block_rows.values()),
+        # Only the definitions an IMAGE references are written.
+        image_defs=plan.image_defs if version == "AC1015" else [],
         layout=plan.layout,
     )
-
-    builders = {
-        "LINE": _as_line_row,
-        "POINT": _as_point_row,
-        "RAY": _as_ray_row,
-        "XLINE": _as_xline_row,
-        "ARC": _as_arc_row,
-        "CIRCLE": _as_circle_row,
-        "ELLIPSE": _as_ellipse_row,
-        "SPLINE": _as_spline_row,
-        "HATCH": _as_hatch_row,
-        "DIMENSION": _as_dimension_row,
-        "IMAGE": _as_image_row,
-        "VIEWPORT": _as_viewport_row,
-        "SOLID": _as_face_row,
-        "TRACE": _as_face_row,
-        "3DFACE": _as_face_row,
-        "POLYLINE_2D": _as_legacy_polyline_row,
-        "POLYLINE_3D": _as_legacy_polyline_row,
-        "LWPOLYLINE": _as_lwpolyline_row,
-        "TEXT": _as_text_row,
-        "MTEXT": _as_mtext_row,
-    }
-    if version == "AC1032":
-        builders = {
-            kind: entry for kind, entry in builders.items() if kind in _AC1032_WRITE_KINDS
-        }
-    total = 0
-    written = 0
-    skipped_by_type: dict[str, int] = {}
-    invalid_inserts: set[int] = set()
-    image_defs_used: set[str] = set()
-    # ATTRIBs follow their INSERTs; they are written after every batch so the
-    # skipped INSERTs are known.
-    deferred_attribs: list[tuple[Entity, dict | None]] = []
-
-    def skip(entity: Entity, error: str | None) -> None:
-        skipped_by_type[entity.dxftype] = skipped_by_type.get(entity.dxftype, 0) + 1
-        diagnostics.append(
-            WriteDiagnostic(
-                entity.handle,
-                entity.dxftype,
-                "geometry",
-                error or "unsupported or undecoded entity",
-                "skipped",
-            )
-        )
-
-    def emit(prepared: list[Entity], attrs: dict) -> None:
-        """Convert one batch to writer rows and hand it to the native writer."""
-        nonlocal total, written
-        rows: dict[str, list] = {}
-        order = bytearray()
-        accepted: list[int] = []
-        for entity in prepared:
-            kind = entity.dxftype
-            if kind == "ATTRIB":
-                deferred_attribs.append((entity, attrs.get(entity.handle)))
-                continue
-            total += 1
-            error = None
-            row = None
-            if kind in {"INSERT", "ATTDEF"}:
-                error = geometry_error(entity)
-                if error is None:
-                    d = entity.dxf
-                    if kind == "INSERT":
-                        row = {
-                            "handle": entity.handle,
-                            "name": d["name"],
-                            "insert": d["insert"],
-                            "scale": tuple(
-                                d.get(k, 1.0) for k in ("xscale", "yscale", "zscale")
-                            ),
-                            "rotation": math.radians(d.get("rotation", 0.0)),
-                        }
-                    else:
-                        row = _attribute_write_row(entity)
-                elif kind == "INSERT":
-                    invalid_inserts.add(entity.handle)
-            elif kind in builders:
-                error = geometry_error(entity)
-                if error is None:
-                    try:
-                        row = builders[kind](entity)
-                    except (ValueError, TypeError, OverflowError):
-                        error = "invalid geometry row"
-            if row is None:
-                skip(entity, error)
-                continue
-            group = _WRITE_GROUP_OF[kind]
-            rows.setdefault(group, []).append(row)
-            order.append(_WRITE_TAG[group])
-            accepted.append(int(entity.handle))
-            written += 1
-            if kind == "IMAGE":
-                image_defs_used.add(row["image_def"])
-        if accepted:
-            writer.add(
-                **rows,
-                entity_attributes={h: attrs[h] for h in accepted if h in attrs},
-                entity_owners={
-                    h: entity_owners[h] for h in accepted if h in entity_owners
-                },
-                order=bytes(order),
-            )
-
+    sink = _WriteSink(writer, version, diagnostics)
     for prepared, attrs in plan.chunks:
-        emit(prepared, attrs)
-    if deferred_attribs:
-        rows, attrs, accepted = [], {}, []
-        for entity, a in deferred_attribs:
-            total += 1
-            error = geometry_error(entity)
-            if error is None and entity_owners.get(entity.handle) in invalid_inserts:
-                error = "owning INSERT was skipped"
-            if error is not None:
-                skip(entity, error)
-                continue
-            rows.append(_attribute_write_row(entity))
-            accepted.append(int(entity.handle))
-            if a is not None:
-                attrs[int(entity.handle)] = a
-            written += 1
-        if rows:
-            writer.add(
-                attribs=rows,
-                entity_attributes=attrs,
-                entity_owners={
-                    h: entity_owners[h] for h in accepted if h in entity_owners
-                },
-            )
+        sink.emit(prepared, attrs, entity_owners)
+    sink.finish(entity_owners)
+    total, written, skipped_by_type = sink.total, sink.written, sink.skipped_by_type
 
     skipped = total - written
     strict_diagnostics = strict_losses(diagnostics)
@@ -519,9 +530,6 @@ def to_dwg(
             f"failed to write {skipped} entities ({summary}); {len(strict_diagnostics)} diagnostics: {losses}"
         )
 
-    writer.set_tables(
-        image_defs=[d for d in plan.image_defs if d["name"] in image_defs_used]
-    )
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     writer.write(str(out_path))
