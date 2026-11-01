@@ -5,7 +5,7 @@
 //! the record bytes and a handle index stay in memory until [`DocumentEncoder::finish`]
 //! writes the tables, header and object map. A drawing of a million entities
 //! therefore costs about a hundred bytes per entity while it is written,
-//! instead of a [`WriterDocument`](crate::writer::WriterDocument) of several
+//! instead of a [`WriterDocument`] of several
 //! hundred bytes per entity plus every record.
 //!
 //! Fresh handles (tables, polyline vertices, SEQENDs, image reactors, the
