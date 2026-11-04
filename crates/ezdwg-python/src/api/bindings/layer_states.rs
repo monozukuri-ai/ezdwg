@@ -128,8 +128,7 @@ fn discover_layer_state_entries(path: &str) -> PyResult<Vec<(String, u64)>> {
 
     // Path A: LAYER_CONTROL → xdic
     for obj in index.objects.iter() {
-        let Some((_record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
+        let Some(header) = object_header_at(&decoder, obj.offset, best_effort)? else {
             continue;
         };
         if !is_layer_control_type(header.type_code, dynamic) {
@@ -161,9 +160,7 @@ fn discover_layer_state_entries(path: &str) -> PyResult<Vec<(String, u64)>> {
     // Path B: scan all dictionaries for ACAD_LAYERSTATES key
     if states.is_empty() {
         for obj in index.objects.iter() {
-            let Some((_record, header)) =
-                parse_record_and_header(&decoder, obj.offset, best_effort)?
-            else {
+            let Some(header) = object_header_at(&decoder, obj.offset, best_effort)? else {
                 continue;
             };
             if !is_dictionary_type(header.type_code, dynamic) {
@@ -299,8 +296,7 @@ fn discover_plotstyle_entries(path: &str) -> PyResult<Vec<(String, u64)>> {
 
     // Path A: any DICTIONARY containing ACAD_PLOTSTYLENAME → child dict entries
     for obj in index.objects.iter() {
-        let Some((_record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
+        let Some(header) = object_header_at(&decoder, obj.offset, best_effort)? else {
             continue;
         };
         if !is_dictionary_type(header.type_code, dynamic) {
@@ -329,9 +325,7 @@ fn discover_plotstyle_entries(path: &str) -> PyResult<Vec<(String, u64)>> {
     // sole/first entry is "Normal" — the CTB default table shape.
     if entries.is_empty() {
         for obj in index.objects.iter() {
-            let Some((_record, header)) =
-                parse_record_and_header(&decoder, obj.offset, best_effort)?
-            else {
+            let Some(header) = object_header_at(&decoder, obj.offset, best_effort)? else {
                 continue;
             };
             if !is_dictionary_type(header.type_code, dynamic) {

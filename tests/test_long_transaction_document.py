@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ezdwg.document as document_module
+from tests._catalog_mocks import mock_object_catalog
 
 
 def _clear_document_caches() -> None:
@@ -82,9 +83,8 @@ def test_query_long_transaction_exposes_handle_topology(monkeypatch) -> None:
 def test_query_long_transaction_exposes_record_diagnostics(monkeypatch) -> None:
     _clear_document_caches()
 
-    monkeypatch.setattr(
-        document_module.raw,
-        "list_object_headers_with_type",
+    mock_object_catalog(
+        monkeypatch,
         lambda _path: [
             (120, 1, 0, 0x13, "LINE", "Entity"),
             (130, 2, 0, 0x13, "LINE", "Entity"),
@@ -128,9 +128,8 @@ def test_query_long_transaction_exposes_record_diagnostics(monkeypatch) -> None:
 def test_query_none_can_include_long_transaction_when_present(monkeypatch) -> None:
     _clear_document_caches()
 
-    monkeypatch.setattr(
-        document_module.raw,
-        "list_object_headers_with_type",
+    mock_object_catalog(
+        monkeypatch,
         lambda _path: [
             (100, 0, 0, 0x4C, "LONG_TRANSACTION", "Entity"),
             (200, 0, 0, 0x33, "LAYER", "Object"),

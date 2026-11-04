@@ -3,14 +3,14 @@ from __future__ import annotations
 import math
 
 import ezdwg.document as document_module
+from tests._catalog_mocks import mock_object_catalog
 
 
 def test_normalize_types_uses_present_entity_types_when_types_none(monkeypatch) -> None:
     document_module._present_supported_types.cache_clear()
 
-    monkeypatch.setattr(
-        document_module.raw,
-        "list_object_headers_with_type",
+    mock_object_catalog(
+        monkeypatch,
         lambda _path: [
             (1, 0, 0, 0x13, "LINE", "Entity"),
             (2, 0, 0, 0x11, "ARC", "Entity"),
@@ -28,25 +28,28 @@ def test_normalize_types_uses_present_entity_types_when_types_none(monkeypatch) 
 
 def test_normalize_types_explicit_tokens_do_not_require_present_scan(monkeypatch) -> None:
     document_module._present_supported_types.cache_clear()
+    calls = []
+
+    def unexpected_present_scan(path):
+        calls.append(path)
+        raise AssertionError("present-type scan should not be called for explicit tokens")
 
     monkeypatch.setattr(
         document_module.raw,
-        "list_object_headers_with_type",
-        lambda _path: (_ for _ in ()).throw(
-            AssertionError("present-type scan should not be called for explicit tokens")
-        ),
+        "list_object_type_names",
+        unexpected_present_scan,
     )
 
     types = document_module._normalize_types("LINE ARC", "dummy.dwg")
     assert types == ["LINE", "ARC"]
+    assert calls == []
 
 
 def test_query_none_skips_absent_entity_decoders(monkeypatch) -> None:
     document_module._present_supported_types.cache_clear()
 
-    monkeypatch.setattr(
-        document_module.raw,
-        "list_object_headers_with_type",
+    mock_object_catalog(
+        monkeypatch,
         lambda _path: [
             (1, 0, 0, 0x13, "LINE", "Entity"),
             (2, 0, 0, 0x11, "ARC", "Entity"),
@@ -84,9 +87,8 @@ def test_query_uses_bulk_line_arc_circle_decoder(monkeypatch) -> None:
     document_module._present_supported_types.cache_clear()
     document_module._line_arc_circle_rows.cache_clear()
 
-    monkeypatch.setattr(
-        document_module.raw,
-        "list_object_headers_with_type",
+    mock_object_catalog(
+        monkeypatch,
         lambda _path: [
             (1, 0, 0, 0x13, "LINE", "Entity"),
             (2, 0, 0, 0x11, "ARC", "Entity"),
@@ -185,9 +187,8 @@ def test_query_line_includes_owner_handle_from_raw_map(monkeypatch) -> None:
 def test_normalize_types_excludes_explicit_only_entities_by_default(monkeypatch) -> None:
     document_module._present_supported_types.cache_clear()
 
-    monkeypatch.setattr(
-        document_module.raw,
-        "list_object_headers_with_type",
+    mock_object_catalog(
+        monkeypatch,
         lambda _path: [
             (1, 0, 0, 0x13, "LINE", "Entity"),
             (2, 0, 0, 0x04, "BLOCK", "Entity"),
@@ -213,9 +214,8 @@ def test_query_can_explicitly_fetch_block_endblk_seqend_and_vertex(monkeypatch) 
     document_module._entity_style_map.cache_clear()
     document_module._layer_color_map.cache_clear()
 
-    monkeypatch.setattr(
-        document_module.raw,
-        "list_object_headers_with_type",
+    mock_object_catalog(
+        monkeypatch,
         lambda _path: [
             (10, 0, 0, 0x04, "BLOCK", "Entity"),
             (11, 0, 0, 0x05, "ENDBLK", "Entity"),
@@ -288,9 +288,8 @@ def test_query_wildcard_can_fetch_explicit_only_vertex_types(monkeypatch) -> Non
     document_module._entity_style_map.cache_clear()
     document_module._layer_color_map.cache_clear()
 
-    monkeypatch.setattr(
-        document_module.raw,
-        "list_object_headers_with_type",
+    mock_object_catalog(
+        monkeypatch,
         lambda _path: [(40, 0, 0, 0x02, "VERTEX_2D", "Entity")],
     )
     monkeypatch.setattr(

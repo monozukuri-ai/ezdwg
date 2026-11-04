@@ -11,6 +11,7 @@ import ezdwg
 import ezdwg.cli as cli_module
 import ezdwg.convert as convert_module
 import ezdwg.document as document_module
+from tests._catalog_mocks import mock_object_catalog
 from ezdwg.entity import Entity
 from tests._dxf_helpers import dxf_entities_of_type, group_float
 from tests._dxf_helpers import dxf_lwpolyline_points
@@ -492,9 +493,8 @@ def test_to_dxf_default_query_skips_unsupported_types(monkeypatch, tmp_path: Pat
     document_module._entity_style_map.cache_clear()
     document_module._layer_color_map.cache_clear()
 
-    monkeypatch.setattr(
-        document_module.raw,
-        "list_object_headers_with_type",
+    mock_object_catalog(
+        monkeypatch,
         lambda _path: [
             (101, 10, 0, 0x13, "LINE", "Entity"),
             (201, 11, 0, 0x25, "REGION", "Entity"),
@@ -540,9 +540,8 @@ def test_to_dxf_include_unsupported_keeps_skip_reporting(monkeypatch, tmp_path: 
     document_module._entity_style_map.cache_clear()
     document_module._layer_color_map.cache_clear()
 
-    monkeypatch.setattr(
-        document_module.raw,
-        "list_object_headers_with_type",
+    mock_object_catalog(
+        monkeypatch,
         lambda _path: [
             (101, 10, 0, 0x13, "LINE", "Entity"),
             (201, 11, 0, 0x25, "REGION", "Entity"),

@@ -3,6 +3,15 @@
 ## Unreleased
 
 ### DWG reader
+- Query present type names and type-specific handles directly from the shared
+  Rust catalog. High-level type discovery and handle lookups no longer transfer
+  or scan the complete object-header table in Python. Add
+  `raw.list_object_type_names` and `raw.list_object_handles_by_type_name`.
+- Share parsed object headers and type-specific offsets across decode passes.
+  Typed entity and table readers reuse the per-file catalog instead of parsing
+  every object's header again. Object-map order, dynamic class aliases, read
+  limits, and strict/best-effort error handling are preserved; replacing a file
+  or calling `clear_decode_caches()` also invalidates the catalog.
 - R2007: an empty entry at the start of the section map no longer ends the map.
   Its position depends on the writer, and such files failed with
   `R2007 section map has no entries`.

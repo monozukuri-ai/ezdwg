@@ -1,7 +1,7 @@
 /// Resolve explicit owned arrays or legacy first/last and next links. Never infer
 /// write order from object offsets or numeric handles.
 fn polyline_vertex_references(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     objects: &[objects::ObjectRef],
     parent: u64,
     count: Option<usize>,
@@ -16,7 +16,7 @@ fn polyline_vertex_references(
 /// polyline is O(objects) each time, and a drawing with 23k POLYLINE_2D among 163k objects
 /// spent 65 s of its 78 s read here (2026-10-17).
 fn polyline_vertex_references_indexed(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     by_handle: &HashMap<u64, u32>,
     parent: u64,
     count: Option<usize>,

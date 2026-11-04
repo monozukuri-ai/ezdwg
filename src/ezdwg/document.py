@@ -2626,15 +2626,13 @@ def _present_supported_types(
     if not path:
         return tuple(SUPPORTED_ENTITY_TYPES)
     try:
-        headers = raw.list_object_headers_with_type(path)
+        type_names = raw.list_object_type_names(path)
     except Exception:
         return tuple(SUPPORTED_ENTITY_TYPES)
 
     seen: set[str] = set()
-    for row in headers:
-        if not isinstance(row, tuple) or len(row) < 5:
-            continue
-        canonical = _canonical_entity_type_name(row[4])
+    for name in type_names:
+        canonical = _canonical_entity_type_name(name)
         if canonical is not None:
             seen.add(canonical)
 
@@ -2713,21 +2711,9 @@ def _entity_handles_by_type_name(path: str, type_name: str) -> tuple[int, ...]:
     if not target:
         return ()
     try:
-        rows = raw.list_object_headers_with_type(path)
+        return tuple(raw.list_object_handles_by_type_name(path, target))
     except Exception:
         return ()
-    handles: list[int] = []
-    for row in rows:
-        if not isinstance(row, tuple) or len(row) < 5:
-            continue
-        name = str(row[4]).strip().upper()
-        if name != target:
-            continue
-        try:
-            handles.append(int(row[0]))
-        except Exception:
-            continue
-    return tuple(handles)
 
 
 @lru_cache(maxsize=16)

@@ -49,6 +49,28 @@ List object headers with resolved type names. Each tuple: `(handle, offset, size
 
 `type_class` is `"E"` for entities and `"O"` for objects.
 
+### list_object_type_names
+
+```python
+raw.list_object_type_names(path: str) -> list[str]
+```
+
+Return unique resolved DWG type names in order of first appearance in the object
+map. Includes entity, object, and unsupported types. Reads the shared native
+catalog without transferring the full header table to Python.
+
+### list_object_handles_by_type_name
+
+```python
+raw.list_object_handles_by_type_name(path: str, type_name: str, limit: int | None = None) -> list[int]
+```
+
+Return handles matching an exact resolved DWG type name, ignoring case and
+surrounding whitespace. Dynamic class names are included. Object-map order and
+duplicate handles are preserved. Use names such as `DIM_LINEAR` as returned by
+`list_object_type_names`; high-level aliases such as `DIMENSION` are not expanded.
+An empty name or a limit of zero returns an empty list.
+
 ### decode_document_graph
 
 ```python

@@ -214,7 +214,12 @@ pub fn decode_linetypes(path: &str, limit: Option<usize>) -> PyResult<Vec<Linety
     let mut result: Vec<LinetypeRow> = Vec::new();
     let mut seen: HashSet<u64> = HashSet::new();
 
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x39, "LTYPE", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -242,7 +247,7 @@ pub fn decode_linetypes(path: &str, limit: Option<usize>) -> PyResult<Vec<Linety
 }
 
 fn collect_object_handles_by_type(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     dynamic_types: &HashMap<u16, String>,
     index: &objects::ObjectIndex,
     best_effort: bool,
@@ -251,8 +256,7 @@ fn collect_object_handles_by_type(
 ) -> PyResult<HashSet<u64>> {
     let mut handles = HashSet::new();
     for obj in index.objects.iter() {
-        let Some((_record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
-        else {
+        let Some(header) = object_header_at(decoder, obj.offset, best_effort)? else {
             continue;
         };
         if matches_type_name(header.type_code, builtin_code, builtin_name, dynamic_types) {
@@ -326,7 +330,12 @@ pub fn decode_layer_linetypes(path: &str, limit: Option<usize>) -> PyResult<Vec<
     let mut result = Vec::new();
     let mut seen: HashSet<u64> = HashSet::new();
 
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x33, "LAYER", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -618,7 +627,12 @@ pub fn decode_layer_states(path: &str, limit: Option<usize>) -> PyResult<Vec<Lay
     let mut result = Vec::new();
     let mut seen: HashSet<u64> = HashSet::new();
 
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x33, "LAYER", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -766,7 +780,12 @@ pub fn decode_dimstyles(path: &str, limit: Option<usize>) -> PyResult<Vec<DimSty
     let mut result = Vec::new();
     let mut seen: HashSet<u64> = HashSet::new();
 
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x45, "DIMSTYLE", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -1012,7 +1031,12 @@ pub fn decode_layout_objects(path: &str, limit: Option<usize>) -> PyResult<Vec<L
     let mut result = Vec::new();
     let mut seen: HashSet<u64> = HashSet::new();
 
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x52, "LAYOUT", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;

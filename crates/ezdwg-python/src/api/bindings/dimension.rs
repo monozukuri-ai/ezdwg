@@ -114,7 +114,7 @@ pub fn decode_dimension_entities(
 }
 
 fn decode_dimension_entities_with_state(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     dynamic_types: &HashMap<u16, String>,
     index: &objects::ObjectIndex,
     best_effort: bool,
@@ -123,7 +123,14 @@ fn decode_dimension_entities_with_state(
 ) -> PyResult<Vec<DimTypedEntityRow>> {
     let mut result: Vec<DimTypedEntityRow> = Vec::new();
 
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |type_code| {
+            DIM_DECODE_SPECS.iter().any(|spec| {
+                matches_type_name(type_code, spec.type_code, spec.type_name, dynamic_types)
+            })
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
         else {
             continue;

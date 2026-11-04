@@ -164,7 +164,12 @@ where
     let dynamic_types = &shared.dynamic_types;
     let index = &shared.index;
     let mut result = Vec::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, type_code, type_name, dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -295,7 +300,12 @@ where
     let index = &shared.index;
     let mut result = Vec::new();
 
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, type_code, type_name, dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -570,7 +580,7 @@ impl PolylineSequenceKind {
 /// not make the entire drawing unreadable. Strict decoding was previously kept
 /// for R2004/R2007, which mostly surfaced object-index bugs as whole-file
 /// exceptions in the high-level API.
-fn is_best_effort_compat_version(decoder: &decoder::Decoder<'_>) -> bool {
+fn is_best_effort_compat_version(decoder: &FileDecoder<'_>) -> bool {
     !matches!(decoder.version(), version::DwgVersion::Unknown(_))
 }
 
@@ -709,7 +719,7 @@ fn parse_object_header_for_version(
 }
 
 fn parse_record_and_header<'a>(
-    decoder: &decoder::Decoder<'a>,
+    decoder: &FileDecoder<'a>,
     offset: u32,
     best_effort: bool,
 ) -> PyResult<Option<(objects::ObjectRecord<'a>, ApiObjectHeader)>> {
@@ -718,7 +728,7 @@ fn parse_record_and_header<'a>(
         Err(_err) if best_effort => return Ok(None),
         Err(err) => return Err(to_py_err(err)),
     };
-    let header = match parse_object_header_for_version(&record, decoder.version()) {
+    let header = match decoder.record_header(&record) {
         Ok(header) => header,
         Err(_err) if best_effort => return Ok(None),
         Err(err) => return Err(to_py_err(err)),
@@ -726,8 +736,20 @@ fn parse_record_and_header<'a>(
     Ok(Some((record, header)))
 }
 
+fn object_header_at(
+    decoder: &FileDecoder<'_>,
+    offset: u32,
+    best_effort: bool,
+) -> PyResult<Option<ApiObjectHeader>> {
+    match decoder.object_header(offset) {
+        Ok(header) => Ok(Some(header)),
+        Err(_) if best_effort => Ok(None),
+        Err(err) => Err(to_py_err(err)),
+    }
+}
+
 fn load_dynamic_types(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     best_effort: bool,
 ) -> PyResult<HashMap<u16, String>> {
     match decoder.dynamic_type_map() {
@@ -738,7 +760,7 @@ fn load_dynamic_types(
 }
 
 fn load_dynamic_type_classes(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     best_effort: bool,
 ) -> PyResult<HashMap<u16, objects::ObjectClass>> {
     match decoder.dynamic_type_class_map() {
@@ -749,14 +771,13 @@ fn load_dynamic_type_classes(
 }
 
 fn collect_object_type_codes(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     index: &objects::ObjectIndex,
     best_effort: bool,
 ) -> PyResult<HashMap<u64, u16>> {
     let mut object_types: HashMap<u64, u16> = HashMap::new();
     for obj in index.objects.iter() {
-        let Some((_record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
-        else {
+        let Some(header) = object_header_at(decoder, obj.offset, best_effort)? else {
             continue;
         };
         object_types.insert(obj.handle.0, header.type_code);
@@ -1272,8 +1293,11 @@ fn is_recoverable_decode_error(err: &DwgError) -> bool {
     )
 }
 
-fn build_decoder(bytes: &[u8]) -> crate::core::result::Result<decoder::Decoder<'_>> {
-    decoder::Decoder::new(bytes, Default::default())
+fn build_decoder(bytes: &[u8]) -> crate::core::result::Result<FileDecoder<'_>> {
+    Ok(FileDecoder {
+        inner: decoder::Decoder::new(bytes, Default::default())?,
+        catalog: None,
+    })
 }
 
 fn to_py_err(err: DwgError) -> PyErr {

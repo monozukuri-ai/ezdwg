@@ -3,6 +3,7 @@
 
 include!("bindings/shared.rs");
 include!("bindings/cache.rs");
+include!("bindings/object_catalog.rs");
 include!("bindings/write.rs");
 include!("bindings/write_blocks.rs");
 include!("bindings/write_polylines.rs");

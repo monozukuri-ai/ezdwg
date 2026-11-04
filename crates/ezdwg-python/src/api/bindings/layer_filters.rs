@@ -137,8 +137,7 @@ fn discover_named_dict_entries(path: &str, keys: &[&str]) -> PyResult<Vec<(Strin
     };
 
     for obj in index.objects.iter() {
-        let Some((_record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
+        let Some(header) = object_header_at(&decoder, obj.offset, best_effort)? else {
             continue;
         };
         if !is_layer_control_type(header.type_code, dynamic) {
@@ -169,9 +168,7 @@ fn discover_named_dict_entries(path: &str, keys: &[&str]) -> PyResult<Vec<(Strin
     }
     if entries.is_empty() {
         for obj in index.objects.iter() {
-            let Some((_record, header)) =
-                parse_record_and_header(&decoder, obj.offset, best_effort)?
-            else {
+            let Some(header) = object_header_at(&decoder, obj.offset, best_effort)? else {
                 continue;
             };
             if !is_dictionary_type(header.type_code, dynamic) {
@@ -249,7 +246,7 @@ pub fn decode_layer_filter_xrecords(
 }
 
 fn nested_acly_children(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     by_handle: &HashMap<u64, usize>,
     index_objects: &[objects::ObjectRef],
     xr: &objects::XRecord,
@@ -294,7 +291,7 @@ fn nested_acly_children(
 
 fn walk_acly_tree(
     py: Python<'_>,
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     by_handle: &HashMap<u64, usize>,
     index_objects: &[objects::ObjectRef],
     best_effort: bool,

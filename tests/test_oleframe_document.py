@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ezdwg.document as document_module
+from tests._catalog_mocks import mock_object_catalog
 
 
 def _clear_document_caches() -> None:
@@ -74,9 +75,8 @@ def test_query_ole2frame_entity(monkeypatch) -> None:
 def test_query_oleframe_exposes_record_diagnostics(monkeypatch) -> None:
     _clear_document_caches()
 
-    monkeypatch.setattr(
-        document_module.raw,
-        "list_object_headers_with_type",
+    mock_object_catalog(
+        monkeypatch,
         lambda _path: [
             (100, 3, 0, 0x2B, "OLEFRAME", "Entity"),
             (120, 1, 0, 0x13, "LINE", "Entity"),
@@ -116,9 +116,8 @@ def test_query_oleframe_exposes_record_diagnostics(monkeypatch) -> None:
 def test_query_ole2frame_exposes_record_fallback_diagnostics(monkeypatch) -> None:
     _clear_document_caches()
 
-    monkeypatch.setattr(
-        document_module.raw,
-        "list_object_headers_with_type",
+    mock_object_catalog(
+        monkeypatch,
         lambda _path: [(200, 1024, 18, 0x4A, "OLE2FRAME", "Entity")],
     )
     monkeypatch.setattr(document_module.raw, "decode_ole2frame_entities", lambda _path: [(200,)])
@@ -146,9 +145,8 @@ def test_query_ole2frame_exposes_record_fallback_diagnostics(monkeypatch) -> Non
 def test_query_none_can_include_oleframe_and_ole2frame_when_present(monkeypatch) -> None:
     _clear_document_caches()
 
-    monkeypatch.setattr(
-        document_module.raw,
-        "list_object_headers_with_type",
+    mock_object_catalog(
+        monkeypatch,
         lambda _path: [
             (100, 0, 0, 0x2B, "OLEFRAME", "Entity"),
             (200, 0, 0, 0x4A, "OLE2FRAME", "Entity"),

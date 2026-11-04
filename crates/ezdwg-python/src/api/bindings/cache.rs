@@ -136,6 +136,9 @@ struct DecodedFile {
     best_effort: bool,
     dynamic_types: HashMap<u16, String>,
     dynamic_type_classes: HashMap<u16, objects::ObjectClass>,
+    /// Shared by every decoder obtained from this FileDecodeState entry. The
+    /// catalog keeps header errors in source order, including on limited reads.
+    object_catalog: OnceLock<ObjectCatalog>,
 }
 
 impl DecodedFile {
@@ -160,16 +163,18 @@ impl DecodedFile {
             best_effort,
             dynamic_types,
             dynamic_type_classes,
+            object_catalog: OnceLock::new(),
         })
     }
 
     /// A decoder over the shared bytes, with the objects section preloaded.
-    fn decoder(&self) -> PyResult<decoder::Decoder<'_>> {
+    fn decoder(&self) -> PyResult<FileDecoder<'_>> {
         let decoder = build_decoder(&self.bytes).map_err(to_py_err)?;
-        Ok(match &self.objects_section {
+        let decoder = match &self.objects_section {
             Some(section) => decoder.with_objects_section(section.clone()),
             None => decoder,
-        })
+        };
+        Ok(decoder.with_object_catalog(&self.index, &self.object_catalog))
     }
 }
 

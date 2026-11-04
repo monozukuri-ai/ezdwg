@@ -24,6 +24,8 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(list_object_map_entries, module)?)?;
     module.add_function(wrap_pyfunction!(list_object_headers, module)?)?;
     module.add_function(wrap_pyfunction!(list_object_headers_with_type, module)?)?;
+    module.add_function(wrap_pyfunction!(list_object_type_names, module)?)?;
+    module.add_function(wrap_pyfunction!(list_object_handles_by_type_name, module)?)?;
     module.add_function(wrap_pyfunction!(decode_document_graph, module)?)?;
     module.add_function(wrap_pyfunction!(list_object_headers_by_type, module)?)?;
     module.add_function(wrap_pyfunction!(read_object_records_by_type, module)?)?;

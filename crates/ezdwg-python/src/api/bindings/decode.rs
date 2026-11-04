@@ -100,7 +100,12 @@ where
     let dynamic_types = &shared.dynamic_types;
     let index = &shared.index;
     let mut result = Vec::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, type_code, type_name, dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -213,12 +218,7 @@ pub fn list_object_headers(path: &str, limit: Option<usize>) -> PyResult<Vec<Obj
     let index = &shared.index;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
-        let record = match decoder.parse_object_record(obj.offset) {
-            Ok(record) => record,
-            Err(_err) if best_effort => continue,
-            Err(err) => return Err(to_py_err(err)),
-        };
-        let header = match parse_object_header_for_version(&record, decoder.version()) {
+        let header = match decoder.object_header(obj.offset) {
             Ok(header) => header,
             Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
@@ -261,12 +261,7 @@ fn list_object_headers_with_type_uncached(
     let index = &shared.index;
     let mut result = Vec::new();
     for obj in index.objects.iter() {
-        let record = match decoder.parse_object_record(obj.offset) {
-            Ok(record) => record,
-            Err(_err) if best_effort => continue,
-            Err(err) => return Err(to_py_err(err)),
-        };
-        let header = match parse_object_header_for_version(&record, decoder.version()) {
+        let header = match decoder.object_header(obj.offset) {
             Ok(header) => header,
             Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
@@ -920,13 +915,13 @@ pub fn list_object_headers_by_type(
     let filter: HashSet<u16> = type_codes.into_iter().collect();
     let index = &shared.index;
     let mut result = Vec::new();
-    for obj in index.objects.iter() {
-        let record = match decoder.parse_object_record(obj.offset) {
-            Ok(record) => record,
-            Err(_err) if best_effort => continue,
-            Err(err) => return Err(to_py_err(err)),
-        };
-        let header = match parse_object_header_for_version(&record, decoder.version()) {
+    for obj in decoder
+        .matching_objects(index, best_effort, |type_code| {
+            matches_type_filter(&filter, type_code, &resolved_type_name(type_code, dynamic_types))
+        })
+        .iter()
+    {
+        let header = match decoder.object_header(obj.offset) {
             Ok(header) => header,
             Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
@@ -969,10 +964,15 @@ pub fn read_object_records_by_type(
     let filter: HashSet<u16> = type_codes.into_iter().collect();
     let index = &shared.index;
     let mut result = Vec::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, false, |type_code| {
+            matches_type_filter(&filter, type_code, &resolved_type_name(type_code, &dynamic_types))
+        })
+        .iter()
+    {
         let record = decoder.parse_object_record(obj.offset).map_err(to_py_err)?;
         let header =
-            parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
+            decoder.record_header(&record).map_err(to_py_err)?;
         let type_name = resolved_type_name(header.type_code, &dynamic_types);
         if !matches_type_filter(&filter, header.type_code, &type_name) {
             continue;
@@ -1030,7 +1030,7 @@ pub fn read_object_records_by_handle(
         };
         let record = decoder.parse_object_record(offset).map_err(to_py_err)?;
         let header =
-            parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
+            decoder.record_header(&record).map_err(to_py_err)?;
         found_rows.insert(
             handle,
             (
@@ -1074,7 +1074,7 @@ pub fn read_object_records_by_offset(
     for offset in offsets.iter().copied() {
         let record = decoder.parse_object_record(offset).map_err(to_py_err)?;
         let header =
-            parse_object_header_for_version(&record, decoder.version()).map_err(to_py_err)?;
+            decoder.record_header(&record).map_err(to_py_err)?;
         found_rows.insert(
             offset,
             (
@@ -3299,7 +3299,12 @@ pub fn decode_line_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<Li
     let dynamic_types = &shared.dynamic_types;
     let index = &shared.index;
     let mut result = Vec::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x13, "LINE", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -3364,7 +3369,12 @@ pub fn decode_line_owner_handles(path: &str, limit: Option<usize>) -> PyResult<V
     let dynamic_types = &shared.dynamic_types;
     let index = &shared.index;
     let mut result = Vec::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x13, "LINE", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -3421,7 +3431,12 @@ pub fn decode_point_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<P
     let dynamic_types = &shared.dynamic_types;
     let index = &shared.index;
     let mut result = Vec::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x1B, "POINT", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -3577,7 +3592,14 @@ pub fn decode_line_arc_circle_entities(
     let mut circles: Vec<CircleEntityRow> = Vec::new();
     let mut total = 0usize;
 
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |type_code| {
+            matches_type_name(type_code, 0x13, "LINE", dynamic_types)
+                || matches_type_name(type_code, 0x11, "ARC", dynamic_types)
+                || matches_type_name(type_code, 0x12, "CIRCLE", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -3742,7 +3764,12 @@ pub fn decode_text_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<Te
         HashMap::new()
     };
     let mut result = Vec::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x01, "TEXT", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -3854,7 +3881,12 @@ pub fn decode_mtext_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<M
         HashMap::new()
     };
     let mut result = Vec::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x2C, "MTEXT", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -3996,7 +4028,12 @@ pub fn decode_hatch_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<H
     let dynamic_types = &shared.dynamic_types;
     let index = &shared.index;
     let mut result = Vec::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x4E, "HATCH", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -4073,7 +4110,12 @@ pub fn decode_hatch_patterns(path: &str, limit: Option<usize>) -> PyResult<Vec<H
     let dynamic_types = &shared.dynamic_types;
     let index = &shared.index;
     let mut result = Vec::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x4E, "HATCH", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -4381,7 +4423,12 @@ pub fn decode_region_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
             .collect();
     let known_handles: HashSet<u64> = index.objects.iter().map(|obj| obj.handle.0).collect();
     let mut result = Vec::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x25, "REGION", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -4439,7 +4486,12 @@ pub fn decode_3dsolid_entities(
             .collect();
     let known_handles: HashSet<u64> = index.objects.iter().map(|obj| obj.handle.0).collect();
     let mut result = Vec::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x26, "3DSOLID", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -4491,7 +4543,12 @@ pub fn decode_body_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<Bo
             .collect();
     let known_handles: HashSet<u64> = index.objects.iter().map(|obj| obj.handle.0).collect();
     let mut result = Vec::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x27, "BODY", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;

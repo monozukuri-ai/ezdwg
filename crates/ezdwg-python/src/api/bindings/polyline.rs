@@ -214,7 +214,12 @@ pub fn decode_lwpolyline_entities(
     let dynamic_types = &shared.dynamic_types;
     let index = &shared.index;
     let mut result = Vec::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x4D, "LWPOLYLINE", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -433,7 +438,7 @@ fn decode_polyline_3d_vertex_rows(
 }
 
 fn build_vertex_3d_map(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     sorted: &[objects::ObjectRef],
     dynamic_types: &HashMap<u16, String>,
     best_effort: bool,
@@ -478,7 +483,7 @@ struct SortedObjects<'a> {
 }
 
 fn collect_polyline_3d_vertices(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     objects: &SortedObjects<'_>,
     dynamic_types: &HashMap<u16, String>,
     vertex_map: &HashMap<u64, entities::Vertex3dEntity>,
@@ -719,7 +724,7 @@ fn decode_polyline_mesh_vertex_rows(
 }
 
 fn build_vertex_mesh_map(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     sorted: &[objects::ObjectRef],
     dynamic_types: &HashMap<u16, String>,
     best_effort: bool,
@@ -756,7 +761,7 @@ fn build_vertex_mesh_map(
 }
 
 fn collect_polyline_mesh_vertices(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     sorted: &[objects::ObjectRef],
     dynamic_types: &HashMap<u16, String>,
     vertex_map: &HashMap<u64, entities::Vertex3dEntity>,
@@ -985,7 +990,7 @@ fn decode_polyline_pface_rows(path: &str, limit: Option<usize>) -> PyResult<Vec<
 }
 
 fn build_vertex_pface_map(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     sorted: &[objects::ObjectRef],
     dynamic_types: &HashMap<u16, String>,
     best_effort: bool,
@@ -1022,7 +1027,7 @@ fn build_vertex_pface_map(
 }
 
 fn build_vertex_pface_face_map(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     sorted: &[objects::ObjectRef],
     dynamic_types: &HashMap<u16, String>,
     best_effort: bool,
@@ -1059,7 +1064,7 @@ fn build_vertex_pface_face_map(
 }
 
 fn collect_polyline_pface_data(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     sorted: &[objects::ObjectRef],
     dynamic_types: &HashMap<u16, String>,
     vertex_map: &HashMap<u64, entities::Vertex3dEntity>,
@@ -1265,7 +1270,7 @@ pub fn decode_vertex_2d_entities(
             Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
-        let header = match parse_object_header_for_version(&record, decoder.version()) {
+        let header = match decoder.record_header(&record) {
             Ok(header) => header,
             Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
@@ -1393,7 +1398,7 @@ fn decode_polyline_2d_vertex_rows(
             }
             Err(err) => return Err(to_py_err(err)),
         };
-        let header = match parse_object_header_for_version(&record, decoder.version()) {
+        let header = match decoder.record_header(&record) {
             Ok(header) => header,
             Err(_err) if best_effort => {
                 i += 1;
@@ -1512,7 +1517,7 @@ fn decode_polyline_2d_vertex_rows(
 }
 
 fn build_vertex_2d_map(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     sorted: &[objects::ObjectRef],
     dynamic_types: &HashMap<u16, String>,
     best_effort: bool,
@@ -1524,7 +1529,7 @@ fn build_vertex_2d_map(
             Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
         };
-        let header = match parse_object_header_for_version(&record, decoder.version()) {
+        let header = match decoder.record_header(&record) {
             Ok(header) => header,
             Err(_err) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
@@ -1571,7 +1576,7 @@ fn build_vertex_2d_map(
 }
 
 fn collect_polyline_vertices(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     objects: &SortedObjects<'_>,
     dynamic_types: &HashMap<u16, String>,
     vertex_map: &HashMap<u64, entities::Vertex2dEntity>,
@@ -1855,8 +1860,7 @@ pub fn decode_polyline_sequence_members(
     let mut seqend_handles: HashSet<u64> = HashSet::new();
 
     for obj in sorted.iter() {
-        let Some((_record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
+        let Some(header) = object_header_at(&decoder, obj.offset, best_effort)? else {
             continue;
         };
         if matches_type_name(header.type_code, 0x0A, "VERTEX_2D", dynamic_types) {

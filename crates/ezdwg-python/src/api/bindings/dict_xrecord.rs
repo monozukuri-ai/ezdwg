@@ -204,7 +204,7 @@ fn assemble_dictionary_from_record<'a>(
 /// `numitems` is taken as the number of TUs read from the string stream
 /// (stream bounds are exact; this is not a scan/guess).
 fn decode_one_dictionary(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     obj: &objects::ObjectRef,
     best_effort: bool,
 ) -> Option<objects::Dictionary> {
@@ -379,7 +379,7 @@ fn read_dictionary_string_stream_names(
 /// The common preamble must be skipped before reading `xdata_size`. Skipping
 /// it is what makes the declared size trustworthy; there is no recovery path.
 fn decode_one_xrecord(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     obj: &objects::ObjectRef,
     best_effort: bool,
 ) -> Option<objects::XRecord> {
@@ -434,7 +434,7 @@ fn decode_one_xrecord(
 /// ownerhandle. Data section still has num_reactors / is_xdic_missing /
 /// has_ds; the handle stream is reactors then xdic only.
 fn layer_control_xdic_handle(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     obj: &objects::ObjectRef,
     best_effort: bool,
 ) -> Option<u64> {

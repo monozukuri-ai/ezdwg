@@ -56,7 +56,12 @@ fn parse_all_layer_records(path: &str) -> PyResult<Vec<LayerRecord>> {
     let index = &shared.index;
     let mut result = Vec::new();
 
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x33, "LAYER", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -623,8 +628,7 @@ fn build_object_type_map(path: &str) -> PyResult<HashMap<u64, (u16, String)>> {
     let index = &shared.index;
     let mut map = HashMap::new();
     for obj in index.objects.iter() {
-        let Some((_record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
+        let Some(header) = object_header_at(&decoder, obj.offset, best_effort)? else {
             continue;
         };
         let name = dynamic_types
@@ -699,7 +703,12 @@ fn build_table_name_map(
     let dynamic_types = &shared.dynamic_types;
     let index = &shared.index;
     let mut map = HashMap::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, type_code, type_name, dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -1158,15 +1167,14 @@ fn locate_layer_string_stream_starts<'a>(
 // ============================================================================
 
 fn collect_known_layer_handles_in_order(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     dynamic_types: &HashMap<u16, String>,
     index: &objects::ObjectIndex,
     best_effort: bool,
 ) -> PyResult<Vec<u64>> {
     let mut layer_handles = Vec::new();
     for obj in index.objects.iter() {
-        let Some((_record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
-        else {
+        let Some(header) = object_header_at(decoder, obj.offset, best_effort)? else {
             continue;
         };
         if matches_type_name(header.type_code, 0x33, "LAYER", dynamic_types) {

@@ -10,7 +10,7 @@ fn sorted_entries<K: Ord, V>(map: HashMap<K, V>) -> Vec<(K, V)> {
 }
 
 fn prepare_insert_name_resolution_state(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     dynamic_types: &HashMap<u16, String>,
     index: &objects::ObjectIndex,
     best_effort: bool,
@@ -116,7 +116,7 @@ fn prepare_insert_name_resolution_state(
 /// `FileDecodeState` in cache.rs). `decoder`/`index` must belong to `path`.
 fn insert_name_resolution_state(
     path: &str,
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     dynamic_types: &HashMap<u16, String>,
     index: &objects::ObjectIndex,
     best_effort: bool,
@@ -181,7 +181,7 @@ fn recover_insert_owner_handle_r2010_plus(
 }
 
 fn decode_insert_entities_with_state(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     dynamic_types: &HashMap<u16, String>,
     index: &objects::ObjectIndex,
     best_effort: bool,
@@ -190,7 +190,12 @@ fn decode_insert_entities_with_state(
 ) -> PyResult<Vec<InsertEntityRow>> {
     let mut decoded_rows: Vec<(u64, f64, f64, f64, f64, f64, f64, f64, Option<u64>)> = Vec::new();
     let mut unresolved_insert_candidates: HashMap<u64, Vec<u64>> = HashMap::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x07, "INSERT", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -378,7 +383,7 @@ fn decode_insert_entities_with_state(
 }
 
 fn decode_minsert_entities_with_state(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     dynamic_types: &HashMap<u16, String>,
     index: &objects::ObjectIndex,
     best_effort: bool,
@@ -404,7 +409,12 @@ fn decode_minsert_entities_with_state(
         Option<u64>,
     )> = Vec::new();
     let mut unresolved_minsert_candidates: HashMap<u64, Vec<u64>> = HashMap::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x08, "MINSERT", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -665,7 +675,7 @@ pub fn decode_insert_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
 }
 
 fn decode_insert_owner_handles_impl(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     dynamic_types: &HashMap<u16, String>,
     index: &objects::ObjectIndex,
     best_effort: bool,
@@ -673,7 +683,12 @@ fn decode_insert_owner_handles_impl(
     limit: Option<usize>,
 ) -> PyResult<Vec<InsertOwnerRow>> {
     let mut result: Vec<InsertOwnerRow> = Vec::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x07, "INSERT", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -951,9 +966,7 @@ pub fn decode_block_entity_names(
     } else {
         let mut names = Vec::new();
         for obj in ordered_objects.iter().copied() {
-            let Some((_record, header)) =
-                parse_record_and_header(&decoder, obj.offset, best_effort)?
-            else {
+            let Some(header) = object_header_at(&decoder, obj.offset, best_effort)? else {
                 continue;
             };
             if !matches_type_name(header.type_code, 0x31, "BLOCK_HEADER", dynamic_types) {
@@ -980,8 +993,7 @@ pub fn decode_block_entity_names(
     let mut block_handles_in_order: Vec<u64> = Vec::new();
     let mut endblk_handles_in_order: Vec<u64> = Vec::new();
     for obj in ordered_objects.iter().copied() {
-        let Some((_record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
+        let Some(header) = object_header_at(&decoder, obj.offset, best_effort)? else {
             continue;
         };
         if matches_type_name(header.type_code, 0x04, "BLOCK", dynamic_types) {
@@ -1620,13 +1632,18 @@ fn _minsert_reasonableness_failure(entity: &entities::MInsertEntity) -> Option<&
 }
 
 fn collect_block_header_name_entries_in_order(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     dynamic_types: &HashMap<u16, String>,
     index: &objects::ObjectIndex,
     best_effort: bool,
 ) -> PyResult<Vec<(u64, u64, String)>> {
     let mut entries: Vec<(u64, u64, String)> = Vec::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x31, "BLOCK_HEADER", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -1780,7 +1797,7 @@ fn is_bare_anonymous_block_name(name: &str) -> bool {
 }
 
 fn collect_block_header_names_in_order(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     dynamic_types: &HashMap<u16, String>,
     index: &objects::ObjectIndex,
     best_effort: bool,
@@ -1834,7 +1851,7 @@ fn collect_block_header_names_in_order(
 }
 
 fn collect_block_name_aliases_in_order(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     dynamic_types: &HashMap<u16, String>,
     index: &objects::ObjectIndex,
     best_effort: bool,
@@ -1905,7 +1922,7 @@ fn decode_block_record_handle(
 }
 
 fn collect_block_record_handle_aliases_in_order(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     dynamic_types: &HashMap<u16, String>,
     index: &objects::ObjectIndex,
     best_effort: bool,
@@ -2005,7 +2022,7 @@ fn collect_block_record_handle_aliases_in_order(
 }
 
 fn collect_block_and_endblk_handle_aliases_in_order(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     dynamic_types: &HashMap<u16, String>,
     index: &objects::ObjectIndex,
     best_effort: bool,
@@ -2138,7 +2155,7 @@ fn collect_block_and_endblk_handle_aliases_in_order(
 }
 
 fn collect_block_header_stream_aliases_in_order(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     dynamic_types: &HashMap<u16, String>,
     index: &objects::ObjectIndex,
     best_effort: bool,
@@ -2153,7 +2170,12 @@ fn collect_block_header_stream_aliases_in_order(
         return Ok(HashMap::new());
     }
     let mut aliases: HashMap<u64, String> = HashMap::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x31, "BLOCK_HEADER", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -2250,7 +2272,7 @@ fn collect_block_header_stream_aliases_in_order(
 }
 
 fn collect_block_header_insert_aliases_in_order(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     dynamic_types: &HashMap<u16, String>,
     index: &objects::ObjectIndex,
     best_effort: bool,
@@ -2267,7 +2289,12 @@ fn collect_block_header_insert_aliases_in_order(
     let mut aliases: HashMap<u64, String> = HashMap::new();
     let mut exact_rows: Vec<(u64, String, Vec<u64>)> = Vec::new();
     let insert_set = InsertHandleSet::new(object_type_codes);
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x31, "BLOCK_HEADER", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
         else {
             continue;
@@ -2418,7 +2445,7 @@ fn insert_block_alias_name(aliases: &mut HashMap<u64, String>, insert_handle: u6
 }
 
 fn repair_sequential_generated_block_names_in_order(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     dynamic_types: &HashMap<u16, String>,
     index: &objects::ObjectIndex,
     best_effort: bool,
@@ -2427,8 +2454,7 @@ fn repair_sequential_generated_block_names_in_order(
 ) -> PyResult<()> {
     let mut header_handles = Vec::new();
     for obj in index.objects.iter() {
-        let Some((_record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
-        else {
+        let Some(header) = object_header_at(decoder, obj.offset, best_effort)? else {
             continue;
         };
         if matches_type_name(header.type_code, 0x31, "BLOCK_HEADER", dynamic_types) {
@@ -2652,7 +2678,7 @@ fn scan_block_header_insert_handle_run(
 }
 
 fn collect_block_header_targeted_aliases_in_order(
-    decoder: &decoder::Decoder<'_>,
+    decoder: &FileDecoder<'_>,
     dynamic_types: &HashMap<u16, String>,
     index: &objects::ObjectIndex,
     best_effort: bool,
@@ -2668,7 +2694,12 @@ fn collect_block_header_targeted_aliases_in_order(
         return Ok(HashMap::new());
     }
     let mut best: HashMap<u64, (u64, String)> = HashMap::new();
-    for obj in index.objects.iter() {
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x31, "BLOCK_HEADER", dynamic_types)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(decoder, obj.offset, best_effort)?
         else {
             continue;
