@@ -1494,7 +1494,16 @@ mod tests {
         let encoded_name: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
         let mut entry = Vec::new();
         let page_count = 0u64;
-        for value in [size, 63488, 0, 0, encoded_name.len() as u64, 0, 4, page_count] {
+        for value in [
+            size,
+            63488,
+            0,
+            0,
+            encoded_name.len() as u64,
+            0,
+            4,
+            page_count,
+        ] {
             entry.extend_from_slice(&value.to_le_bytes());
         }
         entry.extend_from_slice(&encoded_name);
@@ -1508,7 +1517,10 @@ mod tests {
         map.extend(section_entry("AcDb:Header", 849));
         map.extend(section_entry("AcDb:Classes", 998));
         let sections = parse_section_entries(&map, 3).unwrap();
-        let names: Vec<_> = sections.iter().map(|section| section.name.as_str()).collect();
+        let names: Vec<_> = sections
+            .iter()
+            .map(|section| section.name.as_str())
+            .collect();
         assert_eq!(names, ["AcDb:Header", "AcDb:Classes"]);
     }
 

@@ -113,8 +113,9 @@ struct FileDecodeState {
     object_headers_with_type: DecodeSlot<Vec<ObjectHeaderWithTypeRow>>,
     /// `decode_block_header_names`: BLOCK_HEADER handle -> block name.
     block_header_names: DecodeSlot<Vec<BlockHeaderNameRow>>,
-    /// `decode_entity_linetypes`: common entity linetype data of every entity.
-    entity_linetypes: DecodeSlot<Vec<EntityLinetypeRow>>,
+    /// `decode_entity_linetypes` and `decode_entity_lineweights`: the common
+    /// entity data of every entity, read in one pass for both.
+    entity_common: DecodeSlot<Vec<EntityCommonRow>>,
     /// Block-name resolution tables (block_insert.rs). Building them walks the
     /// file several times and ran once per INSERT/DIMENSION/BLOCK_HEADER pass,
     /// i.e. 3-4 times per read; one of those builds took 3.8 s on a drawing
@@ -216,21 +217,33 @@ fn cached_rows<T: Clone, E>(
     limit: Option<usize>,
     decode: impl FnOnce(Option<usize>) -> Result<Vec<T>, E>,
 ) -> Result<Vec<T>, E> {
+    cached_rows_map(slot, path, limit, decode, T::clone)
+}
+
+/// `cached_rows` for a pass whose rows serve more than one public function:
+/// each caller maps the shared rows to its own row type on the way out.
+fn cached_rows_map<T, U, E>(
+    slot: fn(&FileDecodeState) -> &DecodeSlot<Vec<T>>,
+    path: &str,
+    limit: Option<usize>,
+    decode: impl FnOnce(Option<usize>) -> Result<Vec<T>, E>,
+    map: impl Fn(&T) -> U,
+) -> Result<Vec<U>, E> {
     let state = file_decode_state(path);
     if let Some(state) = state.as_ref() {
         let cached = slot(state).lock().unwrap().clone();
         if let Some(rows) = cached {
-            return Ok(take_rows(&rows, limit));
+            return Ok(take_rows(&rows, limit, map));
         }
     }
     if limit.is_some() {
-        return decode(limit);
+        return Ok(decode(limit)?.iter().map(map).collect());
     }
     let rows = Arc::new(decode(None)?);
     if let Some(state) = state {
         *slot(&state).lock().unwrap() = Some(rows.clone());
     }
-    Ok(take_rows(&rows, None))
+    Ok(take_rows(&rows, None, map))
 }
 
 /// One shared value per (path, size, mtime), built on first use. Callers get
@@ -254,11 +267,9 @@ fn cached_value<T, E>(
     Ok(value)
 }
 
-fn take_rows<T: Clone>(rows: &[T], limit: Option<usize>) -> Vec<T> {
-    match limit {
-        Some(limit) => rows.iter().take(limit).cloned().collect(),
-        None => rows.to_vec(),
-    }
+fn take_rows<T, U>(rows: &[T], limit: Option<usize>, map: impl Fn(&T) -> U) -> Vec<U> {
+    let count = limit.map_or(rows.len(), |limit| limit.min(rows.len()));
+    rows[..count].iter().map(map).collect()
 }
 
 #[cfg(test)]
@@ -266,8 +277,19 @@ mod file_decode_state_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// The decode state cache is process-global and tests run in parallel: the
+    /// tests that count decodes (one of them clears the cache) take turns.
+    static COUNTING_TESTS: Mutex<()> = Mutex::new(());
+
+    fn counting_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        COUNTING_TESTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn cached_rows_decodes_once_per_file_and_serves_limits_from_the_slot() {
+        let _guard = counting_test_guard();
         let path = std::env::temp_dir().join(format!(
             "ezdwg-file-decode-state-{}.bin",
             std::process::id()
@@ -302,6 +324,54 @@ mod file_decode_state_tests {
         clear_file_decode_state_cache();
         assert_eq!(cached_rows(slot, &path, None, decode).unwrap().len(), 5);
         assert_eq!(calls.load(Ordering::SeqCst), 4);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn linetype_and_lineweight_views_share_one_decode() {
+        let _guard = counting_test_guard();
+        let path = std::env::temp_dir().join(format!(
+            "ezdwg-file-decode-state-common-{}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"not a dwg; one decode serves every view").unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let calls = AtomicUsize::new(0);
+        let decode = |limit: Option<usize>| -> Result<Vec<EntityCommonRow>, ()> {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok((0..4u64)
+                .take(limit.unwrap_or(usize::MAX))
+                .map(|handle| EntityCommonRow {
+                    handle,
+                    layer: 0x10,
+                    ltype_flags: 0,
+                    ltype: None,
+                    ltype_scale: 1.0,
+                    lineweight: Some(25),
+                    invisible: handle == 2,
+                })
+                .collect())
+        };
+        let slot: fn(&FileDecodeState) -> &DecodeSlot<Vec<EntityCommonRow>> =
+            |state| &state.entity_common;
+
+        let linetypes = cached_rows_map(slot, &path, None, decode, |row| (row.handle, row.layer));
+        let lineweights =
+            cached_rows_map(slot, &path, None, decode, |row| (row.handle, row.invisible));
+        assert_eq!(
+            linetypes.unwrap(),
+            vec![(0, 0x10), (1, 0x10), (2, 0x10), (3, 0x10)]
+        );
+        assert_eq!(
+            lineweights.unwrap(),
+            vec![(0, false), (1, false), (2, true), (3, false)]
+        );
+        // A limited view of the filled slot is a prefix of the same rows.
+        assert_eq!(
+            cached_rows_map(slot, &path, Some(2), decode, |row| row.lineweight).unwrap(),
+            vec![Some(25), Some(25)]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         std::fs::remove_file(&path).ok();
     }
 

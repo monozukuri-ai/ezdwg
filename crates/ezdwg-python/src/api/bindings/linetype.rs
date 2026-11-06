@@ -449,20 +449,51 @@ pub fn decode_entity_linetypes(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<EntityLinetypeRow>> {
-    // Decoded once per file (see `FileDecodeState` in cache.rs): the entity
-    // linetype map and the common layer map both consume these rows.
-    cached_rows(
-        |state| &state.entity_linetypes,
+    entity_common_rows(path, limit, |row| {
+        (
+            row.handle,
+            row.layer,
+            row.ltype_flags,
+            row.ltype,
+            row.ltype_scale,
+        )
+    })
+}
+
+/// The common entity data that `decode_entity_linetypes` and
+/// `decode_entity_lineweights` report, one row per entity.
+#[derive(Clone)]
+struct EntityCommonRow {
+    handle: u64,
+    layer: u64,
+    ltype_flags: u8,
+    ltype: Option<u64>,
+    ltype_scale: f64,
+    lineweight: Option<i16>,
+    invisible: bool,
+}
+
+/// Decoded once per file (see `FileDecodeState` in cache.rs): the entity
+/// linetype map, the common layer map and the lineweight map all consume these
+/// rows, and each used to walk every entity record for them.
+fn entity_common_rows<U>(
+    path: &str,
+    limit: Option<usize>,
+    map: impl Fn(&EntityCommonRow) -> U,
+) -> PyResult<Vec<U>> {
+    cached_rows_map(
+        |state| &state.entity_common,
         path,
         limit,
-        |limit| decode_entity_linetypes_uncached(path, limit),
+        |limit| decode_entity_common_uncached(path, limit),
+        map,
     )
 }
 
-fn decode_entity_linetypes_uncached(
+fn decode_entity_common_uncached(
     path: &str,
     limit: Option<usize>,
-) -> PyResult<Vec<EntityLinetypeRow>> {
+) -> PyResult<Vec<EntityCommonRow>> {
     let shared = decoded_file(path)?;
     let decoder = shared.decoder()?;
     let best_effort = shared.best_effort;
@@ -489,18 +520,22 @@ fn decode_entity_linetypes_uncached(
         if !seen.insert(obj.handle.0) {
             continue;
         }
-        let scale = if common.ltype_scale.is_finite() && common.ltype_scale > 0.0 {
+        let ltype_scale = if common.ltype_scale.is_finite() && common.ltype_scale > 0.0 {
             common.ltype_scale
         } else {
             1.0
         };
-        result.push((
-            obj.handle.0,
-            handles.layer,
-            common.ltype_flags,
-            handles.ltype,
-            scale,
-        ));
+        result.push(EntityCommonRow {
+            handle: obj.handle.0,
+            layer: handles.layer,
+            ltype_flags: common.ltype_flags,
+            ltype: handles.ltype,
+            ltype_scale,
+            lineweight: common
+                .line_weight
+                .and_then(entities::common::lineweight_from_index),
+            invisible: common.invisible,
+        });
         if let Some(limit) = limit {
             if result.len() >= limit {
                 break;
@@ -524,46 +559,9 @@ pub fn decode_entity_lineweights(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<EntityLineweightRow>> {
-    let shared = decoded_file(path)?;
-    let decoder = shared.decoder()?;
-    let best_effort = shared.best_effort;
-    let dynamic_types = &shared.dynamic_types;
-    let dynamic_type_classes = &shared.dynamic_type_classes;
-    let index = &shared.index;
-    let mut result = Vec::new();
-    let mut seen: HashSet<u64> = HashSet::new();
-
-    for obj in index.objects.iter() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
-            continue;
-        };
-        let type_name = resolved_type_name(header.type_code, dynamic_types);
-        if resolved_type_class(header.type_code, &type_name, dynamic_type_classes) != "E" {
-            continue;
-        }
-        let Some((common, _handles)) =
-            decode_common_entity_header_and_handles(&record, decoder.version(), &header)
-        else {
-            continue;
-        };
-        if !seen.insert(obj.handle.0) {
-            continue;
-        }
-        result.push((
-            obj.handle.0,
-            common
-                .line_weight
-                .and_then(entities::common::lineweight_from_index),
-            common.invisible,
-        ));
-        if let Some(limit) = limit {
-            if result.len() >= limit {
-                break;
-            }
-        }
-    }
-    Ok(result)
+    entity_common_rows(path, limit, |row| {
+        (row.handle, row.lineweight, row.invisible)
+    })
 }
 
 /// LAYER record (ODA specification 20.4.53): the state bits and the lineweight.

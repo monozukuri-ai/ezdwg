@@ -12,6 +12,17 @@
   every object's header again. Object-map order, dynamic class aliases, read
   limits, and strict/best-effort error handling are preserved; replacing a file
   or calling `clear_decode_caches()` also invalidates the catalog.
+- Faster block-name recovery of R2010+ INSERTs and block headers, with the same
+  results. The scan over the candidate ends of an INSERT's data reads the block
+  header handle once per candidate end instead of once per candidate end and
+  base handle, and the block header scans read with the new
+  `BitReader::try_read_*` methods, which report a short read as `None` instead
+  of building a `DwgError`. On three production drawings (5-9 MB, 8k-33k
+  INSERTs) `decode_insert_owner_handles` takes 0.4-0.9 s instead of 1.5-3.1 s
+  and `decode_block_header_names` 0.6-1.2 s instead of 1.0-2.4 s.
+- `decode_entity_lineweights` shares the per-file pass of
+  `decode_entity_linetypes` over the common entity data, so a read walks the
+  entity records once for both instead of twice.
 - R2007: an empty entry at the start of the section map no longer ends the map.
   Its position depends on the writer, and such files failed with
   `R2007 section map has no entries`.

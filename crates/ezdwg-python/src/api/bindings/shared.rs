@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use crate::bit::{BitReader, Endian};
+use crate::bit::{BitReader, Endian, HandleRef};
 use crate::core::error::{DwgError, ErrorKind};
 use crate::dwg::decoder;
 use crate::dwg::file_open;

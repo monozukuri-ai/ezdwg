@@ -452,7 +452,11 @@ fn decode_hatch_body(
         .and_then(|value| value.parse::<u64>().ok())
         .is_some_and(|handle| handle == header.handle);
     if debug {
-        eprintln!("[hatch trace] body start bit={} obj_size={}", reader.tell_bits(), header.obj_size);
+        eprintln!(
+            "[hatch trace] body start bit={} obj_size={}",
+            reader.tell_bits(),
+            header.obj_size
+        );
     }
     if skip_gradient {
         skip_gradient_payload(reader, string_mode)?;
@@ -482,7 +486,10 @@ fn decode_hatch_body(
         let path_flag = reader.read_bl()?;
         any_path_uses_pixel_size |= (path_flag & 0x04) != 0;
         if debug {
-            eprintln!("[hatch trace] path flag={path_flag:#x} bit={}", reader.tell_bits());
+            eprintln!(
+                "[hatch trace] path flag={path_flag:#x} bit={}",
+                reader.tell_bits()
+            );
         }
 
         if (path_flag & 0x02) == 0 {
@@ -1430,7 +1437,11 @@ mod tests {
         let mut reader = BitReader::new(&bytes);
         let points = spline_edge_points(&mut reader, true, false).expect("spline edge");
         assert_eq!(points.first().copied(), Some((0.0, 0.0)));
-        assert_eq!(reader.read_rc().unwrap(), 1, "next edge type follows the spline edge");
+        assert_eq!(
+            reader.read_rc().unwrap(),
+            1,
+            "next edge type follows the spline edge"
+        );
         assert_eq!(reader.read_rd(Endian::Little).unwrap(), 10.0);
     }
 

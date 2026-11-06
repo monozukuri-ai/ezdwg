@@ -2606,8 +2606,8 @@ fn best_block_header_insert_metadata(
         };
         let mut reader = record.bit_reader();
         reader.set_bit_pos(start_bit_u32);
-        let Ok((owned_obj_count, insert_count)) =
-            parse_block_header_nonstring_data_r2010_plus(&mut reader)
+        let Some((owned_obj_count, insert_count)) =
+            try_parse_block_header_nonstring_data_r2010_plus(&mut reader)
         else {
             continue;
         };
@@ -2641,6 +2641,11 @@ fn scan_block_header_insert_handle_run(
 ) -> Vec<u64> {
     let total_bits = record.body.as_ref().len().saturating_mul(8);
     let mut best: Option<(usize, usize, Vec<u64>)> = None;
+    // Every bit offset of the record is tried and nearly all of them fail on the
+    // first reference: read without building error values and reuse the run
+    // buffers (the same runs as reading with read_handle_reference).
+    let mut handles: Vec<u64> = Vec::new();
+    let mut seen: HashSet<u64> = HashSet::new();
     for start_bit in 0..total_bits {
         let mut reader = record.bit_reader();
         let Ok(start_bit_u32) = u32::try_from(start_bit) else {
@@ -2648,9 +2653,12 @@ fn scan_block_header_insert_handle_run(
         };
         reader.set_bit_pos(start_bit_u32);
 
-        let mut handles = Vec::new();
-        let mut seen = HashSet::new();
-        while let Ok(handle) = entities::common::read_handle_reference(&mut reader, base_handle) {
+        handles.clear();
+        if !seen.is_empty() {
+            seen.clear();
+        }
+        while let Some(raw_ref) = reader.try_read_h() {
+            let handle = resolve_handle_reference_from_base(raw_ref, base_handle);
             if !insert_set.contains(handle) {
                 break;
             }
@@ -2671,7 +2679,7 @@ fn scan_block_header_insert_handle_run(
         match &best {
             Some((best_len, best_pos, _))
                 if *best_len > score_len || (*best_len == score_len && *best_pos >= score_pos) => {}
-            _ => best = Some((score_len, score_pos, handles)),
+            _ => best = Some((score_len, score_pos, handles.clone())),
         }
     }
     best.map(|(_, _, handles)| handles).unwrap_or_default()
@@ -2919,16 +2927,19 @@ fn collect_insert_block_handle_candidates_r2010_plus(
             .map(|handles| handles.contains(&candidate))
             .unwrap_or(false)
     };
+    // The common header and the handle stream decode the same bits whatever the
+    // base handle is; only the absolute value of a relative reference depends on
+    // it. Read once per end bit and resolve against every base (same candidates
+    // and scores as decoding each (end bit, base) pair; the R2010+ owner recovery
+    // spent over a second per drawing on the repeated reads).
     for object_data_end_bit in expanded_end_bits.iter().copied() {
+        let Some(raw_ref) =
+            parse_insert_block_header_raw_ref_from_common_header(record, version, object_data_end_bit)
+        else {
+            continue;
+        };
         for base_handle in base_handles.iter().copied() {
-            let Some(candidate) = parse_insert_block_header_handle_from_common_header(
-                record,
-                version,
-                object_data_end_bit,
-                base_handle,
-            ) else {
-                continue;
-            };
+            let candidate = resolve_handle_reference_from_base(raw_ref, base_handle);
             if candidate == 0 || candidate == object_handle {
                 continue;
             }
@@ -2955,25 +2966,33 @@ fn collect_insert_block_handle_candidates_r2010_plus(
     }
 
     for object_data_end_bit in expanded_end_bits {
+        // The handles read from one end bit are the same bits for every base and
+        // both chaining modes (the reads stop at the same first error); read them
+        // once and resolve arithmetically, exactly as read_handle_reference /
+        // read_handle_reference_chained do.
+        let mut reader = record.bit_reader();
+        if skip_object_type_prefix(&mut reader, version).is_err() {
+            continue;
+        }
+        reader.set_bit_pos(object_data_end_bit);
+        let mut raw_refs: Vec<HandleRef> = Vec::with_capacity(64);
+        for _ in 0..64u64 {
+            match reader.try_read_h() {
+                Some(raw_ref) => raw_refs.push(raw_ref),
+                None => break,
+            }
+        }
         for base_handle in base_handles.iter().copied() {
             for chained_base in [false, true] {
-                let mut reader = record.bit_reader();
-                if skip_object_type_prefix(&mut reader, version).is_err() {
-                    continue;
-                }
-                reader.set_bit_pos(object_data_end_bit);
                 let mut prev_handle = base_handle;
-                for index in 0..64u64 {
+                for (index, raw_ref) in raw_refs.iter().copied().enumerate() {
+                    let index = index as u64;
                     let candidate = if chained_base {
-                        match read_handle_reference_chained(&mut reader, &mut prev_handle) {
-                            Ok(value) => value,
-                            Err(_) => break,
-                        }
+                        let absolute = resolve_handle_reference_chained(raw_ref, prev_handle);
+                        prev_handle = absolute;
+                        absolute
                     } else {
-                        match entities::common::read_handle_reference(&mut reader, base_handle) {
-                            Ok(value) => value,
-                            Err(_) => break,
-                        }
+                        resolve_handle_reference_from_base(raw_ref, base_handle)
                     };
                     if candidate == 0 || candidate == object_handle {
                         continue;
@@ -3205,6 +3224,58 @@ fn recover_insert_block_header_handle_r2010_plus(
         }
     }
     best.map(|(_, handle)| handle).or(parsed_block_handle)
+}
+
+/// `entities::common::read_handle_reference` for a reference already read.
+fn resolve_handle_reference_from_base(raw_ref: HandleRef, base_handle: u64) -> u64 {
+    match raw_ref.code {
+        0x06 => base_handle.wrapping_add(1),
+        0x08 => base_handle.saturating_sub(1),
+        0x0A => base_handle.saturating_add(raw_ref.value),
+        0x0C => base_handle.saturating_sub(raw_ref.value),
+        0x02..=0x05 => raw_ref.value,
+        _ => raw_ref.value,
+    }
+}
+
+/// `read_handle_reference_chained` for a reference already read.
+fn resolve_handle_reference_chained(raw_ref: HandleRef, prev_handle: u64) -> u64 {
+    match raw_ref.code {
+        0x06 => prev_handle.saturating_add(1),
+        0x08 => prev_handle.saturating_sub(1),
+        0x0A => prev_handle.saturating_add(raw_ref.value),
+        0x0C => prev_handle.saturating_sub(raw_ref.value),
+        0x02..=0x05 => raw_ref.value,
+        _ => raw_ref.value,
+    }
+}
+
+/// The reference that follows the common entity handles, before resolving it
+/// against a base handle. Neither the header nor the handle stream that is
+/// skipped depends on the base: their layout comes from the header flags.
+fn parse_insert_block_header_raw_ref_from_common_header(
+    record: &objects::ObjectRecord<'_>,
+    version: &version::DwgVersion,
+    object_data_end_bit: u32,
+) -> Option<HandleRef> {
+    let mut reader = record.bit_reader();
+    if skip_object_type_prefix(&mut reader, version).is_err() {
+        return None;
+    }
+    let header = match version {
+        version::DwgVersion::R2010 => {
+            entities::common::parse_common_entity_header_r2010(&mut reader, object_data_end_bit)
+                .ok()?
+        }
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+            entities::common::parse_common_entity_header_r2013(&mut reader, object_data_end_bit)
+                .ok()?
+        }
+        _ => return None,
+    };
+    reader.set_bit_pos(header.obj_size);
+    entities::common::parse_common_entity_handles(&mut reader, &header).ok()?;
+    reader.read_h().ok()
 }
 
 fn parse_insert_block_header_handle_from_common_header(
@@ -3648,6 +3719,40 @@ fn is_acceptable_exact_block_name(name: &str) -> bool {
     !name.is_empty()
         && name.chars().count() <= 255
         && !name.chars().any(|ch| ch.is_control() || ch == '\u{FFFD}')
+}
+
+/// `parse_block_header_nonstring_data_r2010_plus` for offset scans: the same
+/// reads and advance, `None` where it would fail, without building errors or
+/// copying the preview bytes.
+fn try_parse_block_header_nonstring_data_r2010_plus(
+    reader: &mut BitReader<'_>,
+) -> Option<(u32, usize)> {
+    let _flag_64 = reader.try_read_b()?;
+    let _xref_index_plus1 = reader.try_read_bs()?;
+    let _xdep = reader.try_read_b()?;
+    let _anonymous = reader.try_read_b()?;
+    let _has_atts = reader.try_read_b()?;
+    let _blk_is_xref = reader.try_read_b()?;
+    let _xref_overlaid = reader.try_read_b()?;
+    let _loaded_bit = reader.try_read_b()?;
+    let owned_obj_count = reader.try_read_bl()?;
+    let _base_x = reader.try_read_bd()?;
+    let _base_y = reader.try_read_bd()?;
+    let _base_z = reader.try_read_bd()?;
+    let mut insert_count = 0usize;
+    loop {
+        let marker = reader.try_read_rc()?;
+        if marker == 0 {
+            break;
+        }
+        insert_count = insert_count.saturating_add(1);
+    }
+    let preview_data_size = reader.try_read_bl()? as usize;
+    reader.try_skip_rcs(preview_data_size)?;
+    let _insert_units = reader.try_read_bs()?;
+    let _explodable = reader.try_read_b()?;
+    let _block_scaling = reader.try_read_rc()?;
+    Some((owned_obj_count, insert_count))
 }
 
 fn parse_block_header_nonstring_data_r2010_plus(

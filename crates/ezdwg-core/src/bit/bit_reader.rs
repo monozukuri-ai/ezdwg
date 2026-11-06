@@ -393,6 +393,156 @@ impl<'a> BitReader<'a> {
         })
     }
 
+    // --- Reads that report failure as `None` ---------------------------------
+    //
+    // Same bits, same advance and the same success/failure as the `read_*`
+    // methods above, without building a `DwgError` (whose message is an owned,
+    // often formatted, string). For offset scans that try thousands of bit
+    // positions per record and discard every error: building those errors was
+    // most of their time.
+
+    /// `read_b` without the error value.
+    #[inline]
+    pub fn try_read_b(&mut self) -> Option<u8> {
+        if self.byte_pos >= self.data.len() {
+            return None;
+        }
+        let byte = self.data[self.byte_pos];
+        let bit = (byte & (0x80 >> self.bit_pos)) >> (7 - self.bit_pos);
+        self.advance(1);
+        Some(bit)
+    }
+
+    /// `read_bb` without the error value.
+    #[inline]
+    pub fn try_read_bb(&mut self) -> Option<u8> {
+        let high = self.try_read_b()?;
+        let low = self.try_read_b()?;
+        Some((high << 1) | low)
+    }
+
+    /// `read_rc` without the error value.
+    #[inline]
+    pub fn try_read_rc(&mut self) -> Option<u8> {
+        if self.byte_pos >= self.data.len() {
+            return None;
+        }
+        let mut value = self.data[self.byte_pos] as u16;
+        if self.bit_pos != 0 {
+            value <<= self.bit_pos;
+            if self.byte_pos + 1 < self.data.len() {
+                value |= (self.data[self.byte_pos + 1] as u16) >> (8 - self.bit_pos);
+            }
+        }
+        self.advance(8);
+        Some((value & 0xFF) as u8)
+    }
+
+    /// `read_rs` without the error value.
+    #[inline]
+    pub fn try_read_rs(&mut self, endian: Endian) -> Option<u16> {
+        let byte1 = self.try_read_rc()? as u16;
+        let byte2 = self.try_read_rc()? as u16;
+        Some(match endian {
+            Endian::Little => (byte2 << 8) | byte1,
+            Endian::Big => (byte1 << 8) | byte2,
+        })
+    }
+
+    /// `read_rl` without the error value.
+    #[inline]
+    pub fn try_read_rl(&mut self, endian: Endian) -> Option<u32> {
+        let short1 = self.try_read_rs(endian)? as u32;
+        let short2 = self.try_read_rs(endian)? as u32;
+        Some(match endian {
+            Endian::Little => (short2 << 16) | short1,
+            Endian::Big => (short1 << 16) | short2,
+        })
+    }
+
+    /// `read_rd` without the error value.
+    #[inline]
+    pub fn try_read_rd(&mut self, endian: Endian) -> Option<f64> {
+        let mut data = [0u8; 8];
+        for byte in &mut data {
+            *byte = self.try_read_rc()?;
+        }
+        Some(match endian {
+            Endian::Little => f64::from_le_bytes(data),
+            Endian::Big => f64::from_be_bytes(data),
+        })
+    }
+
+    /// `read_bs` without the error value.
+    #[inline]
+    pub fn try_read_bs(&mut self) -> Option<u16> {
+        Some(match self.try_read_bb()? {
+            0x00 => self.try_read_rs(Endian::Little)?,
+            0x01 => self.try_read_rc()? as u16,
+            0x02 => 0,
+            0x03 => 256,
+            _ => 0,
+        })
+    }
+
+    /// `read_bl` without the error value.
+    #[inline]
+    pub fn try_read_bl(&mut self) -> Option<u32> {
+        Some(match self.try_read_bb()? {
+            0x00 => self.try_read_rl(Endian::Little)?,
+            0x01 => self.try_read_rc()? as u32,
+            _ => 0,
+        })
+    }
+
+    /// `read_bd` without the error value.
+    #[inline]
+    pub fn try_read_bd(&mut self) -> Option<f64> {
+        Some(match self.try_read_bb()? {
+            0x00 => self.try_read_rd(Endian::Little)?,
+            0x01 => 1.0,
+            _ => 0.0,
+        })
+    }
+
+    /// `read_rcs` without the error value and without copying the bytes: the
+    /// same bounds check and the same advance.
+    #[inline]
+    pub fn try_skip_rcs(&mut self, count: usize) -> Option<()> {
+        if count == 0 {
+            return Some(());
+        }
+        let remaining = self.data.len().saturating_sub(self.byte_pos);
+        if count > remaining {
+            return None;
+        }
+        // `read_rcs` reads `count` bytes; within `remaining` none of them fails,
+        // so the reader ends `count` bytes further at the same bit offset.
+        self.byte_pos += count;
+        Some(())
+    }
+
+    /// `read_h` without the error value.
+    #[inline]
+    pub fn try_read_h(&mut self) -> Option<HandleRef> {
+        let first = self.try_read_rc()?;
+        let counter = first & 0x0F;
+        let code = (first & 0xF0) >> 4;
+        if counter > 8 {
+            return None;
+        }
+        let mut value: u64 = 0;
+        for idx in (0..counter).rev() {
+            let byte = self.try_read_rc()? as u64;
+            value |= byte << (idx * 8);
+        }
+        Some(HandleRef {
+            code,
+            counter,
+            value,
+        })
+    }
+
     pub fn read_tv(&mut self) -> Result<String> {
         let length = self.read_bs()? as usize;
         if length > Self::MAX_TEXT_UNITS {
@@ -584,7 +734,88 @@ pub(crate) fn dwg_codepage_encoding(codepage: Option<u16>) -> Option<&'static En
 
 #[cfg(test)]
 mod tests {
-    use super::{BitReader, Endian};
+
+    /// Pseudo-random bytes (no `rand` dependency).
+    fn scramble(len: usize, seed: u64) -> Vec<u8> {
+        let mut state = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 56) as u8
+            })
+            .collect()
+    }
+
+    fn same_outcome<T: PartialEq + std::fmt::Debug>(
+        data: &[u8],
+        bit: u32,
+        checked: impl Fn(&mut BitReader<'_>) -> Result<T>,
+        unchecked: impl Fn(&mut BitReader<'_>) -> Option<T>,
+    ) {
+        let mut a = BitReader::new(data);
+        a.set_bit_pos(bit);
+        let mut b = BitReader::new(data);
+        b.set_bit_pos(bit);
+        let left = checked(&mut a).ok();
+        let right = unchecked(&mut b);
+        assert_eq!(left, right, "bit {bit}");
+        if left.is_some() {
+            assert_eq!(a.tell_bits(), b.tell_bits(), "position after bit {bit}");
+        }
+    }
+
+    #[test]
+    fn try_reads_match_the_checked_reads_at_every_bit_offset() {
+        for (len, seed) in [(0usize, 1u64), (1, 2), (3, 3), (17, 4), (64, 5), (257, 6)] {
+            let data = scramble(len, seed);
+            for bit in 0..(len as u32 * 8 + 9) {
+                same_outcome(&data, bit, |r| r.read_b(), |r| r.try_read_b());
+                same_outcome(&data, bit, |r| r.read_bb(), |r| r.try_read_bb());
+                same_outcome(&data, bit, |r| r.read_rc(), |r| r.try_read_rc());
+                same_outcome(
+                    &data,
+                    bit,
+                    |r| r.read_rs(Endian::Little),
+                    |r| r.try_read_rs(Endian::Little),
+                );
+                same_outcome(
+                    &data,
+                    bit,
+                    |r| r.read_rs(Endian::Big),
+                    |r| r.try_read_rs(Endian::Big),
+                );
+                same_outcome(
+                    &data,
+                    bit,
+                    |r| r.read_rl(Endian::Little),
+                    |r| r.try_read_rl(Endian::Little),
+                );
+                same_outcome(&data, bit, |r| r.read_bs(), |r| r.try_read_bs());
+                same_outcome(&data, bit, |r| r.read_bl(), |r| r.try_read_bl());
+                same_outcome(
+                    &data,
+                    bit,
+                    |r| r.read_bd().map(f64::to_bits),
+                    |r| r.try_read_bd().map(f64::to_bits),
+                );
+                same_outcome(&data, bit, |r| r.read_h(), |r| r.try_read_h());
+                for count in [0usize, 1, 2, 5, 40] {
+                    same_outcome(
+                        &data,
+                        bit,
+                        |r| r.read_rcs(count).map(|_| ()),
+                        |r| r.try_skip_rcs(count),
+                    );
+                }
+            }
+        }
+    }
+
+    use super::{BitReader, Endian, Result};
     use crate::bit::BitWriter;
 
     #[test]
