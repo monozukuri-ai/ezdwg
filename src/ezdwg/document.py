@@ -2829,6 +2829,36 @@ def _infer_adjacent_recovered_text_layer_handle(
 _MODELSPACE_BLOCK_NAMES = {"*MODEL_SPACE", "*MODEL SPACE", "MODELSPACE"}
 
 
+def _shared_values(*, signed_zeros: bool = False) -> Callable[[Any], Any]:
+    """An ``intern`` for the values of one per-entity map.
+
+    Most entities share a few distinct values (a drawing of 185,000 entities had
+    tens), while the native rows give every entity its own objects: the maps held
+    190 MB while a document was read. Values are immutable, so sharing one object
+    per distinct value changes nothing. ``signed_zeros`` keeps ``0.0`` and ``-0.0``
+    apart (they are equal and hash alike) for values holding floats.
+    """
+    values: dict[Any, Any] = {}
+
+    def shared(value: Any) -> Any:
+        key = _signed_zero_key(value) if signed_zeros else value
+        try:
+            return values.setdefault(key, value)
+        except TypeError:
+            return value
+
+    return shared
+
+
+def _signed_zero_key(value: Any) -> Any:
+    kind = type(value)
+    if kind is float:
+        return (value, math.copysign(1.0, value)) if value == 0.0 else value
+    if kind is tuple:
+        return tuple(map(_signed_zero_key, value))
+    return value
+
+
 @lru_cache(maxsize=16)
 def _entity_placement_map(path: str) -> dict[int, tuple[int, int]]:
     """handle -> (entmode, owner_handle or 0) for every entity, from the common header."""
@@ -2840,12 +2870,13 @@ def _entity_placement_map(path: str) -> dict[int, tuple[int, int]]:
     except Exception:
         return {}
     placements: dict[int, tuple[int, int]] = {}
+    shared = _shared_values()
     for row in rows:
         try:
             handle, mode, owner = int(row[0]), int(row[1]), int(row[2])
         except Exception:
             continue
-        placements[handle] = (mode, owner)
+        placements[handle] = shared((mode, owner))
     return placements
 
 
@@ -3804,6 +3835,7 @@ def _decode_owner_handle_map(
     except Exception:
         return {}
     result: dict[int, int | None] = {}
+    shared = _shared_values()
     for row in rows:
         if not isinstance(row, tuple) or len(row) < 2:
             continue
@@ -3818,7 +3850,7 @@ def _decode_owner_handle_map(
                 owner_handle = int(raw_owner_handle)
             except Exception:
                 owner_handle = None
-        result[handle] = owner_handle
+        result[handle] = shared(owner_handle)
     return result
 
 
@@ -3870,19 +3902,22 @@ def _entity_style_map(path: str) -> dict[int, tuple[int | None, int | None, int]
     styles.write_geometry = {}
     styles.mtext_write_properties = {}
     try:
-        styles.write_geometry = {h: (thickness, extrusion, elevation) for h, thickness, extrusion, elevation in raw.decode_write_geometry(path)}
+        shared = _shared_values(signed_zeros=True)
+        styles.write_geometry = {h: shared((thickness, extrusion, elevation)) for h, thickness, extrusion, elevation in raw.decode_write_geometry(path)}
     except Exception:
         pass
     try:
-        styles.mtext_write_properties = {h: (style, spacing, factor) for h, style, spacing, factor in raw.decode_mtext_write_properties(path)}
+        shared = _shared_values(signed_zeros=True)
+        styles.mtext_write_properties = {h: shared((style, spacing, factor)) for h, style, spacing, factor in raw.decode_mtext_write_properties(path)}
     except Exception:
         pass
     styles.linetypes = _entity_linetype_map(path)
     styles.common_layers = _entity_common_layer_map(path)
     styles.lineweights = _entity_lineweight_map(path)
     try:
+        shared = _shared_values()
         styles.update(
-            (handle, (index, true_color, layer_handle))
+            (handle, shared((index, true_color, layer_handle)))
             for handle, index, true_color, layer_handle in raw.decode_entity_styles(path)
         )
     except Exception:
@@ -3931,13 +3966,14 @@ def _entity_linetype_map(path: str) -> dict[int, tuple[str | None, int | None, f
     except Exception:
         return {}
     result: dict[int, tuple[str | None, int | None, float]] = {}
+    shared = _shared_values(signed_zeros=True)
     for handle, _layer_handle, flags, linetype_handle, scale in rows:
         name = _LINETYPE_FLAG_NAMES.get(flags)
         if name is None:
             name = names.get(linetype_handle)
             if name is not None and name.upper() in ("BYLAYER", "BYBLOCK", "CONTINUOUS"):
                 name = name.upper()
-        result[handle] = (name, linetype_handle, scale)
+        result[handle] = shared((name, linetype_handle, scale))
     return result
 
 
@@ -3951,8 +3987,9 @@ def _entity_common_layer_map(path: str) -> dict[int, int]:
         rows = raw.decode_entity_linetypes(path)
     except Exception:
         return {}
+    shared = _shared_values()
     return {
-        handle: layer_handle
+        handle: shared(layer_handle)
         for handle, layer_handle, *_rest in rows
         if layer_handle in layer_handles
     }
@@ -3968,8 +4005,9 @@ def _entity_lineweight_map(path: str) -> dict[int, tuple[int | None, bool]]:
         rows = decode(path)
     except Exception:
         return {}
+    shared = _shared_values()
     return {
-        int(handle): (None if lineweight is None else int(lineweight), bool(invisible))
+        int(handle): shared((None if lineweight is None else int(lineweight), bool(invisible)))
         for handle, lineweight, invisible in rows
     }
 
