@@ -1,7 +1,8 @@
 [project]
 name = "ezdwg"
 dynamic = ["version"]
-description = "Minimal read-only DWG parser (Rust core + Python API)"
+description = "DWG reader and writer (R13-R2018 read, R2000/R2018 write) with a Rust core and Python API"
+keywords = ["dwg", "autocad", "cad", "dxf", "parser", "reader", "writer", "converter"]
 readme = "README.md"
 authors = [
     { name = "neka-nat", email = "nekanat.stock@gmail.com" }
