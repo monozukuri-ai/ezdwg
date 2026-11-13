@@ -3,6 +3,16 @@
 ## Unreleased
 
 ### DWG reader
+- ATTRIB/ATTDEF of R2007 and later: a record read at its exact layout is
+  returned when its numbers are finite. The plausibility check that guards the
+  candidate search was also applied to these records and dropped real values:
+  a symbol on its own (a degree sign), a character of a symbol font in the
+  private use area, a C1 control character, or a text height below 1e-8. The
+  exact layout keeps its own rules: no empty tag, no control character in a
+  tag, a text height above 0. The whole check still applies to the fallback
+  readers: the candidate search, and the versions before R2007. Of 1,279
+  production drawings (R2013 and R2018), 60 lost ATTRIB or ATTDEF records
+  this way (272 in all), which are read now.
 - `raw.decode_entity_proxy_graphics(path, handles, limit=None)` returns the
   proxy graphic of entities by handle: the bytes an application stored in the
   record so that a program without the code of the entity can still draw it.

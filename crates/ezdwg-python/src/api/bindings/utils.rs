@@ -145,7 +145,8 @@ fn decode_attrib_like_entities_by_type<F>(
     limit: Option<usize>,
     type_code: u16,
     type_name: &str,
-    mut decode_entity: F,
+    is_attdef: bool,
+    mut decode_fallback: F,
 ) -> PyResult<Vec<AttribEntityRow>>
 where
     F: FnMut(
@@ -192,7 +193,19 @@ where
             }
             return Err(to_py_err(err));
         }
-        let entity = match decode_entity(&mut reader, decoder.version(), &header, obj.handle.0) {
+        let exact = decode_attrib_exact_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+            is_attdef,
+        );
+        let read_exact = exact.is_some();
+        let decoded = match exact {
+            Some(entity) => Ok(entity),
+            None => decode_fallback(&mut reader, decoder.version(), &header, obj.handle.0),
+        };
+        let entity = match decoded {
             Ok(entity) => entity,
             Err(err) if best_effort => {
                 if debug_decode {
@@ -209,7 +222,7 @@ where
             }
             Err(err) => return Err(to_py_err(err)),
         };
-        if best_effort && !is_plausible_attrib_entity(&entity) {
+        if !keeps_attrib_entity(&entity, read_exact, best_effort) {
             if debug_decode {
                 eprintln!(
                     "[attrib-decode] type={} handle={} rejected=implausible-values text={:?} tag={:?} prompt={:?} ins=({:.6e},{:.6e},{:.6e}) align={:?} ext=({:.6e},{:.6e},{:.6e}) h={:.6e} rot={:.6e} width={:.6e} gen={} halign={} valign={} flags={} lock={} layer={} style={:?} owner={:?}",
@@ -275,6 +288,59 @@ where
 
 fn is_plausible_attrib_entity(entity: &entities::AttribEntity) -> bool {
     crate::entities::attrib::is_plausible_attrib_entity(entity)
+}
+
+/// Whether a decoded ATTRIB/ATTDEF is returned.
+///
+/// The plausibility check guards the candidate search: a guessed offset can
+/// give a record of noise, and best-effort reading drops it. A record read at
+/// its exact layout (`decode_attrib_exact`) has a tag, a finite position and
+/// a positive height. The data of a single-line record also ends exactly
+/// where its strings begin; a multi-line record (R2018) is not checked that
+/// way, because its embedded MTEXT is not walked.
+///
+/// The text rules and the size ranges of the check do not apply to a record
+/// read at its exact layout: a symbol on its own ("\u{00B0}"), a character of
+/// a symbol font in the private use area, a C1 control character or a very
+/// small text height is kept as it is. A number that is not finite still
+/// drops the record, as the check did before.
+fn keeps_attrib_entity(
+    entity: &entities::AttribEntity,
+    read_exact: bool,
+    best_effort: bool,
+) -> bool {
+    if !best_effort {
+        return true;
+    }
+    if read_exact {
+        has_finite_attrib_numbers(entity)
+    } else {
+        is_plausible_attrib_entity(entity)
+    }
+}
+
+/// Whether every number of an ATTRIB/ATTDEF is finite: the scalars and the
+/// alignment point, the same values the plausibility check looks at.
+fn has_finite_attrib_numbers(entity: &entities::AttribEntity) -> bool {
+    let alignment = entity.alignment.unwrap_or((0.0, 0.0, 0.0));
+    [
+        entity.insertion.0,
+        entity.insertion.1,
+        entity.insertion.2,
+        alignment.0,
+        alignment.1,
+        alignment.2,
+        entity.extrusion.0,
+        entity.extrusion.1,
+        entity.extrusion.2,
+        entity.thickness,
+        entity.oblique_angle,
+        entity.height,
+        entity.rotation,
+        entity.width_factor,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
 }
 
 fn decode_dim_entities_by_type<F>(
@@ -1420,9 +1486,12 @@ fn is_known_entity_type_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_plausible_attrib_entity, matches_type_name, resolve_r2010_string_stream_ranges};
-    use crate::bit::BitReader;
-    use crate::entities::AttribEntity;
+    use super::{
+        is_plausible_attrib_entity, keeps_attrib_entity, matches_type_name,
+        resolve_r2010_string_stream_ranges,
+    };
+    use crate::bit::{BitReader, BitWriter, Endian};
+    use crate::entities::{decode_attrib_exact, AttribEntity, StringStreamFormat};
     use std::collections::HashMap;
 
     #[test]
@@ -1528,5 +1597,199 @@ mod tests {
     #[test]
     fn is_plausible_attrib_entity_accepts_normal_text_size() {
         assert!(is_plausible_attrib_entity(&attrib_entity_with_size(2.5, 1.0)));
+    }
+
+    fn attrib_entity_with_text(text: &str) -> AttribEntity {
+        let mut entity = attrib_entity_with_size(2.5, 1.0);
+        entity.text = text.to_string();
+        entity
+    }
+
+    #[test]
+    fn keeps_attrib_entity_keeps_an_exact_read_the_check_calls_noise() {
+        let noise = [
+            attrib_entity_with_text("\u{00B0}"),
+            attrib_entity_with_text("\u{E000}B"),
+            attrib_entity_with_text("A\u{0085}"),
+            attrib_entity_with_size(1.0e-9, 1.0),
+        ];
+        for entity in &noise {
+            assert!(!is_plausible_attrib_entity(entity));
+            assert!(keeps_attrib_entity(entity, true, true));
+        }
+    }
+
+    #[test]
+    fn keeps_attrib_entity_drops_candidate_noise_only_in_best_effort() {
+        let noise = attrib_entity_with_text("\u{E000}\u{E001}");
+        assert!(!keeps_attrib_entity(&noise, false, true));
+        assert!(keeps_attrib_entity(&noise, false, false));
+        let plain = attrib_entity_with_text("ABC");
+        assert!(keeps_attrib_entity(&plain, false, true));
+    }
+
+    #[test]
+    fn keeps_attrib_entity_drops_an_exact_read_with_a_number_that_is_not_finite() {
+        let setters: [fn(&mut AttribEntity, f64); 14] = [
+            |entity, value| entity.insertion.0 = value,
+            |entity, value| entity.insertion.1 = value,
+            |entity, value| entity.insertion.2 = value,
+            |entity, value| entity.alignment = Some((value, 0.0, 0.0)),
+            |entity, value| entity.alignment = Some((0.0, value, 0.0)),
+            |entity, value| entity.alignment = Some((0.0, 0.0, value)),
+            |entity, value| entity.extrusion.0 = value,
+            |entity, value| entity.extrusion.1 = value,
+            |entity, value| entity.extrusion.2 = value,
+            |entity, value| entity.thickness = value,
+            |entity, value| entity.oblique_angle = value,
+            |entity, value| entity.height = value,
+            |entity, value| entity.rotation = value,
+            |entity, value| entity.width_factor = value,
+        ];
+        for (field, set) in setters.iter().enumerate() {
+            for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let mut entity = attrib_entity_with_text("ABC");
+                set(&mut entity, value);
+                assert!(
+                    !keeps_attrib_entity(&entity, true, true),
+                    "field {field} = {value}"
+                );
+                // Reading that is not best effort returns every record.
+                assert!(keeps_attrib_entity(&entity, true, false));
+            }
+            // A large finite number is a range rule of the check: kept.
+            let mut entity = attrib_entity_with_text("ABC");
+            set(&mut entity, 1.0e13);
+            assert!(keeps_attrib_entity(&entity, true, true), "field {field}");
+        }
+    }
+
+    fn write_tu(writer: &mut BitWriter, text: &str) {
+        let units: Vec<u16> = text.encode_utf16().collect();
+        writer.write_bs(units.len() as u16).expect("string length");
+        for unit in units {
+            writer.write_rs(Endian::Little, unit).expect("string unit");
+        }
+    }
+
+    /// An R2018 ATTRIB record from its handle on, as `decode_attrib_exact`
+    /// reads it, and the bit where its handle stream begins. The tag is "TAG".
+    /// With `embedded_text` it is a multi-line attribute. The handle stream is
+    /// left empty: the reader takes its handles as optional.
+    fn exact_attrib_record(
+        text: &str,
+        width_factor: f64,
+        extrusion: (f64, f64, f64),
+        embedded_text: Option<&str>,
+    ) -> (Vec<u8>, u32) {
+        let mut writer = BitWriter::new();
+        writer.write_h(0, 0x50).expect("handle");
+        writer.write_bs(0).expect("no extended data");
+        writer.write_b(0).expect("no proxy graphic");
+        writer.write_bb(0).expect("entity mode");
+        writer.write_bl(0).expect("reactor count");
+        writer.write_b(1).expect("no extension dictionary");
+        writer.write_b(0).expect("no data store data");
+        writer.write_b(1).expect("no links");
+        writer.write_b(0).expect("color");
+        writer.write_bd(1.0).expect("linetype scale");
+        writer.write_bb(0).expect("linetype flags");
+        writer.write_bb(0).expect("plot style flags");
+        writer.write_bb(0).expect("material flags");
+        writer.write_rc(0).expect("shadow flags");
+        for _ in 0..3 {
+            writer.write_b(0).expect("visual style flag");
+        }
+        writer.write_bs(0).expect("invisibility");
+        writer.write_rc(0).expect("lineweight");
+        // TEXT fields. The data flags leave out the elevation, the alignment
+        // point, the oblique angle, the rotation, the generation and the
+        // alignments; the width factor is stored.
+        writer.write_rc(0xEF).expect("data flags");
+        writer.write_rd(Endian::Little, 5.0).expect("insertion x");
+        writer.write_rd(Endian::Little, 6.0).expect("insertion y");
+        writer
+            .write_be(extrusion.0, extrusion.1, extrusion.2)
+            .expect("extrusion");
+        writer.write_bt(0.0).expect("thickness");
+        writer.write_rd(Endian::Little, 2.5).expect("height");
+        writer
+            .write_rd(Endian::Little, width_factor)
+            .expect("width factor");
+        writer.write_rc(0).expect("version");
+        if embedded_text.is_some() {
+            writer.write_rc(2).expect("attribute type: multi line");
+            // The embedded MTEXT, which the exact reader does not walk.
+            writer.write_bits_msb(0, 40).expect("embedded mtext");
+        } else {
+            writer.write_rc(1).expect("attribute type: single line");
+            writer.write_bs(0).expect("field length");
+        }
+        writer.write_rc(0).expect("flags");
+        writer.write_b(1).expect("lock position");
+        let strings_start = writer.tell_bits();
+        write_tu(&mut writer, text);
+        if let Some(embedded_text) = embedded_text {
+            write_tu(&mut writer, embedded_text);
+        }
+        write_tu(&mut writer, "TAG");
+        let strings_size = (writer.tell_bits() - strings_start) as u16;
+        writer
+            .write_rs(Endian::Little, strings_size)
+            .expect("string stream size");
+        writer.write_b(1).expect("string stream flag");
+        let data_end_bit = writer.tell_bits() as u32;
+        (writer.into_bytes(), data_end_bit)
+    }
+
+    fn decode_exact_attrib_record(record: &(Vec<u8>, u32)) -> AttribEntity {
+        let mut reader = BitReader::new(&record.0);
+        decode_attrib_exact(
+            &mut reader,
+            StringStreamFormat::R2018,
+            record.1,
+            0x50,
+            false,
+        )
+        .expect("the record has the exact layout")
+    }
+
+    #[test]
+    fn exact_attrib_record_with_a_lone_symbol_is_kept() {
+        let record = exact_attrib_record("\u{00B0}", 1.0, (0.0, 0.0, 1.0), None);
+        let entity = decode_exact_attrib_record(&record);
+        assert_eq!(entity.text, "\u{00B0}");
+        assert_eq!(entity.tag.as_deref(), Some("TAG"));
+        assert_eq!(entity.insertion, (5.0, 6.0, 0.0));
+        assert_eq!(entity.height, 2.5);
+        assert!(!is_plausible_attrib_entity(&entity));
+        assert!(keeps_attrib_entity(&entity, true, true));
+    }
+
+    #[test]
+    fn exact_attrib_record_with_a_number_that_is_not_finite_is_dropped() {
+        let record = exact_attrib_record("ABC", f64::NAN, (0.0, 0.0, 1.0), None);
+        let entity = decode_exact_attrib_record(&record);
+        assert!(entity.width_factor.is_nan());
+        assert!(!keeps_attrib_entity(&entity, true, true));
+
+        let record = exact_attrib_record("ABC", 1.0, (f64::INFINITY, 0.0, 0.0), None);
+        let entity = decode_exact_attrib_record(&record);
+        assert_eq!(entity.extrusion, (f64::INFINITY, 0.0, 0.0));
+        assert!(!keeps_attrib_entity(&entity, true, true));
+
+        let record = exact_attrib_record("ABC", 1.0, (0.0, 0.0, 1.0), None);
+        let entity = decode_exact_attrib_record(&record);
+        assert!(keeps_attrib_entity(&entity, true, true));
+    }
+
+    #[test]
+    fn exact_multi_line_attrib_record_is_kept_with_the_text_of_its_mtext() {
+        let record = exact_attrib_record("", 1.0, (0.0, 0.0, 1.0), Some("first\\Psecond"));
+        let entity = decode_exact_attrib_record(&record);
+        assert_eq!(entity.text, "first\nsecond");
+        assert_eq!(entity.tag.as_deref(), Some("TAG"));
+        assert!(entity.lock_position);
+        assert!(keeps_attrib_entity(&entity, true, true));
     }
 }
