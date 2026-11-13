@@ -3,6 +3,14 @@
 ## Unreleased
 
 ### DWG reader
+- R2004: a class whose DWG or maintenance version is above 255 no longer
+  costs the drawing its class names. The two fields are bit longs, as in the
+  later versions, and were read as bit shorts, so the classes after such a
+  class were read out of step and the drawing lost or garbled its class
+  names. In the sample drawing of the repository every class-based object was
+  `UNKNOWN(...)` and none of the entities of those classes (IMAGE, for one)
+  was returned. The same code is the fallback reader of the class section of
+  R2010, R2013 and R2018 drawings, so the change applies to them too.
 - The per-entity tables that a read keeps until `clear_decode_caches()`
   (placements, colors, linetypes, lineweights, layers, thickness/extrusion/
   elevation, MTEXT write properties, insert owners) share one object per
