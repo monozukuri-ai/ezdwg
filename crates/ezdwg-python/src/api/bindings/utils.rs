@@ -1368,7 +1368,11 @@ fn matches_type_name(
     builtin_name: &str,
     dynamic_types: &HashMap<u16, String>,
 ) -> bool {
-    if type_code == builtin_code {
+    // A class-based type (IMAGE, IMAGEDEF) has no code of its own: its
+    // callers pass 0, and only its class name matches. An object whose type
+    // code reads as 0 matches only when the class table of the drawing itself
+    // gives the code 0 that name, which a damaged table can do.
+    if builtin_code != 0 && type_code == builtin_code {
         return true;
     }
     dynamic_types
@@ -1415,9 +1419,22 @@ fn is_known_entity_type_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_plausible_attrib_entity, resolve_r2010_string_stream_ranges};
+    use super::{is_plausible_attrib_entity, matches_type_name, resolve_r2010_string_stream_ranges};
     use crate::bit::BitReader;
     use crate::entities::AttribEntity;
+    use std::collections::HashMap;
+
+    #[test]
+    fn class_based_type_matches_on_its_class_name_only() {
+        let dynamic_types = HashMap::from([(500, "IMAGE".to_string())]);
+        assert!(matches_type_name(500, 0, "IMAGE", &dynamic_types));
+        assert!(!matches_type_name(500, 0, "IMAGEDEF", &dynamic_types));
+        assert!(!matches_type_name(501, 0, "IMAGE", &dynamic_types));
+        // The type code of a damaged object can read as 0.
+        assert!(!matches_type_name(0, 0, "IMAGE", &dynamic_types));
+        // A built-in type matches on its code.
+        assert!(matches_type_name(0x13, 0x13, "LINE", &dynamic_types));
+    }
 
     fn set_le_u16(bits: &mut [u8], bit_pos: u32, value: u16) {
         assert_eq!(bit_pos % 8, 0, "test helper only supports byte alignment");

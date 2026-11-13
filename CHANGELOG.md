@@ -3,6 +3,12 @@
 ## Unreleased
 
 ### DWG reader
+- A class-based type (IMAGE, IMAGEDEF) matches on its class name only. An
+  object whose type code reads as 0 was taken for an IMAGE and for an
+  IMAGEDEF.
+- IMAGE: a clip boundary whose vertex count is larger than the rest of the
+  record fails before memory is reserved for the vertices. It failed before
+  as well, after reserving up to 16 MB.
 - R2004: a class whose DWG or maintenance version is above 255 no longer
   costs the drawing its class names. The two fields are bit longs, as in the
   later versions, and were read as bit shorts, so the classes after such a
