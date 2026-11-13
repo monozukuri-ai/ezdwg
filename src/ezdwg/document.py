@@ -54,6 +54,7 @@ SUPPORTED_ENTITY_TYPES = (
     "ATTDEF",
     "MTEXT",
     "LEADER",
+    "MULTILEADER",
     "HATCH",
     "IMAGE",
     "WIPEOUT",
@@ -2221,6 +2222,10 @@ _SIMPLE_ENTITY_REGISTRY: dict[str, _SimpleEntitySpec] = {
         rows_fn=lambda p: raw.decode_wipeout_entities(p),
         build_dxf=lambda row, _: _wipeout_dxf(row),
     ),
+    "MULTILEADER": _SimpleEntitySpec(
+        rows_fn=lambda p: raw.decode_mleader_entities(p),
+        build_dxf=lambda row, _: _mleader_dxf(row),
+    ),
     "XLINE": _SimpleEntitySpec(
         rows_fn=lambda p: raw.decode_xline_entities(p),
         build_dxf=lambda row, _: (row[0], {"start": row[1], "unit_vector": row[2]}),
@@ -2609,6 +2614,160 @@ def _wipeout_dxf(row: tuple) -> tuple[int, dict]:
             "clip_vertices": [tuple(v) for v in clip_vertices],
         },
     )
+
+
+def _mleader_dxf(row: tuple) -> tuple[int, dict]:
+    (
+        handle,
+        class_version,
+        context,
+        (style_handle, override_flags, content_type),
+        (
+            leader_line_type,
+            leader_color,
+            leader_linetype_handle,
+            leader_lineweight,
+            landing_enabled,
+            dogleg_enabled,
+            dogleg_length,
+            arrow_handle,
+            arrow_size,
+        ),
+        (text_style_handle, left_attachment, right_attachment, text_frame),
+        (block_handle, block_connection),
+        attributes,
+    ) = row
+    return (
+        handle,
+        {
+            "class_version": None if class_version is None else int(class_version),
+            "style_handle": int(style_handle),
+            "content_type": int(content_type),
+            "override_flags": int(override_flags),
+            "leader_line_type": int(leader_line_type),
+            "leader_color": tuple(leader_color),
+            "leader_linetype_handle": int(leader_linetype_handle),
+            "leader_lineweight": int(leader_lineweight),
+            "landing_enabled": bool(landing_enabled),
+            "dogleg_enabled": bool(dogleg_enabled),
+            "dogleg_length": dogleg_length,
+            "arrow_handle": int(arrow_handle),
+            "arrow_size": arrow_size,
+            "text_style_handle": int(text_style_handle),
+            "left_attachment": int(left_attachment),
+            "right_attachment": int(right_attachment),
+            "text_frame": bool(text_frame),
+            "block_handle": int(block_handle),
+            "block_connection": int(block_connection),
+            "attributes": [
+                {
+                    "definition_handle": int(definition_handle),
+                    "index": int(index),
+                    "width": width,
+                    "text": text,
+                }
+                for definition_handle, index, width, text in attributes
+            ],
+            "context": _mleader_context(context),
+        },
+    )
+
+
+def _mleader_context(context: tuple) -> dict:
+    (
+        leaders,
+        (scale, content_base, text_height, arrow_size, landing_gap),
+        (left_attachment, right_attachment, text_alignment, attachment_type),
+        text,
+        block,
+        (plane_origin, plane_x_axis, plane_y_axis, plane_normal_reversed),
+    ) = context
+    text_dxf = None
+    if text is not None:
+        (
+            content,
+            normal,
+            style_handle,
+            location,
+            direction,
+            rotation,
+            width,
+            color,
+            attachment,
+            drawing_direction,
+            (background_color, background_scale, background_on),
+        ) = text
+        text_dxf = {
+            "text": content,
+            "normal": normal,
+            "style_handle": int(style_handle),
+            "location": location,
+            "direction": direction,
+            "rotation": rotation,
+            "width": width,
+            "color": tuple(color),
+            "attachment": int(attachment),
+            "drawing_direction": int(drawing_direction),
+            "background_color": tuple(background_color),
+            "background_scale": background_scale,
+            "background_on": bool(background_on),
+        }
+    block_dxf = None
+    if block is not None:
+        block_handle, normal, location, block_scale, rotation, color, matrix = block
+        block_dxf = {
+            "block_handle": int(block_handle),
+            "normal": normal,
+            "location": location,
+            "scale": block_scale,
+            "rotation": rotation,
+            "color": tuple(color),
+            "matrix": list(matrix),
+        }
+    return {
+        "scale": scale,
+        "content_base": content_base,
+        "text_height": text_height,
+        "arrow_size": arrow_size,
+        "landing_gap": landing_gap,
+        "left_attachment": int(left_attachment),
+        "right_attachment": int(right_attachment),
+        "text_alignment": int(text_alignment),
+        "attachment_type": int(attachment_type),
+        "plane_origin": plane_origin,
+        "plane_x_axis": plane_x_axis,
+        "plane_y_axis": plane_y_axis,
+        "plane_normal_reversed": bool(plane_normal_reversed),
+        "leaders": [
+            {
+                "has_last_point": bool(has_last_point),
+                "has_dogleg": bool(has_dogleg),
+                "last_point": last_point,
+                "dogleg_vector": dogleg_vector,
+                "index": int(index),
+                "dogleg_length": leader_dogleg_length,
+                "attachment_direction": (
+                    None if attachment_direction is None else int(attachment_direction)
+                ),
+                "lines": [
+                    {"index": int(line_index), "points": [tuple(point) for point in points]}
+                    for line_index, points in lines
+                ],
+            }
+            for (
+                has_last_point,
+                has_dogleg,
+                last_point,
+                dogleg_vector,
+                index,
+                leader_dogleg_length,
+                lines,
+                attachment_direction,
+            ) in leaders
+        ],
+        "text": text_dxf,
+        "block": block_dxf,
+    }
 
 
 def _build_dimension_common_dxf(

@@ -3,6 +3,20 @@
 ## Unreleased
 
 ### DWG reader
+- MULTILEADER entities are read (R2000 to R2018; R13 and R14 are not).
+  `Document` layouts return them as `MULTILEADER`, and
+  `raw.decode_mleader_entities` gives the rows: the leaders with their lines
+  and points, the arrowhead, the landing and dogleg values, and the label, a
+  text or a block with its attribute texts. As for WIPEOUT, `to_dxf` skips
+  the type and the style rows hold it. A record is returned only when its
+  layout ends exactly where its data, its strings and its handles end. Not
+  returned: a record with a break in a leader or leader line, with a text
+  column height or (before R2010) with an entry in the two lists at its end,
+  and in best effort one with a number that is not finite; `ezdwg inspect`
+  counts those under `decode_gap[MULTILEADER]`. More than one leader, line,
+  point or block attribute is read as a repeat that no drawing proves. Of
+  1,279 production drawings (R2013 and R2018), 236 hold a MULTILEADER (964
+  in all); all decode.
 - WIPEOUT entities are read (R2000 and later; R13 and R14 are not, as for
   IMAGE). `Document` layouts return them as `WIPEOUT` with the placement
   frame and the clip boundary, which is the masked area, and
@@ -16,9 +30,9 @@
   returns. The style rows now hold each WIPEOUT, so it counts in the layer
   color heuristic for AC1024, AC1027 and AC1032 drawings like any other
   entity. Of 1,279 production drawings, 799 hold a WIPEOUT (25,110 in all).
-- A class-based type (IMAGE, IMAGEDEF, WIPEOUT) matches on its class name
-  only. An object whose type code reads as 0 was taken for an IMAGE and for
-  an IMAGEDEF.
+- A class-based type (IMAGE, IMAGEDEF, WIPEOUT, MULTILEADER) matches on its
+  class name only. An object whose type code reads as 0 was taken for an
+  IMAGE and for an IMAGEDEF.
 - IMAGE: a clip boundary whose vertex count is larger than the rest of the
   record fails before memory is reserved for the vertices. It failed before
   as well, after reserving up to 16 MB.
@@ -72,6 +86,12 @@
   decode failure instead of an entity with empty paths.
 
 ### Rust crate distribution
+- New public module `entities::mleader`: `decode_mleader` (R2000 and R2004),
+  `decode_mleader_r2007`, `decode_mleader_r2010`, `decode_mleader_r2013`
+  (also R2018), and the types `MLeaderEntity`, `MLeaderContext`,
+  `MLeaderRoot`, `MLeaderLine`, `MLeaderText`, `MLeaderBlock`,
+  `MLeaderAttribute` and `MLeaderColor`. `MLeaderEntity::has_finite_numbers`
+  says whether every number of the record is finite.
 - New public method `entities::ImageEntity::has_finite_numbers`: whether every
   number of the placement frame and of the clip boundary is finite. The
   WIPEOUT rows of the Python reader use it.

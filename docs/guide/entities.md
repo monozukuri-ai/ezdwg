@@ -272,6 +272,83 @@ checked for frames of size `(1, 1)` whose axes lie along X and Y.
 | `clip_mode` | `int \| None` | R2010 and later: the clip mode as stored (0 outside, 1 inside); `None` before |
 | `clip_vertices` | `list[(float, float)]` | The boundary, in the columns and rows of the frame (see above) |
 
+### MULTILEADER
+
+A leader whose label is a text or a block. Read only; R2000 to R2018.
+
+The row follows the DXF form of the entity: the properties of the object, and
+under `context` what is drawn, in drawing units. A key that ends in `_handle`
+names another object (a style, a linetype, a text style, a block record, an
+attribute definition); 0 is no object. A color is `(color index, value)`: the
+value is the 32-bit number a DXF file shows for it, and 0 in R2000, which
+stores the color index only. Points and directions are in world coordinates,
+as a DXF file of the drawing shows them; that is checked for objects in the
+XY plane only. A `rotation` is in radians, as in the DXF MULTILEADER, where
+TEXT, INSERT and SHAPE give degrees.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `class_version` | `int \| None` | R2010 and later; `None` before |
+| `style_handle` | `int` | The MLEADERSTYLE object |
+| `content_type` | `int` | 0 none, 1 block, 2 text, 3 tolerance |
+| `override_flags` | `int` | Which properties the object sets apart from its style |
+| `leader_line_type` | `int` | 0 none, 1 straight, 2 spline |
+| `leader_color` | `(int, int)` | Color of the leader lines |
+| `leader_linetype_handle` | `int` | Linetype of the leader lines |
+| `leader_lineweight` | `int` | As in DXF: -1 BYLAYER, -2 BYBLOCK, -3 default, else hundredths of a millimetre |
+| `landing_enabled` / `dogleg_enabled` | `bool` | Whether the landing and the dogleg are on |
+| `dogleg_length` | `float` | Length of the dogleg |
+| `arrow_handle` | `int` | Block of the arrowhead; 0 is the default arrowhead |
+| `arrow_size` | `float` | Size of the arrowhead |
+| `text_style_handle` | `int` | Text style of a text label |
+| `left_attachment` / `right_attachment` | `int` | Where a leader on that side meets the text |
+| `text_frame` | `bool` | Whether the text has a frame |
+| `block_handle` | `int` | Block of a block label |
+| `block_connection` | `int` | 0 the leader meets the block's extents, 1 its base point |
+| `attributes` | `list[dict]` | R2010 and later, block label: `definition_handle` (the ATTDEF of the block), `index`, `width`, `text` |
+| `context` | `dict` | See below |
+
+`context`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `scale` | `float` | Overall scale |
+| `content_base` | `(float, float, float)` | Base point of the label |
+| `text_height` / `arrow_size` / `landing_gap` | `float` | Sizes as drawn |
+| `left_attachment` / `right_attachment` / `text_alignment` / `attachment_type` | `int` | As stored |
+| `plane_origin` / `plane_x_axis` / `plane_y_axis` | `(float, float, float)` | The plane of the object |
+| `plane_normal_reversed` | `bool` | As stored |
+| `leaders` | `list[dict]` | See below |
+| `text` | `dict \| None` | The text label: `text` (with its MTEXT format codes), `location`, `direction`, `rotation` (radians, as in the DXF MULTILEADER), `width`, `normal`, `style_handle`, `color`, `attachment`, `drawing_direction`, `background_color`, `background_scale`, `background_on` |
+| `block` | `dict \| None` | The block label: `block_handle`, `location`, `scale`, `rotation` (radians, as in the DXF MULTILEADER), `normal`, `color`, `matrix` (16 values, in the order of the DXF group 47) |
+
+Each of `leaders`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `lines` | `list[dict]` | The leader lines: `index`, and `points` from the arrowhead on |
+| `last_point` | `(float, float, float)` | Where the lines end and the dogleg begins |
+| `has_last_point` / `has_dogleg` | `bool` | Whether `last_point` and `dogleg_vector` are set |
+| `dogleg_vector` | `(float, float, float)` | Direction of the dogleg |
+| `dogleg_length` | `float` | Length of the dogleg |
+| `index` | `int` | As stored |
+| `attachment_direction` | `int \| None` | R2010 and later: 0 horizontal, 1 vertical |
+
+A leader line runs from its `points` to the `last_point` of its leader. That
+is the DXF form of the entity; no test of this library draws a leader line.
+
+Limits:
+
+- More than one leader, line, point or block attribute is read as a repeat
+  of the first. No drawing at hand has two, so the repeat is not proven. For
+  attributes nothing checks that the handle, the numbers and the text of one
+  attribute belong together.
+- A block label is proven for R2013 and R2018 only. Before R2013 the layout
+  rests on one public sample drawing, which has text labels only.
+- A record with a break in a leader or in a leader line, with a text column
+  height, or (before R2010) with an entry in the two lists at its end is not
+  returned. `ezdwg inspect` counts it under `decode_gap[MULTILEADER]`.
+
 ### SPLINE
 
 | Key | Type | Description |

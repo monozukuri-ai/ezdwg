@@ -299,6 +299,68 @@ type WipeoutEntityRow = (
     Vec<(f64, f64)>,
     Option<u8>,
 );
+/// A MULTILEADER color: the color index and the 32-bit value (0 in R2000).
+type MLeaderColorRow = (u16, u32);
+/// Line index, points.
+type MLeaderLineRow = (u32, Vec<Point3>);
+/// Last point set, dogleg set, last point, dogleg vector, leader index,
+/// dogleg length, lines, attachment direction (R2010+).
+type MLeaderRootRow = (
+    bool,
+    bool,
+    Point3,
+    Point3,
+    u32,
+    f64,
+    Vec<MLeaderLineRow>,
+    Option<u16>,
+);
+/// Text, normal, text style handle, location, direction, rotation, width,
+/// color, attachment, drawing direction, (background color, background scale,
+/// background on).
+type MLeaderTextRow = (
+    String,
+    Point3,
+    u64,
+    Point3,
+    Point3,
+    f64,
+    f64,
+    MLeaderColorRow,
+    u16,
+    u16,
+    (MLeaderColorRow, f64, bool),
+);
+/// Block handle, normal, location, scale, rotation, color, the 16 matrix
+/// values.
+type MLeaderBlockRow = (u64, Point3, Point3, Point3, f64, MLeaderColorRow, Vec<f64>);
+/// Leaders; (scale, content base, text height, arrow size, landing gap);
+/// (left attachment, right attachment, text alignment, attachment type);
+/// text; block; (plane origin, x axis, y axis, normal reversed).
+type MLeaderContextRow = (
+    Vec<MLeaderRootRow>,
+    (f64, Point3, f64, f64, f64),
+    (u16, u16, u16, u16),
+    Option<MLeaderTextRow>,
+    Option<MLeaderBlockRow>,
+    (Point3, Point3, Point3, bool),
+);
+/// Handle; class version (R2010+); context; (style handle, override flags,
+/// content type); (leader line type, color, linetype handle, lineweight,
+/// landing enabled, dogleg enabled, dogleg length, arrowhead handle, arrow
+/// size); (text style handle, left attachment, right attachment, text
+/// frame); (block handle, block connection); block attributes (attribute
+/// definition handle, index, width, text).
+type MLeaderEntityRow = (
+    u64,
+    Option<u16>,
+    MLeaderContextRow,
+    (u64, u32, u16),
+    (u16, MLeaderColorRow, u64, i32, bool, bool, f64, u64, f64),
+    (u64, u16, u16, bool),
+    (u64, u16),
+    Vec<(u64, u16, f64, String)>,
+);
 type XLineEntityRow = (u64, Point3, Point3);
 type PolylineVerticesRow = (u64, u16, Vec<Point3>);
 type PolylineInterpolatedRow = (u64, u16, bool, Vec<Point3>);
