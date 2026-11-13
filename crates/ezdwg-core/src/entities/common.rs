@@ -458,11 +458,29 @@ fn read_common_entity_header_preamble(
     let graphic_present_flag = reader.read_b()?;
     let proxy_graphics = if graphic_present_flag == 1 {
         let graphic_size = if r2010_plus {
-            reader.read_bll()? as usize
+            reader.read_bll()?
         } else {
-            reader.read_rl(Endian::Little)? as usize
+            u64::from(reader.read_rl(Endian::Little)?)
         };
-        Some(reader.read_rcs(graphic_size)?.to_vec())
+        // The bit reader gives zeros for the last bits of a byte it does not have.
+        // So the check counts bits: every byte of the proxy graphic is in the
+        // record, and the size itself was not read past the end.
+        let whole_bytes_left = reader
+            .total_bits()
+            .checked_sub(reader.tell_bits())
+            .map(|bits| bits / 8);
+        match whole_bytes_left {
+            Some(left) if graphic_size <= left => Some(reader.read_rcs(graphic_size as usize)?),
+            _ => {
+                return Err(DwgError::new(
+                    ErrorKind::Format,
+                    format!(
+                        "proxy graphic of {graphic_size} bytes runs past the end of the record"
+                    ),
+                )
+                .with_offset(reader.get_pos().0 as u64));
+            }
+        }
     } else {
         None
     };
@@ -1010,6 +1028,222 @@ mod tests {
         assert_eq!(header.handle, 0);
         assert_eq!(header.obj_size, 64);
         assert!(reader.tell_bits() >= 24);
+    }
+}
+
+/// Where the proxy graphic sits in the common entity data of a DWG version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyGraphicLayout {
+    /// R14: the handle comes first; the size of the graphic is a raw long.
+    R14,
+    /// R2000 to R2007: as R14, with the size of the object data in bits in
+    /// front of the handle.
+    R2000,
+    /// R2010 to R2018: as R14, but the size of the graphic is a bit long long.
+    R2010,
+}
+
+/// The proxy graphic of an entity: the bytes its application stored so that a
+/// program without the code of the entity can still draw it.
+///
+/// The reader stands right after the object type. Read in order: the size of
+/// the object data in bits (`RL`, R2000 to R2007 only), the handle, the
+/// extended data, a flag (`B`: a proxy graphic follows), its size in bytes
+/// (`RL`, from R2010 `BLL`) and the bytes. This is the start of the walk that
+/// the entity decoders of R2000 and later use for the common entity data, and
+/// it is read with the same code.
+///
+/// Returns the handle of the record and the bytes, or `None` for the bytes
+/// when the flag is off. The bytes are returned as stored and are not looked
+/// into. A proxy graphic that the record does not hold whole is an error, and
+/// that is checked before a byte is copied.
+pub fn read_entity_proxy_graphic(
+    reader: &mut BitReader<'_>,
+    layout: ProxyGraphicLayout,
+) -> Result<(u64, Option<Vec<u8>>)> {
+    // Only R2000 to R2007 hold the size of the object data in front of the
+    // handle. The walk does not use the value it is given for the others.
+    let (r2010_plus, object_data_end_bit) = match layout {
+        ProxyGraphicLayout::R14 => (false, Some(0)),
+        ProxyGraphicLayout::R2000 => (false, None),
+        ProxyGraphicLayout::R2010 => (true, Some(0)),
+    };
+    let (_object_data_bits, handle, graphic) =
+        read_common_entity_header_preamble(reader, r2010_plus, object_data_end_bit)?;
+    Ok((handle, graphic))
+}
+
+#[cfg(test)]
+mod proxy_graphic_tests {
+    use super::{read_entity_proxy_graphic, ProxyGraphicLayout};
+    use crate::bit::{BitReader, BitWriter, Endian};
+    use crate::core::error::ErrorKind;
+
+    const LAYOUTS: [ProxyGraphicLayout; 3] = [
+        ProxyGraphicLayout::R14,
+        ProxyGraphicLayout::R2000,
+        ProxyGraphicLayout::R2010,
+    ];
+    const HANDLE: u64 = 0x2A7;
+    const GRAPHIC: [u8; 5] = [0xC3, 0x00, 0x81, 0xFF, 0x3C];
+
+    /// The bits in front of the size of the graphic: the size of the object
+    /// data (R2000 layout), the handle, the extended data and the flag.
+    fn head(layout: ProxyGraphicLayout, extended: &[&[u8]], flag: u8) -> BitWriter {
+        let mut writer = BitWriter::new();
+        if layout == ProxyGraphicLayout::R2000 {
+            writer
+                .write_rl(Endian::Little, 777)
+                .expect("object data size");
+        }
+        writer.write_inline_h(0, HANDLE).expect("handle");
+        for block in extended {
+            writer.write_bs(block.len() as u16).expect("block size");
+            writer.write_inline_h(5, 0x12).expect("application");
+            writer.write_rcs(block).expect("block");
+        }
+        writer.write_bs(0).expect("end of the extended data");
+        writer.write_b(flag).expect("flag");
+        writer
+    }
+
+    fn write_size(writer: &mut BitWriter, layout: ProxyGraphicLayout, size: u64) {
+        match layout {
+            ProxyGraphicLayout::R2010 => writer.write_bll(size).expect("size"),
+            _ => writer
+                .write_rl(Endian::Little, u32::try_from(size).expect("raw long"))
+                .expect("size"),
+        }
+    }
+
+    /// A record with the graphic `graphic` and four bytes of entity data
+    /// after it, and the bit where the graphic ends.
+    fn record_with(layout: ProxyGraphicLayout, graphic: &[u8]) -> (Vec<u8>, u64) {
+        let mut writer = head(layout, &[], 1);
+        write_size(&mut writer, layout, graphic.len() as u64);
+        writer.write_rcs(graphic).expect("graphic");
+        let end = writer.tell_bits();
+        writer.write_rcs(&[0xEE; 4]).expect("entity data");
+        (writer.into_bytes(), end)
+    }
+
+    #[test]
+    fn proxy_graphic_is_returned_as_stored_in_each_layout() {
+        for layout in LAYOUTS {
+            let (bytes, end) = record_with(layout, &GRAPHIC);
+            // The graphic does not begin at a byte in any layout.
+            assert_ne!(end % 8, 0, "{layout:?}");
+            let mut reader = BitReader::new(&bytes);
+            let (handle, graphic) = read_entity_proxy_graphic(&mut reader, layout).expect("read");
+            assert_eq!(handle, HANDLE, "{layout:?}");
+            assert_eq!(graphic.as_deref(), Some(&GRAPHIC[..]), "{layout:?}");
+            assert_eq!(reader.tell_bits(), end, "{layout:?}");
+        }
+    }
+
+    #[test]
+    fn proxy_graphic_is_found_behind_extended_data() {
+        for layout in LAYOUTS {
+            let mut writer = head(layout, &[&[7, 8, 9], &[0x55; 20]], 1);
+            write_size(&mut writer, layout, GRAPHIC.len() as u64);
+            writer.write_rcs(&GRAPHIC).expect("graphic");
+            let bytes = writer.into_bytes();
+            let (handle, graphic) =
+                read_entity_proxy_graphic(&mut BitReader::new(&bytes), layout).expect("read");
+            assert_eq!((handle, graphic.as_deref()), (HANDLE, Some(&GRAPHIC[..])));
+        }
+    }
+
+    #[test]
+    fn entity_with_the_flag_off_has_no_proxy_graphic() {
+        for layout in LAYOUTS {
+            let mut writer = head(layout, &[], 0);
+            // Entity data follows the flag at once: it is not read as a size.
+            writer.write_rcs(&[0xFF; 12]).expect("entity data");
+            let bytes = writer.into_bytes();
+            let (handle, graphic) =
+                read_entity_proxy_graphic(&mut BitReader::new(&bytes), layout).expect("read");
+            assert_eq!((handle, graphic), (HANDLE, None), "{layout:?}");
+        }
+    }
+
+    #[test]
+    fn proxy_graphic_of_no_bytes_is_empty_and_not_absent() {
+        for layout in LAYOUTS {
+            let (bytes, _end) = record_with(layout, &[]);
+            let (_handle, graphic) =
+                read_entity_proxy_graphic(&mut BitReader::new(&bytes), layout).expect("read");
+            assert_eq!(graphic, Some(Vec::new()), "{layout:?}");
+        }
+    }
+
+    #[test]
+    fn size_past_the_record_is_refused() {
+        for layout in LAYOUTS {
+            // One byte more than the record holds whole. The last byte of the
+            // record is there in part, so a count of bytes alone would let it
+            // pass and give a graphic that ends in bits the record never had.
+            let mut writer = head(layout, &[], 1);
+            write_size(&mut writer, layout, GRAPHIC.len() as u64 + 1);
+            writer.write_rcs(&GRAPHIC).expect("graphic");
+            assert_ne!(writer.tell_bits() % 8, 0, "{layout:?}");
+            let bytes = writer.into_bytes();
+            let error = read_entity_proxy_graphic(&mut BitReader::new(&bytes), layout)
+                .expect_err("one byte too many");
+            assert_eq!(error.kind, ErrorKind::Format, "{layout:?}");
+            assert_eq!(
+                error.message,
+                "proxy graphic of 6 bytes runs past the end of the record"
+            );
+
+            // The largest size the field can hold: refused, nothing reserved.
+            let largest = match layout {
+                ProxyGraphicLayout::R2010 => u64::MAX >> 8,
+                _ => u64::from(u32::MAX),
+            };
+            let mut writer = head(layout, &[], 1);
+            write_size(&mut writer, layout, largest);
+            writer.write_rcs(&GRAPHIC).expect("graphic");
+            let bytes = writer.into_bytes();
+            let error = read_entity_proxy_graphic(&mut BitReader::new(&bytes), layout)
+                .expect_err("largest size");
+            assert_eq!(error.kind, ErrorKind::Format, "{layout:?}");
+        }
+    }
+
+    #[test]
+    fn cut_record_gives_an_error_and_never_another_graphic() {
+        for layout in LAYOUTS {
+            // A size of 3: when the record ends inside that byte, the bits
+            // that are there read as a size of 0.
+            for graphic in [&GRAPHIC[..], &GRAPHIC[..3]] {
+                let (bytes, end) = record_with(layout, graphic);
+                for length in 0..=bytes.len() {
+                    let result =
+                        read_entity_proxy_graphic(&mut BitReader::new(&bytes[..length]), layout);
+                    if (length as u64) * 8 >= end {
+                        let (handle, read) = result.expect("whole graphic");
+                        assert_eq!((handle, read.as_deref()), (HANDLE, Some(graphic)));
+                    } else {
+                        assert!(result.is_err(), "{layout:?} cut at {length}: {result:?}");
+                    }
+                }
+            }
+
+            // No graphic: the flag itself must be in the record.
+            let writer = head(layout, &[&[1, 2, 3]], 0);
+            let flag_end = writer.tell_bits();
+            let bytes = writer.into_bytes();
+            for length in 0..=bytes.len() {
+                let result =
+                    read_entity_proxy_graphic(&mut BitReader::new(&bytes[..length]), layout);
+                if (length as u64) * 8 >= flag_end {
+                    assert_eq!(result.expect("flag"), (HANDLE, None));
+                } else {
+                    assert!(result.is_err(), "{layout:?} cut at {length}: {result:?}");
+                }
+            }
+        }
     }
 }
 

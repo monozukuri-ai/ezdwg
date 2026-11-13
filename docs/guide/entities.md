@@ -428,5 +428,36 @@ Every sheet has one viewport that stands for the sheet itself: the first of
 `Document.layouts()[name]["viewport_handles"]`. Its view shows the sheet at
 scale 1.
 
+## Proxy Graphic of an Entity
+
+An application can store a proxy graphic in the record of an entity, so that
+a program without the code of that entity can still draw it. Entities of a
+class, such as MULTILEADER, ACAD_TABLE, MESH, IMAGE, WIPEOUT and an underlay,
+often carry one. `raw.decode_entity_proxy_graphics` returns those bytes by
+handle:
+
+```python
+handles = [entity.handle for entity in doc.entities().query("MULTILEADER")]
+for handle, graphic in ezdwg.raw.decode_entity_proxy_graphics("drawing.dwg", handles):
+    if graphic is None:
+        ...  # the entity has no proxy graphic
+```
+
+- There is one row for each handle asked whose record is an entity and
+  reads, in the order asked. `limit` stops the read after that many rows.
+- The bytes are returned as stored: they are the bytes a DXF file of the
+  drawing carries as the proxy graphic of the entity. The function does not
+  look into them.
+- A handle with no row was not read: it is not in the drawing, it is not an
+  entity, or its record is damaged (the proxy graphic runs past the end of
+  the record, or the record holds another handle than the one asked). The
+  handles asked less the rows returned is the count of those.
+- DWG versions R14 to R2018. R13 is not read, and gives no rows. R2013 and
+  R2018 are checked on production drawings, the older versions on one public
+  sample drawing only.
+- Each call builds its table of handles over all objects of the drawing, so
+  ask the handles of one drawing in one call. One proxy graphic is at most
+  as large as its record; the sum of a call has no limit of its own.
+
 !!! note "ARC Angles"
     The high-level API returns ARC angles in **degrees**. The raw API (`ezdwg.raw`) returns angles in **radians**.

@@ -3,6 +3,20 @@
 ## Unreleased
 
 ### DWG reader
+- `raw.decode_entity_proxy_graphics(path, handles, limit=None)` returns the
+  proxy graphic of entities by handle: the bytes an application stored in the
+  record so that a program without the code of the entity can still draw it.
+  R14 to R2018. One row `(handle, bytes)` for each handle asked whose record
+  is an entity and reads, in the order asked. The bytes are returned as
+  stored, and are `None` when the entity has no proxy graphic. A handle with
+  no row was not read: it is not in the drawing, it is not an entity, or its
+  record is damaged. The size check of a proxy graphic now counts bits, in
+  the walk that the entity decoders of R2000 and later share: one whose last
+  byte is only partly in the record fails there, and no longer one field
+  later. On 1,279 production drawings (R2013 and R2018) the proxy graphics
+  of all 964 MULTILEADER and all 25,110 WIPEOUT equal the bytes that an
+  independent DWG to DXF converter, used as a program only, writes for the
+  same entities.
 - MULTILEADER entities are read (R2000 to R2018; R13 and R14 are not).
   `Document` layouts return them as `MULTILEADER`, and
   `raw.decode_mleader_entities` gives the rows: the leaders with their lines
@@ -95,6 +109,9 @@
 - New public method `entities::ImageEntity::has_finite_numbers`: whether every
   number of the placement frame and of the clip boundary is finite. The
   WIPEOUT rows of the Python reader use it.
+- New public function `entities::common::read_entity_proxy_graphic` and type
+  `entities::common::ProxyGraphicLayout`: the proxy graphic of an entity
+  record, read from the start of its common entity data.
 - `writer::WriterEntity` boxes its large variants (`Spline`, `Face3d`,
   `Insert`, `Attdef`, `Attrib`, `Hatch`, `Dimension`, `Image`, `Viewport`),
   so the enum is 328 bytes instead of 568 and a document of a million lines

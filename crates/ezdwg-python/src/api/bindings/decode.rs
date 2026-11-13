@@ -1943,6 +1943,123 @@ fn parse_proxy_graphic_chunk_infos(data: &[u8]) -> Vec<(u32, u32)> {
     out
 }
 
+/// Which layout of the proxy graphic a DWG version has. `None`: not read
+/// (R13 and unknown versions: no record of them was studied).
+fn proxy_graphic_layout(
+    version: &version::DwgVersion,
+) -> Option<entities::common::ProxyGraphicLayout> {
+    use entities::common::ProxyGraphicLayout;
+    match version {
+        version::DwgVersion::R14 => Some(ProxyGraphicLayout::R14),
+        version::DwgVersion::R2000 | version::DwgVersion::R2004 | version::DwgVersion::R2007 => {
+            Some(ProxyGraphicLayout::R2000)
+        }
+        version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+            Some(ProxyGraphicLayout::R2010)
+        }
+        version::DwgVersion::R13 | version::DwgVersion::Unknown(_) => None,
+    }
+}
+
+/// The proxy graphic of the entity record of `handle`. A record that holds
+/// another handle is refused: the read is then out of step with the record.
+fn entity_proxy_graphic(
+    record: &objects::ObjectRecord<'_>,
+    version: &version::DwgVersion,
+    layout: entities::common::ProxyGraphicLayout,
+    handle: u64,
+) -> crate::core::result::Result<Option<Vec<u8>>> {
+    let mut reader = record.bit_reader();
+    skip_object_type_prefix(&mut reader, version)?;
+    let (record_handle, graphic) =
+        entities::common::read_entity_proxy_graphic(&mut reader, layout)?;
+    if record_handle != handle {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            format!("the record of handle {handle:#X} holds the handle {record_handle:#X}"),
+        ));
+    }
+    Ok(graphic)
+}
+
+/// The proxy graphic of entities, by handle: the bytes an application stored
+/// in the record so that a program without the code of the entity can still
+/// draw it. R14 to R2018; R13 is not read.
+///
+/// One row `(handle, bytes)` for each handle asked, in the order asked, whose
+/// record is an entity and reads. The bytes are `None` when the entity has no
+/// proxy graphic. They are returned as stored and are not looked into. The
+/// read stops after `limit` rows, as in `read_object_records_by_handle`.
+///
+/// A handle with no row was not read: it is not in the drawing, it is not an
+/// entity, or its record is damaged (the proxy graphic runs past the end of
+/// the record, or the record holds another handle). Best effort leaves such a
+/// handle out, so the caller counts them as the handles asked less the rows;
+/// without best effort a damaged record raises.
+///
+/// Each call builds its table of handles over all objects of the drawing, so
+/// ask the handles of one drawing in one call.
+#[pyfunction(signature = (path, handles, limit=None))]
+pub fn decode_entity_proxy_graphics(
+    py: Python<'_>,
+    path: &str,
+    handles: Vec<u64>,
+    limit: Option<usize>,
+) -> PyResult<Vec<EntityProxyGraphicRow>> {
+    if handles.is_empty() {
+        return Ok(Vec::new());
+    }
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let Some(layout) = proxy_graphic_layout(decoder.version()) else {
+        if best_effort {
+            return Ok(Vec::new());
+        }
+        return Err(to_py_err(DwgError::new(
+            ErrorKind::Unsupported,
+            "the proxy graphic of an entity is not read for this DWG version",
+        )));
+    };
+    // As `read_object_records_by_handle`: the last record of a handle counts.
+    let mut offsets: HashMap<u64, u32> = HashMap::new();
+    for obj in shared.index.objects.iter() {
+        let offset = offsets.entry(obj.handle.0).or_insert(obj.offset);
+        *offset = (*offset).max(obj.offset);
+    }
+
+    let mut result = Vec::new();
+    for handle in handles {
+        let Some(offset) = offsets.get(&handle).copied() else {
+            continue;
+        };
+        let Some((record, header)) = parse_record_and_header(&decoder, offset, best_effort)?
+        else {
+            continue;
+        };
+        let type_name = resolved_type_name(header.type_code, &shared.dynamic_types);
+        let type_class =
+            resolved_type_class(header.type_code, &type_name, &shared.dynamic_type_classes);
+        if type_class != "E" {
+            continue;
+        }
+        match entity_proxy_graphic(&record, decoder.version(), layout, handle) {
+            Ok(graphic) => result.push((
+                handle,
+                graphic.map(|bytes| pyo3::types::PyBytes::new_bound(py, &bytes).unbind()),
+            )),
+            Err(_) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        }
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_proxy_graphic_chunk_infos(
     path: &str,
@@ -5854,6 +5971,26 @@ fn read_tu_bounded(
         return Ok(None);
     }
     reader.read_tu().map(Some)
+}
+
+#[cfg(test)]
+mod proxy_graphic_layout_tests {
+    use super::{proxy_graphic_layout, version};
+    use crate::entities::common::ProxyGraphicLayout;
+
+    #[test]
+    fn each_version_has_its_layout_and_r13_has_none() {
+        use version::DwgVersion::*;
+        assert_eq!(proxy_graphic_layout(&R13), None);
+        assert_eq!(proxy_graphic_layout(&Unknown("AC1009".to_string())), None);
+        assert_eq!(proxy_graphic_layout(&R14), Some(ProxyGraphicLayout::R14));
+        for dwg_version in [R2000, R2004, R2007] {
+            assert_eq!(proxy_graphic_layout(&dwg_version), Some(ProxyGraphicLayout::R2000));
+        }
+        for dwg_version in [R2010, R2013, R2018] {
+            assert_eq!(proxy_graphic_layout(&dwg_version), Some(ProxyGraphicLayout::R2010));
+        }
+    }
 }
 
 #[cfg(test)]
