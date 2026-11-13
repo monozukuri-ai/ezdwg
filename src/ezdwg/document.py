@@ -2384,6 +2384,12 @@ def _decode_mtext_plain_text(value: str) -> str:
                 continue
         if code == "S":
             i += 2
+            # CAXA writes the height of the stacked characters behind \S
+            # (``\S\H0.7x;2^;``); it is no part of the stack.
+            if value.startswith(("\\H", "\\h"), i):
+                end = value.find(";", i)
+                if end != -1:
+                    i = end + 1
             stacked: list[str] = []
             while i < n and value[i] != ";":
                 token = value[i]

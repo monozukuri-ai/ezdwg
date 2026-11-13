@@ -96,3 +96,14 @@ def test_mtext_string_matches_paired_dxf() -> None:
         assert len(entities) == 1
         # High-level API returns normalized plain text.
         assert dxf_text in entities[0].dxf["text"] or entities[0].dxf["text"] in dxf_text
+
+
+def test_mtext_plain_text_skips_the_height_caxa_writes_in_a_stack() -> None:
+    from ezdwg.document import _decode_mtext_plain_text
+
+    # CAXA writes the height of the stacked characters behind \S.
+    assert _decode_mtext_plain_text("m\\S\\H0.7x;2^;") == "m2/"
+    assert _decode_mtext_plain_text("D\\S\\H0.7x;+0.1^-0.2;") == "D+0.1/-0.2"
+    # The AutoCAD stack is read as before.
+    assert _decode_mtext_plain_text("\\S1^2;x") == "1/2x"
+    assert _decode_mtext_plain_text("{\\H0.7x;\\S+0.1^-0.2;}A") == "+0.1/-0.2A"
