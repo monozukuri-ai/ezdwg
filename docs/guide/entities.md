@@ -343,8 +343,9 @@ Limits:
   of the first. No drawing at hand has two, so the repeat is not proven. For
   attributes nothing checks that the handle, the numbers and the text of one
   attribute belong together.
-- A block label is proven for R2013 and R2018 only. Before R2013 the layout
-  rests on one public sample drawing, which has text labels only.
+- The contributor compared block labels for R2013 and R2018 on private
+  drawings. Public block-label tests use constructed records. Before R2013
+  the drawing evidence is one public sample with text labels only.
 - A record with a break in a leader or in a leader line, with a text column
   height, or (before R2010) with an entry in the two lists at its end is not
   returned. `ezdwg inspect` counts it under `decode_gap[MULTILEADER]`.
@@ -444,7 +445,8 @@ for handle, graphic in ezdwg.raw.decode_entity_proxy_graphics("drawing.dwg", han
 ```
 
 - There is one row for each handle asked whose record is an entity and
-  reads, in the order asked. `limit` stops the read after that many rows.
+  reads, in the order asked. `limit` stops the read after that many rows;
+  `limit=0` returns no rows.
 - The bytes are returned as stored: they are the bytes a DXF file of the
   drawing carries as the proxy graphic of the entity. The function does not
   look into them.
@@ -452,9 +454,9 @@ for handle, graphic in ezdwg.raw.decode_entity_proxy_graphics("drawing.dwg", han
   entity, or its record is damaged (the proxy graphic runs past the end of
   the record, or the record holds another handle than the one asked). The
   handles asked less the rows returned is the count of those.
-- DWG versions R14 to R2018. R13 is not read, and gives no rows. R2013 and
-  R2018 are checked on production drawings, the older versions on one public
-  sample drawing only.
+- DWG versions R14 to R2018. R13 is not read, and gives no rows. Public
+  tests use one sample drawing per version; the contributor also reports
+  comparisons on private production drawings for R2013 and R2018.
 - Each call builds its table of handles over all objects of the drawing, so
   ask the handles of one drawing in one call. One proxy graphic is at most
   as large as its record; the sum of a call has no limit of its own.

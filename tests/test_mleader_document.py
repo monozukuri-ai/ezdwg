@@ -204,6 +204,7 @@ def test_raw_mleader_rows() -> None:
         FIRST_HANDLE,
         0xB1A,
     ]
+    assert raw.decode_mleader_entities(str(SAMPLES["AC1032"]), limit=0) == []
 
 
 @pytest.mark.parametrize("version", sorted(SAMPLES))

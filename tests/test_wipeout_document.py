@@ -120,6 +120,7 @@ def test_raw_wipeout_rows() -> None:
     assert (display_props, clipping, levels) == (7, True, (50, 50, 0))
     assert (clip_type, clip_mode) == (2, 0)
     assert clip_vertices == BOUNDARY
+    assert raw.decode_wipeout_entities(str(SAMPLES["AC1032"]), limit=0) == []
 
 
 def test_drawing_without_a_wipeout_gives_no_rows(tmp_path) -> None:

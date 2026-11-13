@@ -130,13 +130,10 @@ fn decode_image_with_header(
         }
         n as usize
     };
-    // A vertex is two raw doubles. A count that the rest of the record cannot
-    // hold fails here, before memory is reserved for it, with the error the
-    // reads below would end in.
-    let bytes_left = reader
-        .total_bits()
-        .saturating_sub(reader.tell_bits())
-        .div_ceil(8);
+    // A vertex is two raw doubles. Count only whole bytes from the current
+    // bit position: an incomplete final byte must not be zero-padded into a
+    // vertex. Reject the count before reserving memory.
+    let bytes_left = reader.total_bits().saturating_sub(reader.tell_bits()) / 8;
     if (count as u64).saturating_mul(CLIP_VERTEX_BYTES) > bytes_left {
         return Err(
             DwgError::new(ErrorKind::Io, "unexpected EOF").with_offset(reader.tell_bits() / 8)
@@ -336,6 +333,16 @@ mod tests {
         // A rectangle with one corner only.
         let record = record(FRAME, Clip::Rectangle(&TRIANGLE[..1]));
         let err = decode(&record).expect_err("a corner is missing");
+        assert_eq!(err.kind, ErrorKind::Io);
+        assert_eq!(err.offset, Some(record.vertices_byte));
+    }
+
+    #[test]
+    fn clip_vertex_with_only_part_of_its_last_byte_is_refused() {
+        let mut record = record(FRAME, Clip::Polygon(3, &TRIANGLE));
+        assert_ne!(record.data_end_bit % 8, 0);
+        record.bytes.pop();
+        let err = decode(&record).expect_err("the last vertex is not whole");
         assert_eq!(err.kind, ErrorKind::Io);
         assert_eq!(err.offset, Some(record.vertices_byte));
     }

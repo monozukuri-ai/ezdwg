@@ -3,71 +3,44 @@
 ## Unreleased
 
 ### DWG reader
-- ATTRIB/ATTDEF of R2007 and later: a record read at its exact layout is
-  returned when its numbers are finite. The plausibility check that guards the
-  candidate search was also applied to these records and dropped real values:
-  a symbol on its own (a degree sign), a character of a symbol font in the
-  private use area, a C1 control character, or a text height below 1e-8. The
-  exact layout keeps its own rules: no empty tag, no control character in a
-  tag, a text height above 0. The whole check still applies to the fallback
-  readers: the candidate search, and the versions before R2007. Of 1,279
-  production drawings (R2013 and R2018), 60 lost ATTRIB or ATTDEF records
-  this way (272 in all), which are read now.
+- Keep R2007+ ATTRIB/ATTDEF records read at their exact layout when their
+  numbers are finite, including lone symbols, private-use characters and
+  text heights below 1e-8. Fallback readers retain the plausibility check.
 - `raw.decode_entity_proxy_graphics(path, handles, limit=None)` returns the
   proxy graphic of entities by handle: the bytes an application stored in the
   record so that a program without the code of the entity can still draw it.
-  R14 to R2018. One row `(handle, bytes)` for each handle asked whose record
-  is an entity and reads, in the order asked. The bytes are returned as
-  stored, and are `None` when the entity has no proxy graphic. A handle with
-  no row was not read: it is not in the drawing, it is not an entity, or its
-  record is damaged. The size check of a proxy graphic now counts bits, in
-  the walk that the entity decoders of R2000 and later share: one whose last
-  byte is only partly in the record fails there, and no longer one field
-  later. On 1,279 production drawings (R2013 and R2018) the proxy graphics
-  of all 964 MULTILEADER and all 25,110 WIPEOUT equal the bytes that an
-  independent DWG to DXF converter, used as a program only, writes for the
-  same entities.
+  R14 to R2018. Rows follow the requested handle order; `None` means no
+  proxy graphic, and an omitted row means the entity was not read. Truncated
+  proxy graphics are rejected before copying their bytes.
 - MULTILEADER entities are read (R2000 to R2018; R13 and R14 are not).
   `Document` layouts return them as `MULTILEADER`, and
   `raw.decode_mleader_entities` gives the rows: the leaders with their lines
   and points, the arrowhead, the landing and dogleg values, and the label, a
-  text or a block with its attribute texts. As for WIPEOUT, `to_dxf` skips
-  the type and the style rows hold it. A record is returned only when its
-  layout ends exactly where its data, its strings and its handles end. Not
-  returned: a record with a break in a leader or leader line, with a text
-  column height or (before R2010) with an entry in the two lists at its end,
-  and in best effort one with a number that is not finite; `ezdwg inspect`
-  counts those under `decode_gap[MULTILEADER]`. More than one leader, line,
-  point or block attribute is read as a repeat that no drawing proves. Of
-  1,279 production drawings (R2013 and R2018), 236 hold a MULTILEADER (964
-  in all); all decode.
+  text or a block with its attribute texts. The decoder checks the ends of
+  all three record streams and rejects unsupported structures. See the
+  entity guide for the supported layouts and evidence limits.
 - WIPEOUT entities are read (R2000 and later; R13 and R14 are not, as for
   IMAGE). `Document` layouts return them as `WIPEOUT` with the placement
   frame and the clip boundary, which is the masked area, and
   `raw.decode_wipeout_entities` gives the rows: the fields of the IMAGE row up
-  to the clip vertices, then the clip mode. The record is the one of IMAGE
-  without an image definition. Until now these entities were not returned.
-  The writers do not know the type: `to_dxf` counts a WIPEOUT that `types` or
-  `include_unsupported=True` selects as skipped, and `strict=True` then
-  raises. Best effort drops a WIPEOUT whose frame or boundary holds a number
-  that is not finite; the `limit` of the raw function counts the rows it
-  returns. The style rows now hold each WIPEOUT, so it counts in the layer
-  color heuristic for AC1024, AC1027 and AC1032 drawings like any other
-  entity. Of 1,279 production drawings, 799 hold a WIPEOUT (25,110 in all).
+  to the clip vertices, then the clip mode.
+- WIPEOUT and MULTILEADER are read only. `to_dxf` counts explicitly selected
+  entities of these types as skipped and raises in strict mode. Style rows
+  include the new types; best effort drops entities with non-finite numbers.
+  Their raw readers and `decode_entity_proxy_graphics` return no rows for
+  `limit=0`.
 - A class-based type (IMAGE, IMAGEDEF, WIPEOUT, MULTILEADER) matches on its
   class name only. An object whose type code reads as 0 was taken for an
   IMAGE and for an IMAGEDEF.
-- IMAGE: a clip boundary whose vertex count is larger than the rest of the
-  record fails before memory is reserved for the vertices. It failed before
-  as well, after reserving up to 16 MB.
+- IMAGE: reject clip boundaries larger than the remaining record before
+  reserving memory, including a vertex with an incomplete final byte.
 - R2004: a class whose DWG or maintenance version is above 255 no longer
   costs the drawing its class names. The two fields are bit longs, as in the
   later versions, and were read as bit shorts, so the classes after such a
   class were read out of step and the drawing lost or garbled its class
-  names. In the sample drawing of the repository every class-based object was
-  `UNKNOWN(...)` and none of the entities of those classes (IMAGE, for one)
-  was returned. The same code is the fallback reader of the class section of
-  R2010, R2013 and R2018 drawings, so the change applies to them too.
+  names. This also applies to the fallback class reader for R2010 to R2018.
+  ACIS candidate diagnostics based on unresolved class names may change;
+  recognized history objects no longer appear as unknown ACIS candidates.
 - The per-entity tables that a read keeps until `clear_decode_caches()`
   (placements, colors, linetypes, lineweights, layers, thickness/extrusion/
   elevation, MTEXT write properties, insert owners) share one object per

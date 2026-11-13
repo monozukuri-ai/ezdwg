@@ -2006,7 +2006,7 @@ pub fn decode_entity_proxy_graphics(
     handles: Vec<u64>,
     limit: Option<usize>,
 ) -> PyResult<Vec<EntityProxyGraphicRow>> {
-    if handles.is_empty() {
+    if handles.is_empty() || limit == Some(0) {
         return Ok(Vec::new());
     }
     let shared = decoded_file(path)?;
@@ -4808,6 +4808,9 @@ pub fn decode_wipeout_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<WipeoutEntityRow>> {
+    if limit == Some(0) {
+        return Ok(Vec::new());
+    }
     let best_effort = decoded_file(path)?.best_effort;
     collect_kept_entity_rows(path, limit, 0, "WIPEOUT", decode_image_for_version, |e| {
         if best_effort && !e.has_finite_numbers() {
@@ -4841,6 +4844,9 @@ pub fn decode_mleader_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<MLeaderEntityRow>> {
+    if limit == Some(0) {
+        return Ok(Vec::new());
+    }
     let best_effort = decoded_file(path)?.best_effort;
     collect_kept_entity_rows(
         path,

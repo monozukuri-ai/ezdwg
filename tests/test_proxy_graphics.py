@@ -110,6 +110,7 @@ def test_limit_counts_the_rows_that_are_returned(version: str) -> None:
     assert [handle for handle, _graphic in rows] == [line, FIRST_MLEADER, line]
 
     assert raw.decode_entity_proxy_graphics(str(path), asked, limit=None) == rows
+    assert raw.decode_entity_proxy_graphics(str(path), asked, limit=0) == []
     assert raw.decode_entity_proxy_graphics(str(path), asked, limit=5) == rows
     assert raw.decode_entity_proxy_graphics(str(path), asked, limit=2) == rows[:2]
     assert raw.decode_entity_proxy_graphics(str(path), asked, 1) == rows[:1]
