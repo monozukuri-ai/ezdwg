@@ -37,6 +37,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(decode_object_handle_stream_refs, module)?)?;
     module.add_function(wrap_pyfunction!(decode_acis_candidate_infos, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_entity_proxy_graphics, module)?)?;
     module.add_function(wrap_pyfunction!(decode_proxy_graphic_chunk_infos, module)?)?;
     module.add_function(wrap_pyfunction!(
         decode_proxy_graphic_text_entities,
@@ -155,6 +156,8 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_body_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_ray_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_image_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_wipeout_entities, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_mleader_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_image_defs, module)?)?;
     module.add_function(wrap_pyfunction!(decode_xline_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_polyline_2d_with_vertices, module)?)?;

@@ -3,6 +3,44 @@
 ## Unreleased
 
 ### DWG reader
+- Keep R2007+ ATTRIB/ATTDEF records read at their exact layout when their
+  numbers are finite, including lone symbols, private-use characters and
+  text heights below 1e-8. Fallback readers retain the plausibility check.
+- `raw.decode_entity_proxy_graphics(path, handles, limit=None)` returns the
+  proxy graphic of entities by handle: the bytes an application stored in the
+  record so that a program without the code of the entity can still draw it.
+  R14 to R2018. Rows follow the requested handle order; `None` means no
+  proxy graphic, and an omitted row means the entity was not read. Truncated
+  proxy graphics are rejected before copying their bytes.
+- MULTILEADER entities are read (R2000 to R2018; R13 and R14 are not).
+  `Document` layouts return them as `MULTILEADER`, and
+  `raw.decode_mleader_entities` gives the rows: the leaders with their lines
+  and points, the arrowhead, the landing and dogleg values, and the label, a
+  text or a block with its attribute texts. The decoder checks the ends of
+  all three record streams and rejects unsupported structures. See the
+  entity guide for the supported layouts and evidence limits.
+- WIPEOUT entities are read (R2000 and later; R13 and R14 are not, as for
+  IMAGE). `Document` layouts return them as `WIPEOUT` with the placement
+  frame and the clip boundary, which is the masked area, and
+  `raw.decode_wipeout_entities` gives the rows: the fields of the IMAGE row up
+  to the clip vertices, then the clip mode.
+- WIPEOUT and MULTILEADER are read only. `to_dxf` counts explicitly selected
+  entities of these types as skipped and raises in strict mode. Style rows
+  include the new types; best effort drops entities with non-finite numbers.
+  Their raw readers and `decode_entity_proxy_graphics` return no rows for
+  `limit=0`.
+- A class-based type (IMAGE, IMAGEDEF, WIPEOUT, MULTILEADER) matches on its
+  class name only. An object whose type code reads as 0 was taken for an
+  IMAGE and for an IMAGEDEF.
+- IMAGE: reject clip boundaries larger than the remaining record before
+  reserving memory, including a vertex with an incomplete final byte.
+- R2004: a class whose DWG or maintenance version is above 255 no longer
+  costs the drawing its class names. The two fields are bit longs, as in the
+  later versions, and were read as bit shorts, so the classes after such a
+  class were read out of step and the drawing lost or garbled its class
+  names. This also applies to the fallback class reader for R2010 to R2018.
+  ACIS candidate diagnostics based on unresolved class names may change;
+  recognized history objects no longer appear as unknown ACIS candidates.
 - The per-entity tables that a read keeps until `clear_decode_caches()`
   (placements, colors, linetypes, lineweights, layers, thickness/extrusion/
   elevation, MTEXT write properties, insert owners) share one object per
@@ -45,6 +83,18 @@
   decode failure instead of an entity with empty paths.
 
 ### Rust crate distribution
+- New public module `entities::mleader`: `decode_mleader` (R2000 and R2004),
+  `decode_mleader_r2007`, `decode_mleader_r2010`, `decode_mleader_r2013`
+  (also R2018), and the types `MLeaderEntity`, `MLeaderContext`,
+  `MLeaderRoot`, `MLeaderLine`, `MLeaderText`, `MLeaderBlock`,
+  `MLeaderAttribute` and `MLeaderColor`. `MLeaderEntity::has_finite_numbers`
+  says whether every number of the record is finite.
+- New public method `entities::ImageEntity::has_finite_numbers`: whether every
+  number of the placement frame and of the clip boundary is finite. The
+  WIPEOUT rows of the Python reader use it.
+- New public function `entities::common::read_entity_proxy_graphic` and type
+  `entities::common::ProxyGraphicLayout`: the proxy graphic of an entity
+  record, read from the start of its common entity data.
 - `writer::WriterEntity` boxes its large variants (`Spline`, `Face3d`,
   `Insert`, `Attdef`, `Attrib`, `Hatch`, `Dimension`, `Image`, `Viewport`),
   so the enum is 328 bytes instead of 568 and a document of a million lines

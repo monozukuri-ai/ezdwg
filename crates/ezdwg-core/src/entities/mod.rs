@@ -17,6 +17,7 @@ pub mod line;
 pub mod long_transaction;
 pub mod lwpolyline;
 pub mod minsert;
+pub mod mleader;
 pub mod mline;
 pub mod mtext;
 pub mod oleframe;
@@ -110,6 +111,11 @@ pub use lwpolyline::{
 pub use minsert::{
     decode_minsert, decode_minsert_r14, decode_minsert_r2007, decode_minsert_r2010,
     decode_minsert_r2013, MInsertEntity,
+};
+pub use mleader::{
+    decode_mleader, decode_mleader_r2007, decode_mleader_r2010, decode_mleader_r2013,
+    MLeaderAttribute, MLeaderBlock, MLeaderColor, MLeaderContext, MLeaderEntity, MLeaderLine,
+    MLeaderRoot, MLeaderText,
 };
 pub use mline::{
     decode_mline, decode_mline_r14, decode_mline_r2007, decode_mline_r2010, decode_mline_r2013,

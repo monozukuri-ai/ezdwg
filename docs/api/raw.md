@@ -137,6 +137,14 @@ raw.read_object_records_by_handle(path: str, handles: list[int], limit: int | No
 
 Read raw object records by handle.
 
+### decode_entity_proxy_graphics
+
+```python
+raw.decode_entity_proxy_graphics(path: str, handles: list[int], limit: int | None = None) -> list[tuple[int, bytes | None]]
+```
+
+The proxy graphic of entities, by handle. Each tuple: `(handle, graphic)`; `graphic` is `None` when the entity has no proxy graphic. A handle with no tuple was not read. R14 to R2018. See [Proxy Graphic of an Entity](../guide/entities.md#proxy-graphic-of-an-entity).
+
 ### decode_object_handle_stream_refs
 
 ```python

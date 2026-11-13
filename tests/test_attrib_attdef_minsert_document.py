@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+import pytest
+
 import ezdwg
 import ezdwg.document as document_module
 
@@ -247,3 +249,73 @@ def test_query_insert_and_minsert_uses_combined_decoder(monkeypatch) -> None:
     assert calls["combined"] == 1
     assert calls["insert"] == 0
     assert calls["minsert"] == 0
+
+
+def _written_attribute_values(
+    tmp_path, version: str, text: str, height: float
+) -> dict[str, tuple[str, float]]:
+    """Text and height, by tag, of an ATTDEF and an ATTRIB written and read back."""
+    doc = ezdwg.new(version)
+    block = doc.blocks.new("B1")
+    block.add_line((0, 0, 0), (1, 0, 0))
+    block.add_attdef("DEF", text, (0, 0, 0), height, prompt="p")
+    ref = doc.modelspace().add_blockref("B1", (5, 5, 0))
+    doc.modelspace().add_attrib(ref, "TAG", text, (5, 5, 0), height)
+    # A new name for each drawing: the reader caches a file by its path, size
+    # and modification time, and two can be written in one clock tick.
+    path = tmp_path / f"attrib_{len(list(tmp_path.iterdir()))}.dwg"
+    doc.save(path)
+
+    return {
+        entity.dxf["tag"]: (entity.dxf["text"], entity.dxf["height"])
+        for entity in ezdwg.read(str(path)).entities().iter_entities()
+        if entity.dxftype in {"ATTRIB", "ATTDEF"}
+    }
+
+
+@pytest.mark.parametrize(
+    ("text", "height"),
+    [
+        ("\u00b0", 2.5),  # a symbol on its own
+        ("\ue000B", 2.5),  # a symbol font character of the private use area
+        ("A\u0085", 2.5),  # a C1 control character
+        ("T1", 1.0e-9),  # a very small text height
+    ],
+)
+def test_exact_attribute_is_kept_when_its_value_looks_like_noise(
+    tmp_path, text: str, height: float
+) -> None:
+    """A record read at its exact layout is not dropped by the candidate check."""
+    values = _written_attribute_values(tmp_path, "AC1032", text, height)
+    assert values == {"DEF": (text, height), "TAG": (text, height)}
+
+
+def test_attribute_without_an_exact_layout_still_passes_the_candidate_check(
+    tmp_path,
+) -> None:
+    """R2000 has no exact layout: its reader applies the check as before."""
+    values = _written_attribute_values(tmp_path, "AC1015", "T1", 2.5)
+    assert values == {"DEF": ("T1", 2.5), "TAG": ("T1", 2.5)}
+    # A known limit, not a wanted result: with no exact layout the check
+    # still takes a symbol on its own for noise and drops the record.
+    assert _written_attribute_values(tmp_path, "AC1015", "\u00b0", 2.5) == {}
+
+
+def test_r2018_attribute_that_the_exact_layout_refuses_goes_to_the_fallback(tmp_path) -> None:
+    """The exact layout takes no tag with a control character.
+
+    The record then goes to the candidate search, which does not find it, and
+    it is not returned. No drawing at hand makes that search return noise for
+    R2010 or later, so the check behind it is tested on R2000 only.
+    """
+    doc = ezdwg.new("AC1032")
+    block = doc.blocks.new("B1")
+    block.add_line((0, 0, 0), (1, 0, 0))
+    ref = doc.modelspace().add_blockref("B1", (5, 5, 0))
+    doc.modelspace().add_attrib(ref, "TAG", "T1", (5, 5, 0), 2.5)
+    doc.modelspace().add_attrib(ref, "BEL\x07", "T2", (5, 9, 0), 2.5)
+    path = tmp_path / "attrib.dwg"
+    doc.save(path)
+
+    tags = [entity.dxf["tag"] for entity in ezdwg.read(str(path)).entities().query("ATTRIB")]
+    assert tags == ["TAG"]

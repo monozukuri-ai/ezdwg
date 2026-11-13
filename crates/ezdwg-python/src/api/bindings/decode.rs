@@ -94,6 +94,35 @@ fn collect_entity_rows<E, R, F>(
 where
     F: FnMut(E) -> R,
 {
+    collect_kept_entity_rows(
+        path,
+        limit,
+        type_code,
+        type_name,
+        decode_for_version,
+        |entity| Some(build_row(entity)),
+    )
+}
+
+// `collect_entity_rows` for a `build_row` that can drop an entity (`None`).
+// `limit` counts the rows that are kept, so a dropped entity does not use it
+// up, and the walk stops at it.
+fn collect_kept_entity_rows<E, R, F>(
+    path: &str,
+    limit: Option<usize>,
+    type_code: u16,
+    type_name: &'static str,
+    decode_for_version: fn(
+        &mut BitReader<'_>,
+        &version::DwgVersion,
+        &ApiObjectHeader,
+        u64,
+    ) -> crate::core::result::Result<E>,
+    mut build_row: F,
+) -> PyResult<Vec<R>>
+where
+    F: FnMut(E) -> Option<R>,
+{
     let shared = decoded_file(path)?;
     let decoder = shared.decoder()?;
     let best_effort = shared.best_effort;
@@ -126,7 +155,10 @@ where
                 Err(_) if best_effort => continue,
                 Err(err) => return Err(to_py_err(err)),
             };
-        result.push(build_row(entity));
+        let Some(row) = build_row(entity) else {
+            continue;
+        };
+        result.push(row);
         if let Some(limit) = limit {
             if result.len() >= limit {
                 break;
@@ -1911,6 +1943,123 @@ fn parse_proxy_graphic_chunk_infos(data: &[u8]) -> Vec<(u32, u32)> {
     out
 }
 
+/// Which layout of the proxy graphic a DWG version has. `None`: not read
+/// (R13 and unknown versions: no record of them was studied).
+fn proxy_graphic_layout(
+    version: &version::DwgVersion,
+) -> Option<entities::common::ProxyGraphicLayout> {
+    use entities::common::ProxyGraphicLayout;
+    match version {
+        version::DwgVersion::R14 => Some(ProxyGraphicLayout::R14),
+        version::DwgVersion::R2000 | version::DwgVersion::R2004 | version::DwgVersion::R2007 => {
+            Some(ProxyGraphicLayout::R2000)
+        }
+        version::DwgVersion::R2010 | version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+            Some(ProxyGraphicLayout::R2010)
+        }
+        version::DwgVersion::R13 | version::DwgVersion::Unknown(_) => None,
+    }
+}
+
+/// The proxy graphic of the entity record of `handle`. A record that holds
+/// another handle is refused: the read is then out of step with the record.
+fn entity_proxy_graphic(
+    record: &objects::ObjectRecord<'_>,
+    version: &version::DwgVersion,
+    layout: entities::common::ProxyGraphicLayout,
+    handle: u64,
+) -> crate::core::result::Result<Option<Vec<u8>>> {
+    let mut reader = record.bit_reader();
+    skip_object_type_prefix(&mut reader, version)?;
+    let (record_handle, graphic) =
+        entities::common::read_entity_proxy_graphic(&mut reader, layout)?;
+    if record_handle != handle {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            format!("the record of handle {handle:#X} holds the handle {record_handle:#X}"),
+        ));
+    }
+    Ok(graphic)
+}
+
+/// The proxy graphic of entities, by handle: the bytes an application stored
+/// in the record so that a program without the code of the entity can still
+/// draw it. R14 to R2018; R13 is not read.
+///
+/// One row `(handle, bytes)` for each handle asked, in the order asked, whose
+/// record is an entity and reads. The bytes are `None` when the entity has no
+/// proxy graphic. They are returned as stored and are not looked into. The
+/// read stops after `limit` rows, as in `read_object_records_by_handle`.
+///
+/// A handle with no row was not read: it is not in the drawing, it is not an
+/// entity, or its record is damaged (the proxy graphic runs past the end of
+/// the record, or the record holds another handle). Best effort leaves such a
+/// handle out, so the caller counts them as the handles asked less the rows;
+/// without best effort a damaged record raises.
+///
+/// Each call builds its table of handles over all objects of the drawing, so
+/// ask the handles of one drawing in one call.
+#[pyfunction(signature = (path, handles, limit=None))]
+pub fn decode_entity_proxy_graphics(
+    py: Python<'_>,
+    path: &str,
+    handles: Vec<u64>,
+    limit: Option<usize>,
+) -> PyResult<Vec<EntityProxyGraphicRow>> {
+    if handles.is_empty() || limit == Some(0) {
+        return Ok(Vec::new());
+    }
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let Some(layout) = proxy_graphic_layout(decoder.version()) else {
+        if best_effort {
+            return Ok(Vec::new());
+        }
+        return Err(to_py_err(DwgError::new(
+            ErrorKind::Unsupported,
+            "the proxy graphic of an entity is not read for this DWG version",
+        )));
+    };
+    // As `read_object_records_by_handle`: the last record of a handle counts.
+    let mut offsets: HashMap<u64, u32> = HashMap::new();
+    for obj in shared.index.objects.iter() {
+        let offset = offsets.entry(obj.handle.0).or_insert(obj.offset);
+        *offset = (*offset).max(obj.offset);
+    }
+
+    let mut result = Vec::new();
+    for handle in handles {
+        let Some(offset) = offsets.get(&handle).copied() else {
+            continue;
+        };
+        let Some((record, header)) = parse_record_and_header(&decoder, offset, best_effort)?
+        else {
+            continue;
+        };
+        let type_name = resolved_type_name(header.type_code, &shared.dynamic_types);
+        let type_class =
+            resolved_type_class(header.type_code, &type_name, &shared.dynamic_type_classes);
+        if type_class != "E" {
+            continue;
+        }
+        match entity_proxy_graphic(&record, decoder.version(), layout, handle) {
+            Ok(graphic) => result.push((
+                handle,
+                graphic.map(|bytes| pyo3::types::PyBytes::new_bound(py, &bytes).unbind()),
+            )),
+            Err(_) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
+        }
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_proxy_graphic_chunk_infos(
     path: &str,
@@ -2490,8 +2639,39 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0, "IMAGE", dynamic_types) {
+        } else if matches_type_name(header.type_code, 0, "IMAGE", dynamic_types)
+            || matches_type_name(header.type_code, 0, "WIPEOUT", dynamic_types)
+        {
             let entity = match decode_image_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
+            let layer_handle = layer_handle_remap
+                .get(&layer_handle)
+                .copied()
+                .unwrap_or(layer_handle);
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                layer_handle,
+            ));
+        } else if matches_type_name(header.type_code, 0, "MULTILEADER", dynamic_types) {
+            let entity = match decode_mleader_for_version(
                 &mut reader,
                 decoder.version(),
                 &header,
@@ -3841,8 +4021,9 @@ pub fn decode_attrib_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
         limit,
         0x02,
         "ATTRIB",
+        false,
         |reader, version, header, object_handle| {
-            decode_attrib_for_version(reader, version, header, object_handle)
+            decode_attrib_fallback_for_version(reader, version, header, object_handle)
         },
     )
 }
@@ -3854,8 +4035,9 @@ pub fn decode_attdef_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
         limit,
         0x03,
         "ATTDEF",
+        true,
         |reader, version, header, object_handle| {
-            decode_attdef_for_version(reader, version, header, object_handle)
+            decode_attdef_fallback_for_version(reader, version, header, object_handle)
         },
     )
 }
@@ -4613,6 +4795,175 @@ pub fn decode_image_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<I
     })
 }
 
+/// WIPEOUT entities. The record is the one of IMAGE (see `entities::image`):
+/// there is no image definition, and the clip boundary is the masked area.
+/// The row is the IMAGE row without the two handles at its end, and with the
+/// clip mode (R2010 and later) in their place.
+///
+/// Best effort drops a WIPEOUT whose frame or boundary holds a number that
+/// is not finite. `limit` counts the rows that are returned, so a dropped
+/// record does not use it up.
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_wipeout_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<WipeoutEntityRow>> {
+    if limit == Some(0) {
+        return Ok(Vec::new());
+    }
+    let best_effort = decoded_file(path)?.best_effort;
+    collect_kept_entity_rows(path, limit, 0, "WIPEOUT", decode_image_for_version, |e| {
+        if best_effort && !e.has_finite_numbers() {
+            return None;
+        }
+        Some((
+            e.handle,
+            e.insert,
+            e.u_vector,
+            e.v_vector,
+            e.size,
+            e.display_props,
+            e.clipping,
+            (e.brightness, e.contrast, e.fade),
+            e.clip_type,
+            e.clip_vertices,
+            e.clip_mode,
+        ))
+    })
+}
+
+/// MULTILEADER entities: a leader whose label is a text or a block. See
+/// `entities::mleader` for the layout and for what it leaves unread. R13 and
+/// R14 are not read.
+///
+/// Best effort leaves out a record that does not decode, and drops a
+/// MULTILEADER that holds a number that is not finite. `limit` counts the
+/// rows that are returned, so a dropped record does not use it up.
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_mleader_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<MLeaderEntityRow>> {
+    if limit == Some(0) {
+        return Ok(Vec::new());
+    }
+    let best_effort = decoded_file(path)?.best_effort;
+    collect_kept_entity_rows(
+        path,
+        limit,
+        0,
+        "MULTILEADER",
+        decode_mleader_for_version,
+        |e| (!best_effort || e.has_finite_numbers()).then(|| mleader_row(e)),
+    )
+}
+
+fn mleader_row(e: entities::MLeaderEntity) -> MLeaderEntityRow {
+    let color = |c: entities::MLeaderColor| (c.index, c.rgb);
+    let context = e.context;
+    let leaders = context
+        .leaders
+        .into_iter()
+        .map(|leader| {
+            (
+                leader.has_last_point,
+                leader.has_dogleg,
+                leader.last_point,
+                leader.dogleg_vector,
+                leader.index,
+                leader.dogleg_length,
+                leader
+                    .lines
+                    .into_iter()
+                    .map(|line| (line.index, line.points))
+                    .collect(),
+                leader.attachment_direction,
+            )
+        })
+        .collect();
+    let text = context.text.map(|t| {
+        (
+            t.text,
+            t.normal,
+            t.style_handle,
+            t.location,
+            t.direction,
+            t.rotation,
+            t.width,
+            color(t.color),
+            t.attachment,
+            t.drawing_direction,
+            (
+                color(t.background_color),
+                t.background_scale,
+                t.background_on,
+            ),
+        )
+    });
+    let block = context.block.map(|b| {
+        (
+            b.block_handle,
+            b.normal,
+            b.location,
+            b.scale,
+            b.rotation,
+            color(b.color),
+            b.matrix.to_vec(),
+        )
+    });
+    (
+        e.handle,
+        e.class_version,
+        (
+            leaders,
+            (
+                context.scale,
+                context.content_base,
+                context.text_height,
+                context.arrow_size,
+                context.landing_gap,
+            ),
+            (
+                context.left_attachment,
+                context.right_attachment,
+                context.text_alignment,
+                context.attachment_type,
+            ),
+            text,
+            block,
+            (
+                context.plane_origin,
+                context.plane_x_axis,
+                context.plane_y_axis,
+                context.plane_normal_reversed,
+            ),
+        ),
+        (e.style_handle, e.override_flags, e.content_type),
+        (
+            e.leader_line_type,
+            color(e.leader_color),
+            e.leader_linetype_handle,
+            e.leader_lineweight,
+            e.landing_enabled,
+            e.dogleg_enabled,
+            e.dogleg_length,
+            e.arrow_handle,
+            e.arrow_size,
+        ),
+        (
+            e.text_style_handle,
+            e.left_attachment,
+            e.right_attachment,
+            e.text_frame,
+        ),
+        (e.block_handle, e.block_connection),
+        e.attributes
+            .into_iter()
+            .map(|a| (a.definition_handle, a.index, a.width, a.text))
+            .collect(),
+    )
+}
+
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_xline_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<XLineEntityRow>> {
     collect_entity_rows(
@@ -4825,6 +5176,17 @@ fn decode_attrib_for_version(
     {
         return Ok(entity);
     }
+    decode_attrib_fallback_for_version(reader, version, header, object_handle)
+}
+
+/// ATTRIB read without the exact layout: the candidate search of R2010 and
+/// later, and the readers of the older versions.
+fn decode_attrib_fallback_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::AttribEntity> {
     match version {
         version::DwgVersion::R2010 => decode_r2010_entity_with_start_and_end_bit_candidates_scored(
             reader,
@@ -4867,6 +5229,16 @@ fn decode_attdef_for_version(
     {
         return Ok(entity);
     }
+    decode_attdef_fallback_for_version(reader, version, header, object_handle)
+}
+
+/// ATTDEF read without the exact layout; see `decode_attrib_fallback_for_version`.
+fn decode_attdef_fallback_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::AttribEntity> {
     match version {
         version::DwgVersion::R2010 => decode_r2010_entity_with_start_and_end_bit_candidates_scored(
             reader,
@@ -5540,6 +5912,35 @@ impl_version_dispatch! {
 
 impl_version_dispatch! {
     no_r14;
+    fn decode_mleader_from_r2000 -> entities::MLeaderEntity;
+    r2010: entities::decode_mleader_r2010;
+    r2013: entities::decode_mleader_r2013;
+    r2007: entities::decode_mleader_r2007;
+    default: entities::decode_mleader;
+}
+
+/// R13 and R14 are not read: no MULTILEADER record of those versions was
+/// studied.
+fn decode_mleader_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::MLeaderEntity> {
+    if matches!(
+        version,
+        version::DwgVersion::R13 | version::DwgVersion::R14
+    ) {
+        return Err(DwgError::new(
+            ErrorKind::Unsupported,
+            "MULTILEADER is not read before R2000",
+        ));
+    }
+    decode_mleader_from_r2000(reader, version, header, object_handle)
+}
+
+impl_version_dispatch! {
+    no_r14;
     fn decode_image_for_version -> entities::ImageEntity;
     r2010: entities::decode_image_r2010;
     r2013: entities::decode_image_r2013;
@@ -5599,6 +6000,56 @@ fn read_tu_bounded(
         return Ok(None);
     }
     reader.read_tu().map(Some)
+}
+
+#[cfg(test)]
+mod proxy_graphic_layout_tests {
+    use super::{proxy_graphic_layout, version};
+    use crate::entities::common::ProxyGraphicLayout;
+
+    #[test]
+    fn each_version_has_its_layout_and_r13_has_none() {
+        use version::DwgVersion::*;
+        assert_eq!(proxy_graphic_layout(&R13), None);
+        assert_eq!(proxy_graphic_layout(&Unknown("AC1009".to_string())), None);
+        assert_eq!(proxy_graphic_layout(&R14), Some(ProxyGraphicLayout::R14));
+        for dwg_version in [R2000, R2004, R2007] {
+            assert_eq!(proxy_graphic_layout(&dwg_version), Some(ProxyGraphicLayout::R2000));
+        }
+        for dwg_version in [R2010, R2013, R2018] {
+            assert_eq!(proxy_graphic_layout(&dwg_version), Some(ProxyGraphicLayout::R2010));
+        }
+    }
+}
+
+#[cfg(test)]
+mod mleader_version_tests {
+    use super::{decode_mleader_for_version, version, ApiObjectHeader};
+    use crate::bit::BitReader;
+    use crate::core::error::ErrorKind;
+
+    #[test]
+    fn mleader_of_r13_and_r14_is_refused_whatever_the_record_holds() {
+        let header = ApiObjectHeader {
+            data_size: 0,
+            type_code: 500,
+            handle_stream_size_bits: None,
+            data_start_bit: None,
+        };
+        for dwg_version in [version::DwgVersion::R13, version::DwgVersion::R14] {
+            let mut reader = BitReader::new(&[]);
+            let error = decode_mleader_for_version(&mut reader, &dwg_version, &header, 0x50)
+                .expect_err("refused");
+            assert_eq!(error.kind, ErrorKind::Unsupported);
+            assert_eq!(error.message, "MULTILEADER is not read before R2000");
+        }
+        // A later version reads the record: here it has none.
+        let mut reader = BitReader::new(&[]);
+        let error =
+            decode_mleader_for_version(&mut reader, &version::DwgVersion::R2000, &header, 0x50)
+                .expect_err("no record");
+        assert_ne!(error.kind, ErrorKind::Unsupported);
+    }
 }
 
 #[cfg(test)]
