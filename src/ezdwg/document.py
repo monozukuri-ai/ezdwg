@@ -56,6 +56,7 @@ SUPPORTED_ENTITY_TYPES = (
     "LEADER",
     "HATCH",
     "IMAGE",
+    "WIPEOUT",
     "TOLERANCE",
     "MLINE",
     "BLOCK",
@@ -2216,6 +2217,10 @@ _SIMPLE_ENTITY_REGISTRY: dict[str, _SimpleEntitySpec] = {
         build_dxf=lambda row, defs: _image_dxf(row, defs),
         setup=lambda p: _image_defs_by_handle(p),
     ),
+    "WIPEOUT": _SimpleEntitySpec(
+        rows_fn=lambda p: raw.decode_wipeout_entities(p),
+        build_dxf=lambda row, _: _wipeout_dxf(row),
+    ),
     "XLINE": _SimpleEntitySpec(
         rows_fn=lambda p: raw.decode_xline_entities(p),
         build_dxf=lambda row, _: (row[0], {"start": row[1], "unit_vector": row[2]}),
@@ -2569,6 +2574,39 @@ def _image_dxf(row: tuple, defs: dict[int, dict[str, Any]]) -> tuple[int, dict]:
             "reactor_handle": int(reactor_handle),
             "image_def": definition.get("image_def"),
             "file_path": definition.get("file_path"),
+        },
+    )
+
+
+def _wipeout_dxf(row: tuple) -> tuple[int, dict]:
+    (
+        handle,
+        insert,
+        u_vector,
+        v_vector,
+        size,
+        display_props,
+        clipping,
+        (brightness, contrast, fade),
+        clip_type,
+        clip_vertices,
+        clip_mode,
+    ) = row
+    return (
+        handle,
+        {
+            "insert": insert,
+            "u_vector": u_vector,
+            "v_vector": v_vector,
+            "size": tuple(size),
+            "display_props": int(display_props),
+            "clipping": bool(clipping),
+            "brightness": int(brightness),
+            "contrast": int(contrast),
+            "fade": int(fade),
+            "clip_type": int(clip_type),
+            "clip_mode": None if clip_mode is None else int(clip_mode),
+            "clip_vertices": [tuple(v) for v in clip_vertices],
         },
     )
 

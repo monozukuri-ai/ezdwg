@@ -1,4 +1,7 @@
 //! IMAGE (`AcDbRasterImage`, ODA 20.4.80): a class-based raster reference.
+//!
+//! WIPEOUT (`AcDbWipeout`) stores the same record. It has no image definition;
+//! its clip boundary is the area it masks.
 use crate::bit::{BitReader, Endian};
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
@@ -30,6 +33,30 @@ pub struct ImageEntity {
     pub clip_vertices: Vec<(f64, f64)>,
     pub image_def_handle: u64,
     pub reactor_handle: u64,
+}
+
+impl ImageEntity {
+    /// Whether every number of the placement frame and of the clip boundary
+    /// is finite.
+    pub fn has_finite_numbers(&self) -> bool {
+        let (insert, u, v) = (self.insert, self.u_vector, self.v_vector);
+        [
+            insert.0,
+            insert.1,
+            insert.2,
+            u.0,
+            u.1,
+            u.2,
+            v.0,
+            v.1,
+            v.2,
+            self.size.0,
+            self.size.1,
+        ]
+        .iter()
+        .chain(self.clip_vertices.iter().flat_map(|(x, y)| [x, y]))
+        .all(|value| value.is_finite())
+    }
 }
 
 pub fn decode_image(reader: &mut BitReader<'_>) -> Result<ImageEntity> {
@@ -326,5 +353,33 @@ mod tests {
     fn empty_polygon_is_read_as_no_vertices() {
         let entity = decode(&record(FRAME, Clip::Polygon(0, &[]))).expect("decode");
         assert!(entity.clip_vertices.is_empty());
+    }
+
+    #[test]
+    fn has_finite_numbers_looks_at_the_frame_and_at_every_vertex() {
+        let finite = |frame, vertices: &[(f64, f64)]| {
+            decode(&record(
+                frame,
+                Clip::Polygon(vertices.len() as u32, vertices),
+            ))
+            .expect("decode")
+            .has_finite_numbers()
+        };
+        assert!(finite(FRAME, &TRIANGLE));
+        let mut large = FRAME;
+        large[0] = 1.0e300;
+        assert!(finite(large, &TRIANGLE));
+
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for index in 0..FRAME.len() {
+                let mut frame = FRAME;
+                frame[index] = bad;
+                assert!(!finite(frame, &TRIANGLE), "frame number {index} is {bad}");
+            }
+            for vertex in [(bad, 0.0), (0.0, bad)] {
+                let vertices = [TRIANGLE[0], TRIANGLE[1], vertex];
+                assert!(!finite(FRAME, &vertices), "last vertex is {vertex:?}");
+            }
+        }
     }
 }

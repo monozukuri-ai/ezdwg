@@ -94,6 +94,35 @@ fn collect_entity_rows<E, R, F>(
 where
     F: FnMut(E) -> R,
 {
+    collect_kept_entity_rows(
+        path,
+        limit,
+        type_code,
+        type_name,
+        decode_for_version,
+        |entity| Some(build_row(entity)),
+    )
+}
+
+// `collect_entity_rows` for a `build_row` that can drop an entity (`None`).
+// `limit` counts the rows that are kept, so a dropped entity does not use it
+// up, and the walk stops at it.
+fn collect_kept_entity_rows<E, R, F>(
+    path: &str,
+    limit: Option<usize>,
+    type_code: u16,
+    type_name: &'static str,
+    decode_for_version: fn(
+        &mut BitReader<'_>,
+        &version::DwgVersion,
+        &ApiObjectHeader,
+        u64,
+    ) -> crate::core::result::Result<E>,
+    mut build_row: F,
+) -> PyResult<Vec<R>>
+where
+    F: FnMut(E) -> Option<R>,
+{
     let shared = decoded_file(path)?;
     let decoder = shared.decoder()?;
     let best_effort = shared.best_effort;
@@ -126,7 +155,10 @@ where
                 Err(_) if best_effort => continue,
                 Err(err) => return Err(to_py_err(err)),
             };
-        result.push(build_row(entity));
+        let Some(row) = build_row(entity) else {
+            continue;
+        };
+        result.push(row);
         if let Some(limit) = limit {
             if result.len() >= limit {
                 break;
@@ -2490,7 +2522,9 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0, "IMAGE", dynamic_types) {
+        } else if matches_type_name(header.type_code, 0, "IMAGE", dynamic_types)
+            || matches_type_name(header.type_code, 0, "WIPEOUT", dynamic_types)
+        {
             let entity = match decode_image_for_version(
                 &mut reader,
                 decoder.version(),
@@ -4610,6 +4644,40 @@ pub fn decode_image_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<I
             e.image_def_handle,
             e.reactor_handle,
         )
+    })
+}
+
+/// WIPEOUT entities. The record is the one of IMAGE (see `entities::image`):
+/// there is no image definition, and the clip boundary is the masked area.
+/// The row is the IMAGE row without the two handles at its end, and with the
+/// clip mode (R2010 and later) in their place.
+///
+/// Best effort drops a WIPEOUT whose frame or boundary holds a number that
+/// is not finite. `limit` counts the rows that are returned, so a dropped
+/// record does not use it up.
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_wipeout_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<WipeoutEntityRow>> {
+    let best_effort = decoded_file(path)?.best_effort;
+    collect_kept_entity_rows(path, limit, 0, "WIPEOUT", decode_image_for_version, |e| {
+        if best_effort && !e.has_finite_numbers() {
+            return None;
+        }
+        Some((
+            e.handle,
+            e.insert,
+            e.u_vector,
+            e.v_vector,
+            e.size,
+            e.display_props,
+            e.clipping,
+            (e.brightness, e.contrast, e.fade),
+            e.clip_type,
+            e.clip_vertices,
+            e.clip_mode,
+        ))
     })
 }
 

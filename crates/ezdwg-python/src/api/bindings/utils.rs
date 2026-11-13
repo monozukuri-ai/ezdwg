@@ -1368,10 +1368,10 @@ fn matches_type_name(
     builtin_name: &str,
     dynamic_types: &HashMap<u16, String>,
 ) -> bool {
-    // A class-based type (IMAGE, IMAGEDEF) has no code of its own: its
-    // callers pass 0, and only its class name matches. An object whose type
-    // code reads as 0 matches only when the class table of the drawing itself
-    // gives the code 0 that name, which a damaged table can do.
+    // A class-based type (IMAGE, IMAGEDEF, WIPEOUT) has no code of its own:
+    // its callers pass 0, and only its class name matches. An object whose
+    // type code reads as 0 matches only when the class table of the drawing
+    // itself gives the code 0 that name, which a damaged table can do.
     if builtin_code != 0 && type_code == builtin_code {
         return true;
     }

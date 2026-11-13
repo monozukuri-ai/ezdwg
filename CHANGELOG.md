@@ -3,9 +3,22 @@
 ## Unreleased
 
 ### DWG reader
-- A class-based type (IMAGE, IMAGEDEF) matches on its class name only. An
-  object whose type code reads as 0 was taken for an IMAGE and for an
-  IMAGEDEF.
+- WIPEOUT entities are read (R2000 and later; R13 and R14 are not, as for
+  IMAGE). `Document` layouts return them as `WIPEOUT` with the placement
+  frame and the clip boundary, which is the masked area, and
+  `raw.decode_wipeout_entities` gives the rows: the fields of the IMAGE row up
+  to the clip vertices, then the clip mode. The record is the one of IMAGE
+  without an image definition. Until now these entities were not returned.
+  The writers do not know the type: `to_dxf` counts a WIPEOUT that `types` or
+  `include_unsupported=True` selects as skipped, and `strict=True` then
+  raises. Best effort drops a WIPEOUT whose frame or boundary holds a number
+  that is not finite; the `limit` of the raw function counts the rows it
+  returns. The style rows now hold each WIPEOUT, so it counts in the layer
+  color heuristic for AC1024, AC1027 and AC1032 drawings like any other
+  entity. Of 1,279 production drawings, 799 hold a WIPEOUT (25,110 in all).
+- A class-based type (IMAGE, IMAGEDEF, WIPEOUT) matches on its class name
+  only. An object whose type code reads as 0 was taken for an IMAGE and for
+  an IMAGEDEF.
 - IMAGE: a clip boundary whose vertex count is larger than the rest of the
   record fails before memory is reserved for the vertices. It failed before
   as well, after reserving up to 16 MB.
@@ -59,6 +72,9 @@
   decode failure instead of an entity with empty paths.
 
 ### Rust crate distribution
+- New public method `entities::ImageEntity::has_finite_numbers`: whether every
+  number of the placement frame and of the clip boundary is finite. The
+  WIPEOUT rows of the Python reader use it.
 - `writer::WriterEntity` boxes its large variants (`Spline`, `Face3d`,
   `Insert`, `Attdef`, `Attrib`, `Hatch`, `Dimension`, `Image`, `Viewport`),
   so the enum is 328 bytes instead of 568 and a document of a million lines
