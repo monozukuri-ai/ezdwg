@@ -219,6 +219,7 @@ pub fn decode_header_variables(path: &str) -> PyResult<HeaderVariablesRow> {
         vars.extmax,
         vars.limmin,
         vars.limmax,
+        vars.xclipframe,
     ))
 }
 
