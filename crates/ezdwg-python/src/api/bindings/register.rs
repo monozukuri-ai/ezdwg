@@ -159,6 +159,8 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_wipeout_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_mleader_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_image_defs, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_spatial_filters, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_dictionary_owners, module)?)?;
     module.add_function(wrap_pyfunction!(decode_xline_entities, module)?)?;
     module.add_function(wrap_pyfunction!(decode_polyline_2d_with_vertices, module)?)?;
     module.add_function(wrap_pyfunction!(
