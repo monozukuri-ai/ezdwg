@@ -3,12 +3,12 @@
 ## Unreleased
 
 ### DWG reader
-- R2004+: an xref or overlay BLOCK_HEADER is read without an owned object
-  count, which the format writes only for a block that is neither. Reading it
-  for every block misaligned an xref's record, so `raw.decode_write_blocks`
-  dropped the block and the R2010+ block header readers failed on it.
-  `raw.decode_write_blocks` rows also carry `xref`, `overlay` and
-  `xref_path`.
+- R2004+: the owned object count of a BLOCK_HEADER is read only for a block
+  that is neither an xref nor an overlay, the only blocks it is written for.
+  Reading it for every block misaligned an xref's record, so
+  `raw.decode_write_blocks` dropped the block and the R2010+ block header
+  readers failed on it. `raw.decode_write_blocks` rows also carry `xref`,
+  `overlay` and `xref_path`.
 - Keep R2007+ ATTRIB/ATTDEF records read at their exact layout when their
   numbers are finite, including lone symbols, private-use characters and
   text heights below 1e-8. Fallback readers retain the plausibility check.

@@ -129,7 +129,8 @@ pub fn decode_write_blocks(py: Python<'_>, path: &str) -> PyResult<Vec<PyObject>
             d.set_item("name", name)?;
             d.set_item("base_point", base)?;
             d.set_item("description", description)?;
-            // An xref's drawing lives in the file at ``xref_path``; an overlay is an xref its own xrefs leave out.
+            // An xref draws the file at ``xref_path``. An overlay is an xref that is not loaded when this
+            // drawing is itself attached as an xref.
             d.set_item("xref", xref)?;
             d.set_item("overlay", overlay)?;
             d.set_item("xref_path", xref_path)?;
