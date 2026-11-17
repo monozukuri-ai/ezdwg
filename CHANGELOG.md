@@ -3,6 +3,15 @@
 ## Unreleased
 
 ### DWG reader
+- `raw.decode_spatial_filters(path)` returns each SPATIAL_FILTER (an INSERT's
+  XCLIP boundary) as stored: its points, plane, display flag, front and back
+  clipping, both 12-real transforms, and the dictionary that owns it.
+  `raw.decode_dictionary_owners(path)` returns each DICTIONARY's owner and
+  entries (R2000 and later), the chain from a filter back to the INSERT it
+  clips.
+- `$XCLIPFRAME` is read with the header variables on R2004 and later, after
+  INSUNITS. A read that fails past INSUNITS leaves it `None` and keeps every
+  variable read before it.
 - Keep R2007+ ATTRIB/ATTDEF records read at their exact layout when their
   numbers are finite, including lone symbols, private-use characters and
   text heights below 1e-8. Fallback readers retain the plausibility check.
