@@ -6135,3 +6135,97 @@ mod read_tu_bounded_tests {
         }
     }
 }
+
+/// The boundary paths of every HATCH, before flattening: `(handle, [path])`, where a path is
+/// `("polyline", closed, vertices, bulges)` (bulges empty when none are stored) or `("edges", [edge])` with
+/// an edge `("line", start, end)`, `("arc", center, radius, start_angle, end_angle, ccw)`,
+/// `("ellipse", center, major_axis, ratio, start_angle, end_angle, ccw)` or `("spline", points)`; angles
+/// are in radians. A record that does not decode is left out.
+#[pyfunction]
+pub fn decode_hatch_boundaries(py: Python<'_>, path: &str) -> PyResult<Vec<(u64, Vec<PyObject>)>> {
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let dynamic_types = &shared.dynamic_types;
+    let mut result = Vec::new();
+    for obj in decoder
+        .matching_objects(&shared.index, true, |candidate_type| {
+            matches_type_name(candidate_type, 0x4E, "HATCH", dynamic_types)
+        })
+        .iter()
+    {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, true)? else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x4E, "HATCH", dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if skip_object_type_prefix(&mut reader, decoder.version()).is_err() {
+            continue;
+        }
+        let Ok(entity) =
+            decode_hatch_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
+        else {
+            continue;
+        };
+        let mut paths: Vec<PyObject> = Vec::with_capacity(entity.paths.len());
+        for hatch_path in &entity.paths {
+            let row = match &hatch_path.boundary {
+                entities::HatchBoundary::Polyline {
+                    closed,
+                    vertices,
+                    bulges,
+                } => ("polyline", *closed, vertices.clone(), bulges.clone()).into_py(py),
+                entities::HatchBoundary::Edges(edges) => {
+                    let mut rows: Vec<PyObject> = Vec::with_capacity(edges.len());
+                    for edge in edges {
+                        rows.push(match edge {
+                            entities::HatchEdge::Line { start, end } => {
+                                ("line", *start, *end).into_py(py)
+                            }
+                            entities::HatchEdge::Arc {
+                                center,
+                                radius,
+                                start_angle,
+                                end_angle,
+                                counter_clockwise,
+                            } => (
+                                "arc",
+                                *center,
+                                *radius,
+                                *start_angle,
+                                *end_angle,
+                                *counter_clockwise,
+                            )
+                                .into_py(py),
+                            entities::HatchEdge::Ellipse {
+                                center,
+                                major_axis,
+                                ratio,
+                                start_angle,
+                                end_angle,
+                                counter_clockwise,
+                            } => (
+                                "ellipse",
+                                *center,
+                                *major_axis,
+                                *ratio,
+                                *start_angle,
+                                *end_angle,
+                                *counter_clockwise,
+                            )
+                                .into_py(py),
+                            entities::HatchEdge::Spline { points } => {
+                                ("spline", points.clone()).into_py(py)
+                            }
+                        });
+                    }
+                    ("edges", rows).into_py(py)
+                }
+            };
+            paths.push(row);
+        }
+        result.push((entity.handle, paths));
+    }
+    Ok(result)
+}

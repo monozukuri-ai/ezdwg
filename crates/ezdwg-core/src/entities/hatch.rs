@@ -23,7 +23,51 @@ enum HatchStringMode {
 #[derive(Debug, Clone)]
 pub struct HatchPath {
     pub closed: bool,
+    /// The boundary as closed points, with arcs, ellipses and splines flattened.
     pub points: Vec<(f64, f64)>,
+    /// The boundary before flattening.
+    pub boundary: HatchBoundary,
+}
+
+/// A hatch boundary before flattening: a polyline (vertices with their bulges)
+/// or a list of edges.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HatchBoundary {
+    Polyline {
+        closed: bool,
+        vertices: Vec<(f64, f64)>,
+        /// Empty when the polyline stores no bulges.
+        bulges: Vec<f64>,
+    },
+    Edges(Vec<HatchEdge>),
+}
+
+/// One edge of an edge-defined hatch boundary. Angles are in radians.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HatchEdge {
+    Line {
+        start: (f64, f64),
+        end: (f64, f64),
+    },
+    Arc {
+        center: (f64, f64),
+        radius: f64,
+        start_angle: f64,
+        end_angle: f64,
+        counter_clockwise: bool,
+    },
+    Ellipse {
+        center: (f64, f64),
+        major_axis: (f64, f64),
+        ratio: f64,
+        start_angle: f64,
+        end_angle: f64,
+        counter_clockwise: bool,
+    },
+    /// A spline edge, by the points it is flattened to.
+    Spline {
+        points: Vec<(f64, f64)>,
+    },
 }
 
 /// One family of parallel pattern lines of a pattern-filled hatch.
@@ -495,6 +539,7 @@ fn decode_hatch_body(
         if (path_flag & 0x02) == 0 {
             let num_segments = bounded_count(reader.read_bl()?, "hatch edge path segments")?;
             let mut path_points: Vec<(f64, f64)> = Vec::new();
+            let mut edges: Vec<HatchEdge> = Vec::new();
             for _ in 0..num_segments {
                 let segment_type = reader.read_rc()?;
                 if debug {
@@ -511,6 +556,7 @@ fn decode_hatch_body(
                         require_plausible_hatch_point(end, "line edge end")?;
                         append_segment_points(&mut path_points, &[start, end]);
                         charge_hatch_points(&mut tessellated_points, 2)?;
+                        edges.push(HatchEdge::Line { start, end });
                     }
                     2 => {
                         let center = read_point2rd(reader)?;
@@ -526,6 +572,13 @@ fn decode_hatch_body(
                             circular_arc_points(center, radius, start_angle, end_angle, is_ccw, 64);
                         charge_hatch_points(&mut tessellated_points, segment.len())?;
                         append_segment_points(&mut path_points, &segment);
+                        edges.push(HatchEdge::Arc {
+                            center,
+                            radius,
+                            start_angle,
+                            end_angle,
+                            counter_clockwise: is_ccw,
+                        });
                     }
                     3 => {
                         let center = read_point2rd(reader)?;
@@ -553,11 +606,22 @@ fn decode_hatch_body(
                         );
                         charge_hatch_points(&mut tessellated_points, segment.len())?;
                         append_segment_points(&mut path_points, &segment);
+                        edges.push(HatchEdge::Ellipse {
+                            center,
+                            major_axis: major_endpoint,
+                            ratio,
+                            start_angle,
+                            end_angle,
+                            counter_clockwise: is_ccw,
+                        });
                     }
                     4 => {
                         let segment = spline_edge_points(reader, spline_fit_points, debug)?;
                         charge_hatch_points(&mut tessellated_points, segment.len())?;
                         append_segment_points(&mut path_points, &segment);
+                        edges.push(HatchEdge::Spline {
+                            points: segment.clone(),
+                        });
                     }
                     _ => {
                         return Err(DwgError::new(
@@ -572,6 +636,7 @@ fn decode_hatch_body(
             paths.push(HatchPath {
                 closed: true,
                 points: path_points,
+                boundary: HatchBoundary::Edges(edges),
             });
             continue;
         }
@@ -606,6 +671,11 @@ fn decode_hatch_body(
         }
         let _num_boundary_obj_handles = reader.read_bl()?;
 
+        let boundary = HatchBoundary::Polyline {
+            closed,
+            vertices: vertices.clone(),
+            bulges: bulges.clone(),
+        };
         let mut points = if bulges_present {
             polyline_with_bulges_points(&vertices, &bulges, closed, 64)
         } else {
@@ -619,7 +689,11 @@ fn decode_hatch_body(
         if closed {
             close_path_if_needed(&mut points);
         }
-        paths.push(HatchPath { closed, points });
+        paths.push(HatchPath {
+            closed,
+            points,
+            boundary,
+        });
     }
 
     let pattern = match read_hatch_definition_payload(reader, solid_fill, any_path_uses_pixel_size)
@@ -737,6 +811,11 @@ fn scan_hatch_polyline_paths(
             ));
         }
 
+        let boundary = HatchBoundary::Polyline {
+            closed,
+            vertices: vertices.clone(),
+            bulges: bulges.clone(),
+        };
         let mut points = if bulges_present {
             polyline_with_bulges_points(&vertices, &bulges, closed, 64)
         } else {
@@ -751,7 +830,11 @@ fn scan_hatch_polyline_paths(
                 "scanned HATCH path is too short",
             ));
         }
-        paths.push(HatchPath { closed, points });
+        paths.push(HatchPath {
+            closed,
+            points,
+            boundary,
+        });
     }
 
     Ok(paths)
@@ -1381,6 +1464,7 @@ mod tests {
             paths: vec![HatchPath {
                 closed: true,
                 points: vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
+                boundary: HatchBoundary::Edges(Vec::new()),
             }],
             pattern: None,
         };
@@ -1390,10 +1474,12 @@ mod tests {
                 HatchPath {
                     closed: true,
                     points: Vec::new(),
+                    boundary: HatchBoundary::Edges(Vec::new()),
                 },
                 HatchPath {
                     closed: true,
                     points: Vec::new(),
+                    boundary: HatchBoundary::Edges(Vec::new()),
                 },
             ],
             ..real.clone()

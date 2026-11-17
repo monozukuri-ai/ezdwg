@@ -3938,3 +3938,64 @@ mod block_header_xref_tests {
         }
     }
 }
+
+/// Where every ACAD_TABLE is placed and the block it draws:
+/// `(handle, insert, scale, rotation, extrusion, block_header_handle)`.
+///
+/// A table record begins as an INSERT does (insertion point, scale, rotation, extrusion, owned-attribute
+/// flag) and its handle stream begins with the handle of the anonymous `*T` block holding the table's
+/// lines and cell texts, so the INSERT decoder reads both; the cell data that follows is not read.
+#[pyfunction]
+pub fn decode_table_placements(
+    path: &str,
+) -> PyResult<
+    Vec<(
+        u64,
+        (f64, f64, f64),
+        (f64, f64, f64),
+        f64,
+        (f64, f64, f64),
+        Option<u64>,
+    )>,
+> {
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let dynamic_types = &shared.dynamic_types;
+    let is_table = |code: u16| {
+        dynamic_types
+            .get(&code)
+            .map(|name| name == "ACAD_TABLE")
+            .unwrap_or(false)
+    };
+    let mut rows = Vec::new();
+    for obj in decoder
+        .matching_objects(&shared.index, true, is_table)
+        .iter()
+    {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, true)? else {
+            continue;
+        };
+        if !is_table(header.type_code) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if skip_object_type_prefix(&mut reader, decoder.version()).is_err() {
+            continue;
+        }
+        let Ok(entity) =
+            decode_insert_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
+        else {
+            continue;
+        };
+        rows.push((
+            obj.handle.0,
+            entity.position,
+            entity.scale,
+            entity.rotation,
+            entity.extrusion,
+            entity.block_header_handle,
+        ));
+    }
+    Ok(rows)
+}
+
