@@ -154,6 +154,7 @@ _HEADER_VARIABLE_KEYS = (
     "extmax",
     "limmin",
     "limmax",
+    "xclipframe",
 )
 
 
@@ -341,8 +342,9 @@ class Document:
 
         Keys: ``insunits``, ``lunits``, ``luprec``, ``aunits``, ``auprec``,
         ``ltscale``, ``textsize``, ``extmin``, ``extmax``, ``limmin``,
-        ``limmax``. Values are ``None`` when the variable is absent for the
-        file version (R14 has no ``$INSUNITS``).
+        ``limmax``, ``xclipframe``. Values are ``None`` when the variable is
+        absent for the file version (R14 has no ``$INSUNITS``, R2000 no
+        ``$XCLIPFRAME``).
         """
         row = raw.decode_header_variables(self.decode_path or self.path)
         return dict(zip(_HEADER_VARIABLE_KEYS, row))

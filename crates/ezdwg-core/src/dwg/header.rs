@@ -2,7 +2,9 @@
 //!
 //! The header section is one bit-coded stream with no random access, so the
 //! variables are decoded in specification order and decoding stops right after
-//! `INSUNITS` (the last variable this module needs). Layout differences per
+//! `XCLIPFRAME` on R2004+, and right after `INSUNITS` on older versions, which
+//! have no `XCLIPFRAME`. If reading fails after `INSUNITS`, `xclipframe` is
+//! `None` and the variables already read are kept. Layout differences per
 //! version are handled as follows:
 //!
 //! - R2007+ (AC1021+): `TV` strings live in the separate string stream and
@@ -60,6 +62,8 @@ pub struct HeaderVariables {
     pub limmin: Option<(f64, f64)>,
     /// $LIMMAX model-space limits maximum.
     pub limmax: Option<(f64, f64)>,
+    /// $XCLIPFRAME whether xref clip frames show and plot (0 = neither, 1 = both, 2 = shown, not plotted); R2004+.
+    pub xclipframe: Option<u8>,
 }
 
 fn rank(version: &DwgVersion) -> Option<u8> {
@@ -419,7 +423,24 @@ fn decode_after_signature(
     }
     cursor.skip_bl(1)?; // flags (CELWEIGHT/ENDCAPS/JOINSTYLE/...)
     vars.insunits = Some(cursor.reader.read_bs()?);
+    if r2004_plus {
+        vars.xclipframe = read_xclipframe(cursor).ok();
+    }
     Ok(vars)
+}
+
+/// Reads `XCLIPFRAME`, skipping the variables between `INSUNITS` and it (R2004+).
+fn read_xclipframe(cursor: &mut HeaderCursor<'_>) -> Result<u8> {
+    let cepsntype = cursor.reader.read_bs()?; // CEPSNTYPE
+    if cepsntype == 3 {
+        cursor.skip_h()?; // CPSNID
+    }
+    cursor.skip_tv()?; // FINGERPRINTGUID
+    cursor.skip_tv()?; // VERSIONGUID
+    for _ in 0..3 {
+        cursor.reader.read_rc()?; // SORTENTS INDEXCTL HIDETEXT
+    }
+    cursor.reader.read_rc()
 }
 
 #[cfg(test)]
@@ -449,6 +470,8 @@ mod tests {
         assert_eq!(vars.lunits, Some(2));
         assert_eq!(vars.aunits, Some(0));
         assert_eq!(vars.ltscale, Some(1.0));
+        // R2000 stores no XCLIPFRAME.
+        assert_eq!(vars.xclipframe, None);
     }
 
     #[test]
@@ -456,6 +479,7 @@ mod tests {
         let vars = decode("examples/data/insert_2004.dwg");
         assert_eq!(vars.insunits, Some(0));
         assert_eq!(vars.lunits, Some(2));
+        assert_eq!(vars.xclipframe, Some(0));
     }
 
     #[test]
@@ -470,5 +494,6 @@ mod tests {
         let vars = decode("test_dwg/acadsharp/BLOCKPOINTPARAMETER.dwg");
         assert_eq!(vars.insunits, Some(1));
         assert_eq!(vars.lunits, Some(2));
+        assert_eq!(vars.xclipframe, Some(2));
     }
 }

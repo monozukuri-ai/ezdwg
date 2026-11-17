@@ -27,4 +27,5 @@ include!("bindings/block_insert.rs");
 include!("bindings/utils.rs");
 include!("bindings/embedded_text.rs");
 include!("bindings/legacy_text.rs");
+include!("bindings/spatial_filters.rs");
 include!("bindings/register.rs");

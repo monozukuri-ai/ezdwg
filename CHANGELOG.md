@@ -17,6 +17,14 @@
   `raw.decode_write_blocks` dropped the block and the R2010+ block header
   readers failed on it. `raw.decode_write_blocks` rows also carry `xref`,
   `overlay` and `xref_path`.
+- `raw.decode_spatial_filters(path)` returns each SPATIAL_FILTER, the clip
+  boundary XCLIP sets on an INSERT: its points, plane, display flag, front and
+  back clipping, both 12-real transforms, and the dictionary that owns it.
+- `raw.decode_dictionary_owners(path)` returns each DICTIONARY's owner and
+  entries (R2000 and later). Following the owners leads from a filter to the
+  INSERT it clips.
+- `$XCLIPFRAME` is read with the header variables on R2004 and later. If the
+  read fails after INSUNITS, it is `None` and the variables before it are kept.
 - Keep R2007+ ATTRIB/ATTDEF records read at their exact layout when their
   numbers are finite, including lone symbols, private-use characters and
   text heights below 1e-8. Fallback readers retain the plausibility check.

@@ -64,10 +64,24 @@ def test_units_property_maps_insunits() -> None:
 
 def test_raw_row_shape() -> None:
     row = raw.decode_header_variables(str(ROOT / "examples/data/line_2000.dwg"))
-    assert len(row) == 11
+    assert len(row) == 12
     assert row[0] == 4
 
 
 def test_missing_file_raises() -> None:
     with pytest.raises(Exception):
         raw.decode_header_variables(str(ROOT / "examples/data/no_such_file.dwg"))
+
+
+@pytest.mark.parametrize(
+    ("relative", "xclipframe"),
+    [
+        # R2000 stores no $XCLIPFRAME.
+        ("examples/data/line_2000.dwg", None),
+        ("examples/data/insert_2004.dwg", 0),
+        ("test_dwg/line_2010.dwg", 2),
+        ("test_dwg/acadsharp/BLOCKPOINTPARAMETER.dwg", 2),
+    ],
+)
+def test_xclipframe_is_read_as_the_drawing_stores_it(relative: str, xclipframe: int | None) -> None:
+    assert ezdwg.read(str(ROOT / relative)).header_variables()["xclipframe"] == xclipframe
