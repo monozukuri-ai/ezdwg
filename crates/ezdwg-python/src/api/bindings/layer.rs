@@ -313,7 +313,7 @@ fn parse_eed_payload(data: &[u8], version: &version::DwgVersion) -> Vec<EedItem>
                 if remaining < 8 {
                     break;
                 }
-                // EED stores a handle as its 8 bytes most significant first.
+                // EED handles are big-endian.
                 let v = u64::from_be_bytes(data[pos..pos + 8].try_into().unwrap());
                 pos += 8;
                 EedItem {
@@ -2038,8 +2038,8 @@ mod layer_name_tests {
     }
 }
 
-/// Reads the handle and EED at the front of one object record: `H handle; EED`, preceded by the
-/// `RL` object bit size on R2000-R2007. The reader stands after the object type.
+/// Reads the handle and EED at the start of an object record (`H handle`, then EED), after the
+/// `RL` object bit size on R2000-R2007. The reader must be positioned after the object type.
 fn read_record_handle_and_eed(
     reader: &mut BitReader<'_>,
     version: &version::DwgVersion,
@@ -2054,10 +2054,10 @@ fn read_record_handle_and_eed(
     Ok((handle, decode_eed(reader, version)?))
 }
 
-/// The EED (DXF XDATA) of every object that carries any, entity or not, as
-/// `(handle, [(app_handle, app_name, [(dxf_group_code, value)])])` in object-map order. A
-/// block whose APPID handle names no APPID record has `app_name` None. A record
-/// whose prefix cannot be read is skipped; its handle is absent from the result.
+/// The EED (DXF XDATA) of every object that has any, as
+/// `(handle, [(app_handle, app_name, [(dxf_group_code, value)])])` in object map order.
+/// `app_name` is None when the APPID handle names no APPID record. Records whose
+/// handle and EED cannot be read are skipped.
 #[pyfunction]
 pub fn decode_object_eed(
     py: Python<'_>,

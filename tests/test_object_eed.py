@@ -1,4 +1,4 @@
-"""`decode_object_eed` reads the XDATA of every object as the DXF AutoCAD saved from the same drawing holds it."""
+"""Compare `decode_object_eed` with the XDATA in the DXF that AutoCAD saved from the same drawing."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ PAIRED = sorted(path for path in (ROOT / "test_dwg").glob("*.dxf") if path.with_
 
 
 def dxf_xdata(path: Path) -> dict[tuple[int, str], list[tuple[int, object]]]:
-    """XDATA per (handle, application) as the DXF holds it, handles as integers and points as tuples."""
+    """XDATA in the DXF per (handle, application), with handles as integers and points as tuples."""
     doc = ezdxf.readfile(path)
     found = {}
     for entity in doc.entitydb.values():
@@ -63,7 +63,7 @@ def test_every_saved_xdata_block_is_read_with_its_values(dxf: Path) -> None:
 
 @pytest.mark.parametrize("version", ["AC1014", "AC1015", "AC1018", "AC1021", "AC1024", "AC1027", "AC1032"])
 def test_a_handle_value_is_an_object_of_the_file(version: str) -> None:
-    """Group 1005 holds a handle, which names an object of the same file whatever the file's version."""
+    """Group 1005 values are handles of objects in the same file, in every version."""
     sample = str(ROOT / f"test_dwg/acadsharp/sample_{version}.dwg")
     handles = {row[0] for row in _core.list_object_map_entries(sample)}
     referenced = [
