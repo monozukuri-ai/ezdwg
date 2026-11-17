@@ -3,6 +3,14 @@
 ## Unreleased
 
 ### DWG reader
+- `raw.decode_object_eed(path)` returns the extended data (DXF XDATA) of every
+  object that has any, entities and non-graphical objects alike, as
+  `(handle, [(app_handle, app_name, [(group_code, value)])])` in object map
+  order. `app_name` is `None` when the APPID handle names no APPID record.
+- EED handles (group codes 1003 and 1005) are read big-endian. They were read
+  little-endian, so `raw.decode_layer_eed` returned them byte-reversed.
+- R2010+: table record names, including APPID names, were not found. They are
+  read from the string stream, using the data end in the object header.
 - Keep R2007+ ATTRIB/ATTDEF records read at their exact layout when their
   numbers are finite, including lone symbols, private-use characters and
   text heights below 1e-8. Fallback readers retain the plausibility check.

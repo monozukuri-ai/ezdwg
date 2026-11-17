@@ -313,7 +313,8 @@ fn parse_eed_payload(data: &[u8], version: &version::DwgVersion) -> Vec<EedItem>
                 if remaining < 8 {
                     break;
                 }
-                let v = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+                // EED handles are big-endian.
+                let v = u64::from_be_bytes(data[pos..pos + 8].try_into().unwrap());
                 pos += 8;
                 EedItem {
                     code,
@@ -676,10 +677,11 @@ fn parse_table_object_name(
         let t = name.trim().to_string();
         return if t.is_empty() { None } else { Some(t) };
     }
+    // R2007 stores where the handle stream begins in the record; R2010+ give its size in the header.
     let exact_end = if matches!(version, R2007) {
         obj_size
     } else {
-        None
+        resolve_r2010_object_data_end_bit_exact(api_header)
     };
     for (mut sr, _) in locate_layer_string_stream_starts(record, api_header, version, exact_end) {
         if let Ok(n) = sr.read_tu() {
@@ -2034,4 +2036,61 @@ mod layer_name_tests {
         );
         assert!(known_score < zero_score);
     }
+}
+
+/// Reads the handle and EED at the start of an object record (`H handle`, then EED), after the
+/// `RL` object bit size on R2000-R2007. The reader must be positioned after the object type.
+fn read_record_handle_and_eed(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+) -> crate::core::result::Result<(u64, Vec<EedBlock>)> {
+    if matches!(
+        version,
+        version::DwgVersion::R2000 | version::DwgVersion::R2004 | version::DwgVersion::R2007
+    ) {
+        let _object_size_bits = reader.read_rl(Endian::Little)?;
+    }
+    let handle = reader.read_h()?.value;
+    Ok((handle, decode_eed(reader, version)?))
+}
+
+/// The EED (DXF XDATA) of every object that has any, as
+/// `(handle, [(app_handle, app_name, [(dxf_group_code, value)])])` in object map order.
+/// `app_name` is None when the APPID handle names no APPID record. Records whose
+/// handle and EED cannot be read are skipped.
+#[pyfunction]
+pub fn decode_object_eed(
+    py: Python<'_>,
+    path: &str,
+) -> PyResult<Vec<(u64, Vec<(u64, Option<String>, Vec<(u16, PyObject)>)>)>> {
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let appid_map = build_table_name_map(path, 0x43, "APPID")?;
+    let mut out = Vec::new();
+    for obj in shared.index.objects.iter() {
+        let Ok(record) = decoder.parse_object_record(obj.offset) else {
+            continue;
+        };
+        let mut reader = record.bit_reader();
+        if skip_object_type_prefix(&mut reader, decoder.version()).is_err() {
+            continue;
+        }
+        let Ok((handle, blocks)) = read_record_handle_and_eed(&mut reader, decoder.version())
+        else {
+            continue;
+        };
+        if blocks.is_empty() || handle != obj.handle.0 {
+            continue;
+        }
+        let mut rows = Vec::with_capacity(blocks.len());
+        for block in &blocks {
+            let mut items = Vec::with_capacity(block.items.len());
+            for item in &block.items {
+                items.push((1000 + u16::from(item.code), eed_value_to_py(py, &item.kind)?));
+            }
+            rows.push((block.app_handle, appid_map.get(&block.app_handle).cloned(), items));
+        }
+        out.push((handle, rows));
+    }
+    Ok(out)
 }
