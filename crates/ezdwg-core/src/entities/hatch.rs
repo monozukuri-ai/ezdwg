@@ -64,9 +64,17 @@ pub enum HatchEdge {
         end_angle: f64,
         counter_clockwise: bool,
     },
-    /// A spline edge, by the points it is flattened to.
+    /// A spline edge as stored, independently of its sampled display points.
     Spline {
-        points: Vec<(f64, f64)>,
+        degree: u32,
+        rational: bool,
+        periodic: bool,
+        knots: Vec<f64>,
+        control_points: Vec<(f64, f64)>,
+        weights: Vec<f64>,
+        fit_points: Vec<(f64, f64)>,
+        start_tangent: Option<(f64, f64)>,
+        end_tangent: Option<(f64, f64)>,
     },
 }
 
@@ -616,12 +624,10 @@ fn decode_hatch_body(
                         });
                     }
                     4 => {
-                        let segment = spline_edge_points(reader, spline_fit_points, debug)?;
+                        let (segment, edge) = read_spline_edge(reader, spline_fit_points, debug)?;
                         charge_hatch_points(&mut tessellated_points, segment.len())?;
                         append_segment_points(&mut path_points, &segment);
-                        edges.push(HatchEdge::Spline {
-                            points: segment.clone(),
-                        });
+                        edges.push(edge);
                     }
                     _ => {
                         return Err(DwgError::new(
@@ -1055,7 +1061,7 @@ fn close_path_if_needed(points: &mut Vec<(f64, f64)>) {
     }
 }
 
-/// Read a HATCH spline boundary edge and sample it as a polyline.
+/// Read a HATCH spline boundary edge, retaining its definition and sampled points.
 ///
 /// Layout (ODA spec, edge type 4): BL degree, B rational, B periodic,
 /// BL knot count, BL control point count, BD knots, 2RD control points
@@ -1068,11 +1074,11 @@ fn close_path_if_needed(points: &mut Vec<(f64, f64)>) {
 /// path. Reading 32 bytes of tangents there shifted every following field, so
 /// the tangents are consumed only when fit points exist or when the next 4
 /// doubles look like a tangent pair.
-fn spline_edge_points(
+fn read_spline_edge(
     reader: &mut BitReader<'_>,
     has_fit_points: bool,
     debug: bool,
-) -> Result<Vec<(f64, f64)>> {
+) -> Result<(Vec<(f64, f64)>, HatchEdge)> {
     let degree = bounded_count(reader.read_bl()?, "hatch spline degree")?;
     if degree > 25 {
         return Err(DwgError::new(
@@ -1081,7 +1087,7 @@ fn spline_edge_points(
         ));
     }
     let rational = reader.read_b()? != 0;
-    let _periodic = reader.read_b()? != 0;
+    let periodic = reader.read_b()? != 0;
     let num_knots = bounded_count(reader.read_bl()?, "hatch spline knots")?;
     let num_control = bounded_count(reader.read_bl()?, "hatch spline control points")?;
     if debug {
@@ -1103,6 +1109,8 @@ fn spline_edge_points(
         }
     }
     let mut fit_points = Vec::new();
+    let mut start_tangent = None;
+    let mut end_tangent = None;
     if has_fit_points {
         let num_fit = bounded_count(reader.read_bl()?, "hatch spline fit points")?;
         for _ in 0..num_fit {
@@ -1120,8 +1128,8 @@ fn spline_edge_points(
             })
         };
         if tangents_present {
-            let _start_tangent = read_point2rd(reader)?;
-            let _end_tangent = read_point2rd(reader)?;
+            start_tangent = Some(read_point2rd(reader)?);
+            end_tangent = Some(read_point2rd(reader)?);
         }
         if debug {
             eprintln!(
@@ -1130,15 +1138,32 @@ fn spline_edge_points(
             );
         }
     }
-    if control.len() >= 2 {
-        if let Some(points) = sample_bspline(&control, &weights, &knots, degree) {
-            return Ok(points);
+    let points = if control.len() >= 2 {
+        sample_bspline(&control, &weights, &knots, degree)
+    } else {
+        None
+    }
+    .unwrap_or_else(|| {
+        if fit_points.len() >= 2 {
+            fit_points.clone()
+        } else {
+            control.clone()
         }
-    }
-    if fit_points.len() >= 2 {
-        return Ok(fit_points);
-    }
-    Ok(control)
+    });
+    Ok((
+        points,
+        HatchEdge::Spline {
+            degree: degree as u32,
+            rational,
+            periodic,
+            knots,
+            control_points: control,
+            weights,
+            fit_points,
+            start_tangent,
+            end_tangent,
+        },
+    ))
 }
 
 /// Uniform parameter sampling of a (rational) B-spline with Cox-de Boor basis.
@@ -1521,8 +1546,16 @@ mod tests {
         writer.write_rd(Endian::Little, 5.0).unwrap();
         let bytes = writer.into_bytes();
         let mut reader = BitReader::new(&bytes);
-        let points = spline_edge_points(&mut reader, true, false).expect("spline edge");
+        let (points, edge) = read_spline_edge(&mut reader, true, false).expect("spline edge");
         assert_eq!(points.first().copied(), Some((0.0, 0.0)));
+        assert!(matches!(
+            edge,
+            HatchEdge::Spline {
+                start_tangent: None,
+                end_tangent: None,
+                ..
+            }
+        ));
         assert_eq!(
             reader.read_rc().unwrap(),
             1,
@@ -1542,7 +1575,15 @@ mod tests {
         writer.write_rc(2).unwrap();
         let bytes = writer.into_bytes();
         let mut reader = BitReader::new(&bytes);
-        spline_edge_points(&mut reader, true, false).expect("spline edge");
+        let (_, edge) = read_spline_edge(&mut reader, true, false).expect("spline edge");
+        assert!(matches!(
+            edge,
+            HatchEdge::Spline {
+                start_tangent: Some((1.0, 0.0)),
+                end_tangent: Some((0.0, 1.0)),
+                ..
+            }
+        ));
         assert_eq!(reader.read_rc().unwrap(), 2, "tangent pair was consumed");
     }
 
@@ -1570,7 +1611,19 @@ mod tests {
         writer.write_rc(3).unwrap();
         let bytes = writer.into_bytes();
         let mut reader = BitReader::new(&bytes);
-        spline_edge_points(&mut reader, true, false).expect("spline edge");
+        let (_, edge) = read_spline_edge(&mut reader, true, false).expect("spline edge");
+        let HatchEdge::Spline {
+            fit_points,
+            start_tangent,
+            end_tangent,
+            ..
+        } = edge
+        else {
+            panic!("spline definition");
+        };
+        assert_eq!(fit_points, vec![(5.0, 0.0)]);
+        assert_eq!(start_tangent, Some((1.0, 0.0)));
+        assert_eq!(end_tangent, Some((1.0, 0.0)));
         assert_eq!(reader.read_rc().unwrap(), 3);
     }
 }

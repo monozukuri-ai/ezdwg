@@ -64,8 +64,13 @@ def test_units_property_maps_insunits() -> None:
 
 def test_raw_row_shape() -> None:
     row = raw.decode_header_variables(str(ROOT / "examples/data/line_2000.dwg"))
-    assert len(row) == 12
+    assert len(row) == 11
     assert row[0] == 4
+    extended = raw.decode_header_variables(
+        str(ROOT / "examples/data/line_2000.dwg"), include_xclipframe=True
+    )
+    assert extended[:-1] == row
+    assert extended[-1] is None
 
 
 def test_missing_file_raises() -> None:
@@ -85,3 +90,4 @@ def test_missing_file_raises() -> None:
 )
 def test_xclipframe_is_read_as_the_drawing_stores_it(relative: str, xclipframe: int | None) -> None:
     assert ezdwg.read(str(ROOT / relative)).header_variables()["xclipframe"] == xclipframe
+    assert raw.decode_header_variables(str(ROOT / relative), include_xclipframe=True)[-1] == xclipframe

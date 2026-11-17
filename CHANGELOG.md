@@ -25,12 +25,19 @@
   INSERT it clips.
 - `$XCLIPFRAME` is read with the header variables on R2004 and later. If the
   read fails after INSUNITS, it is `None` and the variables before it are kept.
+  The raw reader preserves its eleven-element tuple by default; request
+  `include_xclipframe=True` to append the value. The high-level dictionary
+  includes it automatically.
 - `raw.decode_table_placements(path)` returns each ACAD_TABLE's insertion
   point, scale, rotation, extrusion and the `*T` block it draws. A table
   record begins as an INSERT does, so the INSERT decoder reads it.
 - `raw.decode_hatch_boundaries(path)` returns each HATCH boundary path before
   flattening: a polyline with its bulges, or a list of line, arc, ellipse and
-  spline edges. `HatchPath` keeps the flattened points.
+  spline edges. Spline definitions retain their degree, knots, control
+  points, weights, fit points and optional tangents. `HatchPath` keeps the
+  flattened points.
+- Reject truncated or non-finite SPATIAL_FILTER data before returning a
+  clipping boundary, and check point counts before allocating memory.
 - Keep R2007+ ATTRIB/ATTDEF records read at their exact layout when their
   numbers are finite, including lone symbols, private-use characters and
   text heights below 1e-8. Fallback readers retain the plausibility check.

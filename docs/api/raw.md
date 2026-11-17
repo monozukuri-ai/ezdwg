@@ -5,6 +5,82 @@ The `ezdwg.raw` module provides low-level access to the Rust decode functions. T
 !!! warning "Angle Units"
     The raw API returns ARC angles in **radians**, unlike the high-level API which uses degrees.
 
+## Object Metadata and Boundaries
+
+### decode_object_eed
+
+`raw.decode_object_eed(path)` returns XDATA for entities and non-graphical
+objects in object-map order. Each row is
+`(handle, [(app_handle, app_name, [(group_code, value)])])`. Group codes use
+the DXF range (1000 and above); handle values are integers and binary values
+are `bytes`. An unresolved application name is `None`. Unreadable records
+are omitted in best-effort mode. Public fixtures cover R14 through R2018.
+
+EED handle values (groups 1003 and 1005) are read in big-endian order. This
+also corrects the previously byte-reversed values from `decode_layer_eed`.
+
+### decode_header_variables
+
+`raw.decode_header_variables(path)` preserves its eleven-element tuple:
+`(insunits, lunits, luprec, aunits, auprec, ltscale, textsize, extmin,
+extmax, limmin, limmax)`. Pass `include_xclipframe=True` to append a twelfth
+value: `$XCLIPFRAME` (0, 1 or 2), or `None` before R2004 or when unreadable.
+`Document.header_variables()` includes the `xclipframe` key automatically.
+
+### decode_spatial_filters
+
+`raw.decode_spatial_filters(path)` returns
+`(handle, owner, points, extrusion, origin, displayed, front, back,
+inverse_block_transform, boundary_transform)` for each readable SPATIAL_FILTER.
+The owner is a dictionary handle or `None`. Points lie in the boundary plane;
+two points describe opposite corners of a rectangle. Front/back distances
+are `None` when disabled; each transform contains twelve stored reals.
+Truncated data and non-finite numbers are rejected. Public R14–R2018 samples
+cover rectangular clips without front/back distances; constructed records
+cover back-clipping distance and malformed input.
+
+### decode_dictionary_owners
+
+`raw.decode_dictionary_owners(path)` returns
+`(dictionary_handle, owner_handle, [(entry_name, value_handle)])` in
+object-map order. Owner/value handles can be `None`. R2000 and later are
+covered by public fixtures. Follow the `SPATIAL` and `ACAD_FILTER` entries
+and their dictionary owners to find the INSERT clipped by a spatial filter.
+
+### decode_table_placements
+
+`raw.decode_table_placements(path)` returns
+`(handle, insert, scale, rotation, extrusion, block_header_handle)` for
+readable ACAD_TABLE placement records. Rotation is in radians; an unresolved
+block handle is `None`. Public R14–R2018 samples reference anonymous `*T`
+blocks that draw the table. Cell data is not decoded.
+
+### decode_hatch_boundaries
+
+`raw.decode_hatch_boundaries(path)` returns `(handle, paths)` for readable
+HATCH entities. Each path is `("polyline", closed, vertices, bulges)` or
+`("edges", edges)`. Bulges are empty when absent. Edge rows are:
+
+- `("line", start, end)`
+- `("arc", center, radius, start_angle, end_angle, ccw)`
+- `("ellipse", center, major_axis, ratio, start_angle, end_angle, ccw)`
+- `("spline", degree, rational, periodic, knots, control_points, weights,
+  fit_points, start_tangent, end_tangent)`
+
+Angles are in radians; coordinates are in the HATCH plane. Optional spline
+tangents are `None` when absent. These rows retain curve definitions, while
+the existing entity/path API continues to return sampled points. Existing
+best-effort HATCH recovery still applies; this API does not certify a damaged
+record or preserve every HATCH property needed for a lossless rewrite.
+
+### decode_write_blocks
+
+Block metadata rows additionally expose `xref`, `overlay` and `xref_path`.
+External-reference metadata is read only; the bounded writer continues to
+report unsupported xref semantics through the existing `losses` field.
+The xref/overlay count-layout fix has constructed-record coverage; the public
+sample corpus contains no external-reference drawing.
+
 ## File Inspection
 
 ### detect_version

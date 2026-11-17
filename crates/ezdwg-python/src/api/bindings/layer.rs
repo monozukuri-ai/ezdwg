@@ -2086,9 +2086,16 @@ pub fn decode_object_eed(
         for block in &blocks {
             let mut items = Vec::with_capacity(block.items.len());
             for item in &block.items {
-                items.push((1000 + u16::from(item.code), eed_value_to_py(py, &item.kind)?));
+                items.push((
+                    1000 + u16::from(item.code),
+                    eed_value_to_py(py, &item.kind)?,
+                ));
             }
-            rows.push((block.app_handle, appid_map.get(&block.app_handle).cloned(), items));
+            rows.push((
+                block.app_handle,
+                appid_map.get(&block.app_handle).cloned(),
+                items,
+            ));
         }
         out.push((handle, rows));
     }

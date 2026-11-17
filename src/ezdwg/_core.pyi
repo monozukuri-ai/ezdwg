@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal, overload
 
 def detect_version(path: str) -> str: ...
 def write_ac1015_dwg(
@@ -120,7 +120,22 @@ class DwgWriter:
 def release_freed_heap() -> None: ...
 def list_section_locators(path: str) -> list[tuple[str, int, int]]: ...
 def read_section_bytes(path: str, index: int) -> bytes: ...
-def decode_header_variables(path: str) -> tuple[
+@overload
+def decode_header_variables(path: str, *, include_xclipframe: Literal[False] = ...) -> tuple[
+    int | None,
+    int | None,
+    int | None,
+    int | None,
+    int | None,
+    float | None,
+    float | None,
+    tuple[float, float, float] | None,
+    tuple[float, float, float] | None,
+    tuple[float, float] | None,
+    tuple[float, float] | None,
+]: ...
+@overload
+def decode_header_variables(path: str, *, include_xclipframe: Literal[True]) -> tuple[
     int | None,
     int | None,
     int | None,

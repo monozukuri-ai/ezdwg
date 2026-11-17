@@ -202,12 +202,17 @@ pub fn read_section_bytes(path: &str, index: usize) -> PyResult<Vec<u8>> {
     Ok(section.data.as_ref().to_vec())
 }
 
-#[pyfunction]
-pub fn decode_header_variables(path: &str) -> PyResult<HeaderVariablesRow> {
+/// Preserve the original eleven-element row unless XCLIPFRAME is requested.
+#[pyfunction(signature = (path, *, include_xclipframe=false))]
+pub fn decode_header_variables(
+    py: Python<'_>,
+    path: &str,
+    include_xclipframe: bool,
+) -> PyResult<PyObject> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let vars = decoder.header_variables().map_err(to_py_err)?;
-    Ok((
+    let row: HeaderVariablesRow = (
         vars.insunits,
         vars.lunits,
         vars.luprec,
@@ -219,8 +224,21 @@ pub fn decode_header_variables(path: &str) -> PyResult<HeaderVariablesRow> {
         vars.extmax,
         vars.limmin,
         vars.limmax,
-        vars.xclipframe,
-    ))
+    );
+    let row: PyObject = row.into_py(py);
+    if !include_xclipframe {
+        return Ok(row);
+    }
+    let mut values: Vec<PyObject> = row
+        .bind(py)
+        .downcast::<pyo3::types::PyTuple>()?
+        .iter()
+        .map(|item| item.unbind())
+        .collect();
+    values.push(vars.xclipframe.into_py(py));
+    Ok(pyo3::types::PyTuple::new_bound(py, values)
+        .into_any()
+        .unbind())
 }
 
 #[pyfunction(signature = (path, limit=None))]
@@ -6139,35 +6157,43 @@ mod read_tu_bounded_tests {
 /// The boundary paths of every HATCH, before flattening: `(handle, [path])`, where a path is
 /// `("polyline", closed, vertices, bulges)` (bulges empty when none are stored) or `("edges", [edge])` with
 /// an edge `("line", start, end)`, `("arc", center, radius, start_angle, end_angle, ccw)`,
-/// `("ellipse", center, major_axis, ratio, start_angle, end_angle, ccw)` or `("spline", points)`; angles
-/// are in radians. A record that does not decode is left out.
+/// `("ellipse", center, major_axis, ratio, start_angle, end_angle, ccw)` or a spline definition;
+/// angles are in radians. Spline rows retain degree, rational and periodic flags,
+/// knots, control points, weights, fit points and optional start/end tangents.
+/// A record that does not decode is left out in best-effort mode.
 #[pyfunction]
 pub fn decode_hatch_boundaries(py: Python<'_>, path: &str) -> PyResult<Vec<(u64, Vec<PyObject>)>> {
     let shared = decoded_file(path)?;
     let decoder = shared.decoder()?;
     let dynamic_types = &shared.dynamic_types;
+    let best_effort = shared.best_effort;
     let mut result = Vec::new();
     for obj in decoder
-        .matching_objects(&shared.index, true, |candidate_type| {
+        .matching_objects(&shared.index, best_effort, |candidate_type| {
             matches_type_name(candidate_type, 0x4E, "HATCH", dynamic_types)
         })
         .iter()
     {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, true)? else {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
             continue;
         };
         if !matches_type_name(header.type_code, 0x4E, "HATCH", dynamic_types) {
             continue;
         }
         let mut reader = record.bit_reader();
-        if skip_object_type_prefix(&mut reader, decoder.version()).is_err() {
-            continue;
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
         }
-        let Ok(entity) =
-            decode_hatch_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
-        else {
-            continue;
-        };
+        let entity =
+            match decode_hatch_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
+                Ok(entity) => entity,
+                Err(_) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
         let mut paths: Vec<PyObject> = Vec::with_capacity(entity.paths.len());
         for hatch_path in &entity.paths {
             let row = match &hatch_path.boundary {
@@ -6215,9 +6241,29 @@ pub fn decode_hatch_boundaries(py: Python<'_>, path: &str) -> PyResult<Vec<(u64,
                                 *counter_clockwise,
                             )
                                 .into_py(py),
-                            entities::HatchEdge::Spline { points } => {
-                                ("spline", points.clone()).into_py(py)
-                            }
+                            entities::HatchEdge::Spline {
+                                degree,
+                                rational,
+                                periodic,
+                                knots,
+                                control_points,
+                                weights,
+                                fit_points,
+                                start_tangent,
+                                end_tangent,
+                            } => (
+                                "spline",
+                                *degree,
+                                *rational,
+                                *periodic,
+                                knots.clone(),
+                                control_points.clone(),
+                                weights.clone(),
+                                fit_points.clone(),
+                                *start_tangent,
+                                *end_tangent,
+                            )
+                                .into_py(py),
                         });
                     }
                     ("edges", rows).into_py(py)

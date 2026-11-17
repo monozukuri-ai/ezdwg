@@ -1,15 +1,15 @@
 /// One SPATIAL_FILTER: the clip boundary XCLIP sets on an INSERT.
 type SpatialFilterRow = (
-    u64,                    // handle
-    Option<u64>,            // owner: the ACAD_FILTER dictionary of the INSERT's extension dictionary
-    Vec<(f64, f64)>,        // boundary points, in the boundary's plane; two points are a rectangle's corners
-    (f64, f64, f64),        // extrusion of the boundary's plane
-    (f64, f64, f64),        // origin of the boundary's plane
-    bool,                   // the boundary is displayed
-    Option<f64>,            // front clipping distance, when front clipping is on
-    Option<f64>,            // back clipping distance, when back clipping is on
-    Vec<f64>,               // inverse of the block transform, 12 reals
-    Vec<f64>,               // transform of the clip boundary, 12 reals
+    u64,             // handle
+    Option<u64>,     // owner: the ACAD_FILTER dictionary of the INSERT's extension dictionary
+    Vec<(f64, f64)>, // boundary points, in the boundary's plane; two points are a rectangle's corners
+    (f64, f64, f64), // extrusion of the boundary's plane
+    (f64, f64, f64), // origin of the boundary's plane
+    bool,            // the boundary is displayed
+    Option<f64>,     // front clipping distance, when front clipping is on
+    Option<f64>,     // back clipping distance, when back clipping is on
+    Vec<f64>,        // inverse of the block transform, 12 reals
+    Vec<f64>,        // transform of the clip boundary, 12 reals
 );
 
 type SpatialFilterData = (
@@ -26,8 +26,17 @@ type SpatialFilterData = (
 /// A SPATIAL_FILTER's data section after its common object data: BS point count, the points as 2RD, extrusion
 /// and origin as 3BD, BS display flag, BS front clip flag and BD distance when set, the same for back, then the
 /// inverse block transform and the boundary transform as 12 BD each.
-fn read_spatial_filter_data(r: &mut BitReader<'_>) -> crate::core::result::Result<SpatialFilterData> {
+fn read_spatial_filter_data(
+    r: &mut BitReader<'_>,
+) -> crate::core::result::Result<SpatialFilterData> {
     let count = r.read_bs()?;
+    let bits_left = r.total_bits().saturating_sub(r.tell_bits());
+    if u64::from(count) * 128 > bits_left {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            "SPATIAL_FILTER point count exceeds the record",
+        ));
+    }
     let mut points = Vec::with_capacity(count as usize);
     for _ in 0..count {
         points.push((r.read_rd(Endian::Little)?, r.read_rd(Endian::Little)?));
@@ -35,8 +44,16 @@ fn read_spatial_filter_data(r: &mut BitReader<'_>) -> crate::core::result::Resul
     let extrusion = r.read_3bd()?;
     let origin = r.read_3bd()?;
     let displayed = r.read_bs()? != 0;
-    let front = if r.read_bs()? != 0 { Some(r.read_bd()?) } else { None };
-    let back = if r.read_bs()? != 0 { Some(r.read_bd()?) } else { None };
+    let front = if r.read_bs()? != 0 {
+        Some(r.read_bd()?)
+    } else {
+        None
+    };
+    let back = if r.read_bs()? != 0 {
+        Some(r.read_bd()?)
+    } else {
+        None
+    };
     let mut inverse_block = Vec::with_capacity(12);
     for _ in 0..12 {
         inverse_block.push(r.read_bd()?);
@@ -45,7 +62,44 @@ fn read_spatial_filter_data(r: &mut BitReader<'_>) -> crate::core::result::Resul
     for _ in 0..12 {
         boundary.push(r.read_bd()?);
     }
-    Ok((points, extrusion, origin, displayed, front, back, inverse_block, boundary))
+    if r.tell_bits() > r.total_bits() {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            "SPATIAL_FILTER is truncated",
+        ));
+    }
+    let finite = points
+        .iter()
+        .flat_map(|&(x, y)| [x, y])
+        .chain([
+            extrusion.0,
+            extrusion.1,
+            extrusion.2,
+            origin.0,
+            origin.1,
+            origin.2,
+        ])
+        .chain(front)
+        .chain(back)
+        .chain(inverse_block.iter().copied())
+        .chain(boundary.iter().copied())
+        .all(f64::is_finite);
+    if !finite {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            "SPATIAL_FILTER contains non-finite values",
+        ));
+    }
+    Ok((
+        points,
+        extrusion,
+        origin,
+        displayed,
+        front,
+        back,
+        inverse_block,
+        boundary,
+    ))
 }
 
 /// Every SPATIAL_FILTER in the drawing. A record that cannot be read is skipped, or raises an error when
@@ -58,7 +112,12 @@ pub fn decode_spatial_filters(path: &str) -> PyResult<Vec<SpatialFilterRow>> {
     let dynamic = &shared.dynamic_types;
     let index = &shared.index;
     let mut rows = Vec::new();
-    for obj in &index.objects {
+    for obj in decoder
+        .matching_objects(index, best, |code| {
+            matches_type_name(code, 0, "SPATIAL_FILTER", dynamic)
+        })
+        .iter()
+    {
         let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best)? else {
             continue;
         };
@@ -70,13 +129,31 @@ pub fn decode_spatial_filters(path: &str) -> PyResult<Vec<SpatialFilterRow>> {
             skip_object_type_prefix(&mut r, decoder.version()).map_err(to_py_err)?;
             let pre = read_table_record_preamble(&mut r, decoder.version(), &header)
                 .map_err(to_py_err)?;
+            if pre.handle != obj.handle.0 {
+                return Err(PyValueError::new_err(
+                    "SPATIAL_FILTER handle does not match its object map entry",
+                ));
+            }
             let (points, extrusion, origin, displayed, front, back, inverse_block, boundary) =
                 read_spatial_filter_data(&mut r).map_err(to_py_err)?;
+            if pre
+                .data_end_bit
+                .is_some_and(|end| r.tell_bits() > u64::from(end))
+            {
+                return Err(PyValueError::new_err(
+                    "SPATIAL_FILTER data runs into its handle stream",
+                ));
+            }
             let mut owner = None;
             if let Some(end) = pre.data_end_bit {
                 r.set_bit_pos(end);
                 let reference = r.read_h().map_err(to_py_err)?;
                 owner = objects::resolve_handle_ref(&reference, obj.handle.0).map_err(to_py_err)?;
+                if r.tell_bits() > r.total_bits() {
+                    return Err(PyValueError::new_err(
+                        "SPATIAL_FILTER owner handle is truncated",
+                    ));
+                }
             }
             Ok((
                 obj.handle.0,
@@ -112,7 +189,12 @@ pub fn decode_dictionary_owners(
     let dynamic = &shared.dynamic_types;
     let index = &shared.index;
     let mut rows = Vec::new();
-    for obj in &index.objects {
+    for obj in decoder
+        .matching_objects(index, best, |code| {
+            matches_type_name(code, 0x2A, "DICTIONARY", dynamic)
+        })
+        .iter()
+    {
         let Some((_record, header)) = parse_record_and_header(&decoder, obj.offset, best)? else {
             continue;
         };
@@ -129,6 +211,11 @@ pub fn decode_dictionary_owners(
                     .map(|entry| (entry.name, entry.value_handle.map(|handle| handle.0)))
                     .collect(),
             ));
+        } else if !best {
+            return Err(PyValueError::new_err(format!(
+                "cannot decode DICTIONARY {:#X}",
+                obj.handle.0
+            )));
         }
     }
     Ok(rows)
@@ -138,6 +225,40 @@ pub fn decode_dictionary_owners(
 mod spatial_filter_tests {
     use super::*;
     use crate::bit::BitWriter;
+
+    fn spatial_filter_record(point_x: f64) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        w.write_bs(2).unwrap();
+        for value in [point_x, 60.0, 295.0, 185.0] {
+            w.write_rd(Endian::Little, value).unwrap();
+        }
+        w.write_3bd(0.0, 0.0, 1.0).unwrap();
+        w.write_3bd(0.0, 0.0, 0.0).unwrap();
+        w.write_bs(1).unwrap();
+        w.write_bs(0).unwrap();
+        w.write_bs(0).unwrap();
+        for _ in 0..23 {
+            w.write_bd(0.0).unwrap();
+        }
+        w.write_bd(7.5).unwrap();
+        w.into_bytes()
+    }
+
+    #[test]
+    fn a_spatial_filter_must_be_whole_and_finite() {
+        let data = spatial_filter_record(125.0);
+        read_spatial_filter_data(&mut BitReader::new(&data)).unwrap();
+        for length in 0..data.len() {
+            assert!(
+                read_spatial_filter_data(&mut BitReader::new(&data[..length])).is_err(),
+                "truncated at {length}"
+            );
+        }
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let data = spatial_filter_record(value);
+            assert!(read_spatial_filter_data(&mut BitReader::new(&data)).is_err());
+        }
+    }
 
     #[test]
     fn a_spatial_filter_reads_its_boundary_planes_and_matrices_to_their_end() {

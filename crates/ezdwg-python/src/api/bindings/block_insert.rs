@@ -3927,14 +3927,33 @@ mod block_header_xref_tests {
 
     #[test]
     fn an_xref_or_overlay_record_reads_to_its_end_without_an_owned_count() {
-        for (xref, overlaid, owned) in [(false, false, 5), (true, false, 0), (false, true, 0), (true, true, 0)] {
+        for (xref, overlaid, owned) in [
+            (false, false, 5),
+            (true, false, 0),
+            (false, true, 0),
+            (true, true, 0),
+        ] {
             let data = block_header(xref, overlaid, owned);
             let mut reader = BitReader::new(&data);
-            assert_eq!(parse_block_header_nonstring_data_r2010_plus(&mut reader).unwrap(), (owned, 1));
-            assert_eq!(reader.read_bl().unwrap(), 0xBEEF, "xref={xref} overlaid={overlaid}");
+            assert_eq!(
+                parse_block_header_nonstring_data_r2010_plus(&mut reader).unwrap(),
+                (owned, 1)
+            );
+            assert_eq!(
+                reader.read_bl().unwrap(),
+                0xBEEF,
+                "xref={xref} overlaid={overlaid}"
+            );
             let mut reader = BitReader::new(&data);
-            assert_eq!(try_parse_block_header_nonstring_data_r2010_plus(&mut reader), Some((owned, 1)));
-            assert_eq!(reader.read_bl().unwrap(), 0xBEEF, "xref={xref} overlaid={overlaid}");
+            assert_eq!(
+                try_parse_block_header_nonstring_data_r2010_plus(&mut reader),
+                Some((owned, 1))
+            );
+            assert_eq!(
+                reader.read_bl().unwrap(),
+                0xBEEF,
+                "xref={xref} overlaid={overlaid}"
+            );
         }
     }
 }
@@ -3961,6 +3980,7 @@ pub fn decode_table_placements(
     let shared = decoded_file(path)?;
     let decoder = shared.decoder()?;
     let dynamic_types = &shared.dynamic_types;
+    let best_effort = shared.best_effort;
     let is_table = |code: u16| {
         dynamic_types
             .get(&code)
@@ -3969,23 +3989,32 @@ pub fn decode_table_placements(
     };
     let mut rows = Vec::new();
     for obj in decoder
-        .matching_objects(&shared.index, true, is_table)
+        .matching_objects(&shared.index, best_effort, is_table)
         .iter()
     {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, true)? else {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
             continue;
         };
         if !is_table(header.type_code) {
             continue;
         }
         let mut reader = record.bit_reader();
-        if skip_object_type_prefix(&mut reader, decoder.version()).is_err() {
-            continue;
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
         }
-        let Ok(entity) =
-            decode_insert_for_version(&mut reader, decoder.version(), &header, obj.handle.0)
-        else {
-            continue;
+        let entity = match decode_insert_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+        ) {
+            Ok(entity) => entity,
+            Err(_) if best_effort => continue,
+            Err(err) => return Err(to_py_err(err)),
         };
         rows.push((
             obj.handle.0,
@@ -3998,4 +4027,3 @@ pub fn decode_table_placements(
     }
     Ok(rows)
 }
-

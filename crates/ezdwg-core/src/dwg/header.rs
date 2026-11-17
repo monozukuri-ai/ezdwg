@@ -440,12 +440,66 @@ fn read_xclipframe(cursor: &mut HeaderCursor<'_>) -> Result<u8> {
     for _ in 0..3 {
         cursor.reader.read_rc()?; // SORTENTS INDEXCTL HIDETEXT
     }
-    cursor.reader.read_rc()
+    let value = cursor.reader.read_rc()?;
+    if cursor.reader.tell_bits() > cursor.reader.total_bits() || value > 2 {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            "invalid or truncated XCLIPFRAME",
+        ));
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bit::BitWriter;
+
+    fn xclip_tail(streamed: bool, cepsntype: u16, frame: u8) -> Vec<u8> {
+        let mut writer = BitWriter::new();
+        writer.write_bs(cepsntype).unwrap();
+        if !streamed {
+            if cepsntype == 3 {
+                writer.write_h(5, 0xABCD).unwrap();
+            }
+            writer.write_tv("fingerprint").unwrap();
+            writer.write_tv("version").unwrap();
+        }
+        for byte in [1, 2, 3, frame] {
+            writer.write_rc(byte).unwrap();
+        }
+        writer.into_bytes()
+    }
+
+    #[test]
+    fn xclipframe_skips_inline_and_streamed_preceding_fields() {
+        for streamed in [false, true] {
+            for cepsntype in [0, 3] {
+                for frame in [0, 1, 2, 255] {
+                    let data = xclip_tail(streamed, cepsntype, frame);
+                    let mut cursor = HeaderCursor {
+                        reader: BitReader::new(&data),
+                        r2004_plus: true,
+                        r2007_plus: streamed,
+                    };
+                    let result = read_xclipframe(&mut cursor);
+                    if frame <= 2 {
+                        assert_eq!(result.unwrap(), frame);
+                    } else {
+                        assert!(result.is_err());
+                    }
+                    for length in 0..data.len() {
+                        let mut cursor = HeaderCursor {
+                            reader: BitReader::new(&data[..length]),
+                            r2004_plus: true,
+                            r2007_plus: streamed,
+                        };
+                        assert!(read_xclipframe(&mut cursor).is_err(), "cut at {length}");
+                    }
+                }
+            }
+        }
+    }
     use crate::core::config::ParseConfig;
     use crate::dwg::decoder::Decoder;
     use crate::dwg::file_open;

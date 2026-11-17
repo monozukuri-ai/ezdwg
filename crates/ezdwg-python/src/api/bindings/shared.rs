@@ -57,7 +57,6 @@ type HeaderVariablesRow = (
     Option<Point3>, // extmax
     Option<Point2>, // limmin
     Option<Point2>, // limmax
-    Option<u8>,     // xclipframe
 );
 type GraphEntityCommonRow = (
     u64,
