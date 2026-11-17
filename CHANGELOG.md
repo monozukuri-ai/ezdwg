@@ -3,6 +3,41 @@
 ## Unreleased
 
 ### DWG reader
+- `raw.decode_object_eed(path)` returns the extended data (DXF XDATA) of every
+  object that has any, entities and non-graphical objects alike, as
+  `(handle, [(app_handle, app_name, [(group_code, value)])])` in object map
+  order. `app_name` is `None` when the APPID handle names no APPID record.
+- EED handles (group codes 1003 and 1005) are read big-endian. They were read
+  little-endian, so `raw.decode_layer_eed` returned them byte-reversed.
+- R2010+: table record names, including APPID names, were not found. They are
+  read from the string stream, using the data end in the object header.
+- R2004+: the owned object count of a BLOCK_HEADER is read only for a block
+  that is neither an xref nor an overlay, the only blocks it is written for.
+  Reading it for every block misaligned an xref's record, so
+  `raw.decode_write_blocks` dropped the block and the R2010+ block header
+  readers failed on it. `raw.decode_write_blocks` rows also carry `xref`,
+  `overlay` and `xref_path`.
+- `raw.decode_spatial_filters(path)` returns each SPATIAL_FILTER, the clip
+  boundary XCLIP sets on an INSERT: its points, plane, display flag, front and
+  back clipping, both 12-real transforms, and the dictionary that owns it.
+- `raw.decode_dictionary_owners(path)` returns each DICTIONARY's owner and
+  entries (R2000 and later). Following the owners leads from a filter to the
+  INSERT it clips.
+- `$XCLIPFRAME` is read with the header variables on R2004 and later. If the
+  read fails after INSUNITS, it is `None` and the variables before it are kept.
+  The raw reader preserves its eleven-element tuple by default; request
+  `include_xclipframe=True` to append the value. The high-level dictionary
+  includes it automatically.
+- `raw.decode_table_placements(path)` returns each ACAD_TABLE's insertion
+  point, scale, rotation, extrusion and the `*T` block it draws. A table
+  record begins as an INSERT does, so the INSERT decoder reads it.
+- `raw.decode_hatch_boundaries(path)` returns each HATCH boundary path before
+  flattening: a polyline with its bulges, or a list of line, arc, ellipse and
+  spline edges. Spline definitions retain their degree, knots, control
+  points, weights, fit points and optional tangents. `HatchPath` keeps the
+  flattened points.
+- Reject truncated or non-finite SPATIAL_FILTER data before returning a
+  clipping boundary, and check point counts before allocating memory.
 - Keep R2007+ ATTRIB/ATTDEF records read at their exact layout when their
   numbers are finite, including lone symbols, private-use characters and
   text heights below 1e-8. Fallback readers retain the plausibility check.

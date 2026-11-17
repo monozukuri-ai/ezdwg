@@ -2,7 +2,9 @@
 //!
 //! The header section is one bit-coded stream with no random access, so the
 //! variables are decoded in specification order and decoding stops right after
-//! `INSUNITS` (the last variable this module needs). Layout differences per
+//! `XCLIPFRAME` on R2004+, and right after `INSUNITS` on older versions, which
+//! have no `XCLIPFRAME`. If reading fails after `INSUNITS`, `xclipframe` is
+//! `None` and the variables already read are kept. Layout differences per
 //! version are handled as follows:
 //!
 //! - R2007+ (AC1021+): `TV` strings live in the separate string stream and
@@ -60,6 +62,8 @@ pub struct HeaderVariables {
     pub limmin: Option<(f64, f64)>,
     /// $LIMMAX model-space limits maximum.
     pub limmax: Option<(f64, f64)>,
+    /// $XCLIPFRAME whether xref clip frames show and plot (0 = neither, 1 = both, 2 = shown, not plotted); R2004+.
+    pub xclipframe: Option<u8>,
 }
 
 fn rank(version: &DwgVersion) -> Option<u8> {
@@ -419,12 +423,83 @@ fn decode_after_signature(
     }
     cursor.skip_bl(1)?; // flags (CELWEIGHT/ENDCAPS/JOINSTYLE/...)
     vars.insunits = Some(cursor.reader.read_bs()?);
+    if r2004_plus {
+        vars.xclipframe = read_xclipframe(cursor).ok();
+    }
     Ok(vars)
+}
+
+/// Reads `XCLIPFRAME`, skipping the variables between `INSUNITS` and it (R2004+).
+fn read_xclipframe(cursor: &mut HeaderCursor<'_>) -> Result<u8> {
+    let cepsntype = cursor.reader.read_bs()?; // CEPSNTYPE
+    if cepsntype == 3 {
+        cursor.skip_h()?; // CPSNID
+    }
+    cursor.skip_tv()?; // FINGERPRINTGUID
+    cursor.skip_tv()?; // VERSIONGUID
+    for _ in 0..3 {
+        cursor.reader.read_rc()?; // SORTENTS INDEXCTL HIDETEXT
+    }
+    let value = cursor.reader.read_rc()?;
+    if cursor.reader.tell_bits() > cursor.reader.total_bits() || value > 2 {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            "invalid or truncated XCLIPFRAME",
+        ));
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bit::BitWriter;
+
+    fn xclip_tail(streamed: bool, cepsntype: u16, frame: u8) -> Vec<u8> {
+        let mut writer = BitWriter::new();
+        writer.write_bs(cepsntype).unwrap();
+        if !streamed {
+            if cepsntype == 3 {
+                writer.write_h(5, 0xABCD).unwrap();
+            }
+            writer.write_tv("fingerprint").unwrap();
+            writer.write_tv("version").unwrap();
+        }
+        for byte in [1, 2, 3, frame] {
+            writer.write_rc(byte).unwrap();
+        }
+        writer.into_bytes()
+    }
+
+    #[test]
+    fn xclipframe_skips_inline_and_streamed_preceding_fields() {
+        for streamed in [false, true] {
+            for cepsntype in [0, 3] {
+                for frame in [0, 1, 2, 255] {
+                    let data = xclip_tail(streamed, cepsntype, frame);
+                    let mut cursor = HeaderCursor {
+                        reader: BitReader::new(&data),
+                        r2004_plus: true,
+                        r2007_plus: streamed,
+                    };
+                    let result = read_xclipframe(&mut cursor);
+                    if frame <= 2 {
+                        assert_eq!(result.unwrap(), frame);
+                    } else {
+                        assert!(result.is_err());
+                    }
+                    for length in 0..data.len() {
+                        let mut cursor = HeaderCursor {
+                            reader: BitReader::new(&data[..length]),
+                            r2004_plus: true,
+                            r2007_plus: streamed,
+                        };
+                        assert!(read_xclipframe(&mut cursor).is_err(), "cut at {length}");
+                    }
+                }
+            }
+        }
+    }
     use crate::core::config::ParseConfig;
     use crate::dwg::decoder::Decoder;
     use crate::dwg::file_open;
@@ -449,6 +524,8 @@ mod tests {
         assert_eq!(vars.lunits, Some(2));
         assert_eq!(vars.aunits, Some(0));
         assert_eq!(vars.ltscale, Some(1.0));
+        // R2000 stores no XCLIPFRAME.
+        assert_eq!(vars.xclipframe, None);
     }
 
     #[test]
@@ -456,6 +533,7 @@ mod tests {
         let vars = decode("examples/data/insert_2004.dwg");
         assert_eq!(vars.insunits, Some(0));
         assert_eq!(vars.lunits, Some(2));
+        assert_eq!(vars.xclipframe, Some(0));
     }
 
     #[test]
@@ -470,5 +548,6 @@ mod tests {
         let vars = decode("test_dwg/acadsharp/BLOCKPOINTPARAMETER.dwg");
         assert_eq!(vars.insunits, Some(1));
         assert_eq!(vars.lunits, Some(2));
+        assert_eq!(vars.xclipframe, Some(2));
     }
 }
