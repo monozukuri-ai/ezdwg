@@ -66,7 +66,8 @@ pub fn decode_write_blocks(py: Python<'_>, path: &str) -> PyResult<Vec<PyObject>
             } else {
                 false
             };
-            if !r14 && !matches!(decoder.version(), DwgVersion::R2000) {
+            // R2004+ writes the owned object count only for a block that is neither an xref nor an overlay.
+            if !r14 && !matches!(decoder.version(), DwgVersion::R2000) && !xref && !overlay {
                 r.read_bl().map_err(to_py_err)?;
             }
             let base = r.read_3bd().map_err(to_py_err)?;
@@ -128,6 +129,11 @@ pub fn decode_write_blocks(py: Python<'_>, path: &str) -> PyResult<Vec<PyObject>
             d.set_item("name", name)?;
             d.set_item("base_point", base)?;
             d.set_item("description", description)?;
+            // An xref draws the file at ``xref_path``. An overlay is an xref that is not loaded when this
+            // drawing is itself attached as an xref.
+            d.set_item("xref", xref)?;
+            d.set_item("overlay", overlay)?;
+            d.set_item("xref_path", xref_path)?;
             d.set_item("losses", losses)?;
             Ok(d.into_any().unbind())
         })();

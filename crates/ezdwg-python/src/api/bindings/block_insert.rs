@@ -3732,10 +3732,15 @@ fn try_parse_block_header_nonstring_data_r2010_plus(
     let _xdep = reader.try_read_b()?;
     let _anonymous = reader.try_read_b()?;
     let _has_atts = reader.try_read_b()?;
-    let _blk_is_xref = reader.try_read_b()?;
-    let _xref_overlaid = reader.try_read_b()?;
+    let blk_is_xref = reader.try_read_b()?;
+    let xref_overlaid = reader.try_read_b()?;
     let _loaded_bit = reader.try_read_b()?;
-    let owned_obj_count = reader.try_read_bl()?;
+    // Written only for a block that is neither an xref nor an overlay.
+    let owned_obj_count = if blk_is_xref == 0 && xref_overlaid == 0 {
+        reader.try_read_bl()?
+    } else {
+        0
+    };
     let _base_x = reader.try_read_bd()?;
     let _base_y = reader.try_read_bd()?;
     let _base_z = reader.try_read_bd()?;
@@ -3763,10 +3768,15 @@ fn parse_block_header_nonstring_data_r2010_plus(
     let _xdep = reader.read_b()?;
     let _anonymous = reader.read_b()?;
     let _has_atts = reader.read_b()?;
-    let _blk_is_xref = reader.read_b()?;
-    let _xref_overlaid = reader.read_b()?;
+    let blk_is_xref = reader.read_b()?;
+    let xref_overlaid = reader.read_b()?;
     let _loaded_bit = reader.read_b()?;
-    let owned_obj_count = reader.read_bl()?;
+    // Written only for a block that is neither an xref nor an overlay.
+    let owned_obj_count = if blk_is_xref == 0 && xref_overlaid == 0 {
+        reader.read_bl()?
+    } else {
+        0
+    };
     let _base_pt = reader.read_3bd()?;
     let mut insert_count = 0usize;
     loop {
@@ -3883,4 +3893,48 @@ fn scan_block_header_name_in_string_stream(
         tried = tried.saturating_add(1);
     }
     best.map(|(_, name)| name)
+}
+#[cfg(test)]
+mod block_header_xref_tests {
+    use super::*;
+    use crate::bit::BitWriter;
+
+    /// The non-string data of an R2010+ BLOCK_HEADER, followed by a sentinel: the owned object count is written
+    /// only when the block is neither an xref nor an overlay, as AutoCAD writes the record.
+    fn block_header(xref: bool, overlaid: bool, owned: u32) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        w.write_b(0).unwrap(); // 64 flag
+        w.write_bs(0).unwrap(); // xref index + 1
+        w.write_b(0).unwrap(); // xdep
+        w.write_b(0).unwrap(); // anonymous
+        w.write_b(0).unwrap(); // has attributes
+        w.write_b(u8::from(xref)).unwrap();
+        w.write_b(u8::from(overlaid)).unwrap();
+        w.write_b(1).unwrap(); // loaded
+        if !xref && !overlaid {
+            w.write_bl(owned).unwrap();
+        }
+        w.write_3bd(1.0, 2.0, 3.0).unwrap();
+        w.write_rc(7).unwrap(); // one insert
+        w.write_rc(0).unwrap();
+        w.write_bl(0).unwrap(); // no preview
+        w.write_bs(0).unwrap(); // insert units
+        w.write_b(1).unwrap(); // explodable
+        w.write_rc(0).unwrap(); // scaling
+        w.write_bl(0xBEEF).unwrap(); // sentinel
+        w.into_bytes()
+    }
+
+    #[test]
+    fn an_xref_or_overlay_record_reads_to_its_end_without_an_owned_count() {
+        for (xref, overlaid, owned) in [(false, false, 5), (true, false, 0), (false, true, 0), (true, true, 0)] {
+            let data = block_header(xref, overlaid, owned);
+            let mut reader = BitReader::new(&data);
+            assert_eq!(parse_block_header_nonstring_data_r2010_plus(&mut reader).unwrap(), (owned, 1));
+            assert_eq!(reader.read_bl().unwrap(), 0xBEEF, "xref={xref} overlaid={overlaid}");
+            let mut reader = BitReader::new(&data);
+            assert_eq!(try_parse_block_header_nonstring_data_r2010_plus(&mut reader), Some((owned, 1)));
+            assert_eq!(reader.read_bl().unwrap(), 0xBEEF, "xref={xref} overlaid={overlaid}");
+        }
+    }
 }
