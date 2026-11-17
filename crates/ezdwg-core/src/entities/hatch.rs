@@ -23,14 +23,14 @@ enum HatchStringMode {
 #[derive(Debug, Clone)]
 pub struct HatchPath {
     pub closed: bool,
-    /// The boundary as a closed run of points, every arc, ellipse and spline flattened.
+    /// The boundary as closed points, with arcs, ellipses and splines flattened.
     pub points: Vec<(f64, f64)>,
-    /// The boundary as the record stores it.
+    /// The boundary before flattening.
     pub boundary: HatchBoundary,
 }
 
-/// A hatch boundary as stored: a polyline (vertices with their bulges) or a
-/// run of edges.
+/// A hatch boundary before flattening: a polyline (vertices with their bulges)
+/// or a list of edges.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HatchBoundary {
     Polyline {

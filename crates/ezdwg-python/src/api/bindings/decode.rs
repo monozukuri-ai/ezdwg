@@ -6135,7 +6135,7 @@ mod read_tu_bounded_tests {
     }
 }
 
-/// Every HATCH's boundary paths as the record stores them: `(handle, [path])`, where a path is
+/// The boundary paths of every HATCH, before flattening: `(handle, [path])`, where a path is
 /// `("polyline", closed, vertices, bulges)` (bulges empty when none are stored) or `("edges", [edge])` with
 /// an edge `("line", start, end)`, `("arc", center, radius, start_angle, end_angle, ccw)`,
 /// `("ellipse", center, major_axis, ratio, start_angle, end_angle, ccw)` or `("spline", points)`; angles
