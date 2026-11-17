@@ -193,6 +193,38 @@ def test_add_copies_inputs_and_failed_update_does_not_mutate():
         doc.modelspace().add_entity("POINT", {"location": (0, 0)}, handle=poly.handle)
 
 
+def test_allocated_handles_skip_the_duplicate_lookup_and_explicit_ones_keep_it(monkeypatch):
+    doc = ezdwg.new()
+    block = doc.blocks.new("PART")
+    explicit = doc.modelspace().add_entity("POINT", {"location": (0, 0)}, handle=40)
+    lookups: list[int] = []
+    find = type(doc)._find_handle
+
+    def counting(self, handle):
+        lookups.append(handle)
+        return find(self, handle)
+
+    monkeypatch.setattr(type(doc), "_find_handle", counting)
+    # allocated handles continue after the highest one and are never looked up,
+    # in model space, paper space, a block or the attributes of an INSERT
+    line = doc.modelspace().add_line((0, 0), (1, 0))
+    in_block = block.add_line((0, 0), (1, 0))
+    insert = doc.modelspace().add_entity("INSERT", {"name": "PART", "insert": (0, 0, 0)})
+    on_paper = doc.paperspace().add_line((0, 0), (1, 0))
+    assert [e.handle for e in (line, in_block, insert, on_paper)] == [41, 42, 43, 44]
+    assert lookups == []
+    # an explicit handle is still checked against every layout
+    with pytest.raises(ValueError, match="duplicate entity handle: 42"):
+        doc.modelspace().add_entity("POINT", {"location": (0, 0)}, handle=in_block.handle)
+    with pytest.raises(ValueError, match="duplicate"):
+        block.add_entity("POINT", {"location": (0, 0)}, handle=explicit.handle)
+    free = doc.modelspace().add_entity("POINT", {"location": (0, 0)}, handle=100)
+    assert lookups == [42, 40, 100]
+    # the next allocated handle is past the explicit one
+    assert doc.modelspace().add_line((0, 0), (1, 0)).handle == free.handle + 1
+    assert len({e.handle for e in doc.modelspace()} | {in_block.handle, on_paper.handle}) == 7
+
+
 @pytest.mark.parametrize("handle", [0, -1, True, 1.5, 2**64])
 def test_invalid_handles(handle):
     with pytest.raises(ValueError, match="handle"):

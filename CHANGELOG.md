@@ -142,6 +142,13 @@
   to use the local Rust core and the shared workspace version.
 
 ### Native DWG writer
+- Adding an entity to a `Drawing` no longer looks its new handle up in every
+  layout and block. A handle the drawing allocates is past every handle it has
+  held, so only a handle passed with `handle=` can collide, and only that one
+  is still checked (`duplicate entity handle`). The lookup made building a
+  drawing with many block definitions cost the number of entities times the
+  number of blocks, and such a drawing spent most of its time there. The saved
+  file is the same, byte for byte.
 - (0.18.0, extended in 0.18.1) Saving a large drawing no longer builds every
   Python-side copy of every entity at once, nor a Rust document of every
   entity. `to_dwg` /

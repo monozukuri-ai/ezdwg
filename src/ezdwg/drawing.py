@@ -709,7 +709,8 @@ class EditableLayout:
             raise ValueError("ATTRIB must be attached with add_attrib to an INSERT")
         if kind == "VIEWPORT" and not self._paper:
             raise ValueError("VIEWPORT requires paper space: use Drawing.paperspace()")
-        if handle is None:
+        allocated = handle is None
+        if allocated:
             handle = self.doc._next_handle
         if (
             isinstance(handle, bool)
@@ -717,7 +718,11 @@ class EditableLayout:
             or not 0 < handle < 2**64
         ):
             raise ValueError("handle must be a positive 64-bit integer")
-        if self.doc._find_handle(handle) is not None:
+        # An allocated handle is past every handle the drawing has held, so only
+        # an explicit one can collide. Looking it up walks every layout and
+        # block, which made adding N entities to a drawing with B blocks cost
+        # N × B.
+        if not allocated and self.doc._find_handle(handle) is not None:
             raise ValueError(f"duplicate entity handle: {handle}")
         data = {
             "layer": "0",
