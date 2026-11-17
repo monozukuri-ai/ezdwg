@@ -2,10 +2,10 @@
 //!
 //! The header section is one bit-coded stream with no random access, so the
 //! variables are decoded in specification order and decoding stops right after
-//! `XCLIPFRAME` (R2004+; `INSUNITS` before R2004, which store no `XCLIPFRAME`).
-//! A failure past `INSUNITS` leaves `xclipframe` `None` and keeps every
-//! variable read before it. Layout differences per version are handled as
-//! follows:
+//! `XCLIPFRAME` on R2004+, and right after `INSUNITS` on older versions, which
+//! have no `XCLIPFRAME`. If reading fails after `INSUNITS`, `xclipframe` is
+//! `None` and the variables already read are kept. Layout differences per
+//! version are handled as follows:
 //!
 //! - R2007+ (AC1021+): `TV` strings live in the separate string stream and
 //!   `H` handles live in the separate handle stream, so neither consumes bits
@@ -429,7 +429,7 @@ fn decode_after_signature(
     Ok(vars)
 }
 
-/// `XCLIPFRAME`, the variables after `INSUNITS` read up to it (R2004+).
+/// Reads `XCLIPFRAME`, skipping the variables between `INSUNITS` and it (R2004+).
 fn read_xclipframe(cursor: &mut HeaderCursor<'_>) -> Result<u8> {
     let cepsntype = cursor.reader.read_bs()?; // CEPSNTYPE
     if cepsntype == 3 {

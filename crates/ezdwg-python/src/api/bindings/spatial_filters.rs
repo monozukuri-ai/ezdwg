@@ -1,4 +1,4 @@
-/// One SPATIAL_FILTER: an INSERT's clip boundary as XCLIP stores it.
+/// One SPATIAL_FILTER: the clip boundary XCLIP sets on an INSERT.
 type SpatialFilterRow = (
     u64,                    // handle
     Option<u64>,            // owner: the ACAD_FILTER dictionary of the INSERT's extension dictionary
@@ -8,8 +8,8 @@ type SpatialFilterRow = (
     bool,                   // the boundary is displayed
     Option<f64>,            // front clipping distance, when front clipping is on
     Option<f64>,            // back clipping distance, when back clipping is on
-    Vec<f64>,               // inverse of the block transform, 12 reals as stored
-    Vec<f64>,               // transform of the clip boundary, 12 reals as stored
+    Vec<f64>,               // inverse of the block transform, 12 reals
+    Vec<f64>,               // transform of the clip boundary, 12 reals
 );
 
 type SpatialFilterData = (
@@ -48,7 +48,7 @@ fn read_spatial_filter_data(r: &mut BitReader<'_>) -> crate::core::result::Resul
     Ok((points, extrusion, origin, displayed, front, back, inverse_block, boundary))
 }
 
-/// Every SPATIAL_FILTER of the drawing, read as stored; a record that cannot be read is left out unless
+/// Every SPATIAL_FILTER in the drawing. A record that cannot be read is skipped, or raises an error when
 /// best-effort decoding is off.
 #[pyfunction]
 pub fn decode_spatial_filters(path: &str) -> PyResult<Vec<SpatialFilterRow>> {
@@ -100,8 +100,8 @@ pub fn decode_spatial_filters(path: &str) -> PyResult<Vec<SpatialFilterRow>> {
     Ok(rows)
 }
 
-/// Each DICTIONARY's handle with its owner's handle, and its entries as (name, handle): the chain from an
-/// object an extension dictionary holds back to the entity it extends.
+/// Each DICTIONARY's handle, its owner's handle and its entries as (name, handle). Following the owners
+/// leads from an object in an extension dictionary to the entity that dictionary belongs to.
 #[pyfunction]
 pub fn decode_dictionary_owners(
     path: &str,
