@@ -83,7 +83,8 @@ pub use face3d::{
 };
 pub use hatch::{
     decode_hatch, decode_hatch_r14, decode_hatch_r2004, decode_hatch_r2007, decode_hatch_r2010,
-    decode_hatch_r2013, HatchEntity, HatchPath, HatchPattern, HatchPatternLine,
+    decode_hatch_r2013, HatchBoundary, HatchEdge, HatchEntity, HatchPath, HatchPattern,
+    HatchPatternLine,
 };
 pub use image::{
     decode_image, decode_image_r2007, decode_image_r2010, decode_image_r2013, ImageEntity,
