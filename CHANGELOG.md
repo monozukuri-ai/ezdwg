@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### DWG reader
+- The R2004 section map reader (AC1018, AC1024, AC1027, and AC1032) checks
+  section and page counts before allocating memory. A malformed count now
+  returns a format error. The page and section maps also honor the configured
+  section size limit during decompression. Thanks to Jinquan for reporting
+  the allocation issue.
 - Coordinates beyond 1e8 are read: a drawing in a national grid drawn in
   millimetres is up to 1.5e8 from the origin. A `LINE` that far out was taken
   for a record decoded at a wrong offset and the bytes read without the object
