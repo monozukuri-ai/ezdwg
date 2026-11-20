@@ -3,6 +3,15 @@
 ## Unreleased
 
 ### DWG reader
+- Coordinates beyond 1e8 are read: a drawing in a national grid drawn in
+  millimetres is up to 1.5e8 from the origin. A `LINE` that far out was taken
+  for a record decoded at a wrong offset and the bytes read without the object
+  type were used instead, so every line of such a drawing came out with
+  coordinates like `(1.0, 0.0)` or `1e-168`; a `HATCH` with a boundary point
+  that far out was refused, so its fills were missing. The limit is now 1e12
+  for both, and a `LINE` with a denormal coordinate (below 1e-100) is no longer
+  accepted as plausible. The writer was not affected: the files it wrote hold
+  the right coordinates (the ODA File Converter reads them back).
 - `raw.decode_object_eed(path)` returns the extended data (DXF XDATA) of every
   object that has any, entities and non-graphical objects alike, as
   `(handle, [(app_handle, app_name, [(group_code, value)])])` in object map

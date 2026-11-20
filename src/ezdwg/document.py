@@ -3997,6 +3997,11 @@ def _line_arc_circle_rows(
     )
 
 
+# A drawing in a national grid drawn in millimetres reaches 1.5e8; a line that
+# far out is a real one, not a row decoded at a wrong offset.
+_LINE_COORDINATE_LIMIT = 1.0e12
+
+
 def _has_implausible_line_rows(
     line_rows: list[tuple[int, float, float, float, float, float, float]],
 ) -> bool:
@@ -4007,7 +4012,7 @@ def _has_implausible_line_rows(
         values = (sx, sy, sz, ex, ey, ez)
         if any(not math.isfinite(value) for value in values):
             return True
-        if max(abs(value) for value in values) > 1.0e8:
+        if max(abs(value) for value in values) > _LINE_COORDINATE_LIMIT:
             return True
     return False
 

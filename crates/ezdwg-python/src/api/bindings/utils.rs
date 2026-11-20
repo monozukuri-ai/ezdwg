@@ -119,6 +119,19 @@ fn acis_unknown_role_hint_from_type_code(type_code: u16, data_size: u32) -> &'st
     }
 }
 
+/// Largest coordinate a decoded LINE is taken at its word for.
+///
+/// Drawings in a national grid drawn in millimetres reach 1.5e8 (150 km from
+/// the origin of the zone), so the limit is well above that. Bytes read at a
+/// wrong bit offset come out with an arbitrary exponent, mostly far outside
+/// this range.
+const LINE_COORDINATE_LIMIT: f64 = 1.0e12;
+
+/// Smallest non-zero coordinate a decoded LINE is taken at its word for:
+/// rounding noise around zero is near 1e-16 times the size of the drawing,
+/// while bytes read at a wrong bit offset often come out as denormals.
+const LINE_COORDINATE_FLOOR: f64 = 1.0e-100;
+
 fn is_plausible_line_entity_candidate(entity: &entities::LineEntity) -> bool {
     let values = [
         entity.start.0,
@@ -128,16 +141,11 @@ fn is_plausible_line_entity_candidate(entity: &entities::LineEntity) -> bool {
         entity.end.1,
         entity.end.2,
     ];
-    if values.iter().any(|value| !value.is_finite()) {
-        return false;
-    }
-    let max_abs = values
-        .iter()
-        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
-    if max_abs > 1.0e8 {
-        return false;
-    }
-    true
+    values.iter().all(|value| {
+        value.is_finite()
+            && value.abs() <= LINE_COORDINATE_LIMIT
+            && (*value == 0.0 || value.abs() >= LINE_COORDINATE_FLOOR)
+    })
 }
 
 fn decode_attrib_like_entities_by_type<F>(
@@ -1487,11 +1495,11 @@ fn is_known_entity_type_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_plausible_attrib_entity, keeps_attrib_entity, matches_type_name,
-        resolve_r2010_string_stream_ranges,
+        is_plausible_attrib_entity, is_plausible_line_entity_candidate, keeps_attrib_entity,
+        matches_type_name, resolve_r2010_string_stream_ranges,
     };
     use crate::bit::{BitReader, BitWriter, Endian};
-    use crate::entities::{decode_attrib_exact, AttribEntity, StringStreamFormat};
+    use crate::entities::{decode_attrib_exact, AttribEntity, LineEntity, StringStreamFormat};
     use std::collections::HashMap;
 
     #[test]
@@ -1586,6 +1594,55 @@ mod tests {
             lock_position: false,
             prompt: None,
         }
+    }
+
+    fn line_entity(start: (f64, f64, f64), end: (f64, f64, f64)) -> LineEntity {
+        LineEntity {
+            thickness: None,
+            extrusion: None,
+            handle: 0x10,
+            color_index: None,
+            true_color: None,
+            owner_handle: None,
+            layer_handle: 0,
+            start,
+            end,
+        }
+    }
+
+    #[test]
+    fn is_plausible_line_entity_candidate_accepts_a_national_grid_in_millimetres() {
+        // 150 km from the origin of the zone, drawn in millimetres
+        assert!(is_plausible_line_entity_candidate(&line_entity(
+            (-20_824_795.289, -145_633_812.653, 0.0),
+            (-20_725_395.861, -145_564_602.705, 0.0),
+        )));
+        assert!(is_plausible_line_entity_candidate(&line_entity(
+            (124_474_586.25, 257_567_213.03, 0.0),
+            (124_509_146.12, 257_582_063.03, 0.0),
+        )));
+        // rounding noise around zero is a real coordinate
+        assert!(is_plausible_line_entity_candidate(&line_entity(
+            (6.1e-17, 0.0, 0.0),
+            (10.0, -1.2e-14, 0.0),
+        )));
+    }
+
+    #[test]
+    fn is_plausible_line_entity_candidate_rejects_bytes_read_at_a_wrong_offset() {
+        // what the 26 bytes of a far-out LINE read without its type prefix gave
+        assert!(!is_plausible_line_entity_candidate(&line_entity(
+            (1.0, 1.0, 0.0),
+            (0.0, 9.578491027143785e-168, 0.0),
+        )));
+        assert!(!is_plausible_line_entity_candidate(&line_entity(
+            (1.0e13, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+        )));
+        assert!(!is_plausible_line_entity_candidate(&line_entity(
+            (f64::NAN, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+        )));
     }
 
     #[test]

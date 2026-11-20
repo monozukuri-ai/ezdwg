@@ -429,3 +429,35 @@ def test_cli_main_dispatches_write_command(monkeypatch) -> None:
         "dwg_version": "AC1015",
         "strict": True,
     }
+
+
+def test_coordinates_of_a_national_grid_in_millimetres_roundtrip(tmp_path):
+    # A drawing in a national grid drawn in millimetres is 1.5e8 from the origin.
+    # The reader used to call a LINE beyond 1e8 implausible and took the bytes
+    # read without the type prefix instead; the fills were refused the same way.
+    lines = [
+        ((-20_824_795.289475, -145_633_812.653111), (-20_725_395.861658, -145_564_602.705928)),
+        ((124_474_586.24989143, 257_567_213.03132436), (124_474_686.5, 257_567_313.25)),
+        ((10.5, 20.25), (30.75, 40.125)),
+    ]
+    square = [
+        (124_474_586.25, 257_567_213.0),
+        (124_474_686.25, 257_567_213.0),
+        (124_474_686.25, 257_567_313.0),
+        (124_474_586.25, 257_567_313.0),
+    ]
+    doc = ezdwg.new()
+    msp = doc.modelspace()
+    for start, end in lines:
+        msp.add_line((*start, 0.0), (*end, 0.0))
+    msp.add_hatch([square])
+    out = tmp_path / "grid.dwg"
+    result = doc.save(out)
+    assert result.written_entities == len(lines) + 1 and not result.diagnostics
+
+    back = ezdwg.read(str(out)).modelspace()
+    read = [(e.dxf["start"][:2], e.dxf["end"][:2]) for e in back.query("LINE")]
+    assert read == lines
+    (hatch,) = back.query("HATCH")
+    (path,) = hatch.dxf["paths"]
+    assert [p[:2] for p in path["points"]] == square + [square[0]]

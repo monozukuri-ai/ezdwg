@@ -573,7 +573,7 @@ fn decode_hatch_body(
                         let end_angle = reader.read_bd()?;
                         let is_ccw = reader.read_b()? != 0;
                         require_plausible_hatch_point(center, "arc edge center")?;
-                        require_plausible_hatch_scalar(radius, "arc edge radius")?;
+                        require_plausible_hatch_length(radius, "arc edge radius")?;
                         require_plausible_hatch_scalar(start_angle, "arc edge start angle")?;
                         require_plausible_hatch_scalar(end_angle, "arc edge end angle")?;
                         let segment =
@@ -875,7 +875,7 @@ fn score_hatch_candidate(entity: &HatchEntity) -> i32 {
             if !x.is_finite() || !y.is_finite() {
                 return i32::MIN / 4;
             }
-            if x.abs() > 1.0e9 || y.abs() > 1.0e9 {
+            if x.abs() > HATCH_COORDINATE_LIMIT || y.abs() > HATCH_COORDINATE_LIMIT {
                 return i32::MIN / 4;
             }
         }
@@ -915,6 +915,17 @@ fn require_plausible_hatch_point(point: (f64, f64), context: &str) -> Result<()>
     ))
 }
 
+/// A length (a radius) can be as large as a coordinate.
+fn require_plausible_hatch_length(value: f64, context: &str) -> Result<()> {
+    if value.is_finite() && value.abs() <= HATCH_COORDINATE_LIMIT {
+        return Ok(());
+    }
+    Err(DwgError::new(
+        ErrorKind::Format,
+        format!("implausible HATCH {context}: {value}"),
+    ))
+}
+
 fn require_plausible_hatch_scalar(value: f64, context: &str) -> Result<()> {
     if value.is_finite() && value.abs() <= 1.0e8 {
         return Ok(());
@@ -925,8 +936,19 @@ fn require_plausible_hatch_scalar(value: f64, context: &str) -> Result<()> {
     ))
 }
 
+/// Largest coordinate a boundary point of a HATCH is taken at its word for.
+///
+/// A drawing in a national grid drawn in millimetres reaches 1.5e8 (150 km from
+/// the origin of the zone); at 1e8 the fills of such a drawing were refused as
+/// implausible. Bytes read at a wrong bit offset mostly come out far outside
+/// this range.
+const HATCH_COORDINATE_LIMIT: f64 = 1.0e12;
+
 fn is_plausible_hatch_point(point: (f64, f64)) -> bool {
-    point.0.is_finite() && point.1.is_finite() && point.0.abs() <= 1.0e8 && point.1.abs() <= 1.0e8
+    point.0.is_finite()
+        && point.1.is_finite()
+        && point.0.abs() <= HATCH_COORDINATE_LIMIT
+        && point.1.abs() <= HATCH_COORDINATE_LIMIT
 }
 
 /// A tangent component is 0 or a sane magnitude; the bytes of a following edge
