@@ -2473,6 +2473,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_object_map_handles_reads_offset_deltas_longer_than_four_bytes() {
+        // A signed offset delta of 2^27 or more takes five bytes. The old
+        // reader stopped after four.
+        let bytes = vec![
+            0x00, 0x0A, // section_size = 10 (2 bytes header + 8 bytes payload)
+            0x05, // +5
+            0x85, 0x80, 0x80, 0x80, 0x01, // +(2^28 + 5) (five bytes)
+            0x01, 0x04, // +1, +4
+            0x00, 0x00, // crc
+            0x00, 0x02, // terminator section
+        ];
+        let index = parse_object_map_handles(&bytes, &ParseConfig::default()).expect("index");
+        let refs: Vec<(u64, u32)> = index
+            .objects
+            .iter()
+            .map(|obj| (obj.handle.0, obj.offset))
+            .collect();
+        assert_eq!(refs, vec![(5, (1 << 28) + 5), (6, (1 << 28) + 9)]);
+    }
+
+    #[test]
     fn parse_object_map_handles_reads_a_ten_byte_handle_delta() {
         // A handle is unsigned 64-bit: one at or above 2^63 takes ten bytes.
         let bytes = vec![
@@ -2508,6 +2529,14 @@ mod tests {
         // A tenth byte with more than bit 63 is too long.
         let mut too_long = bytes.clone();
         too_long[11] = 0x03;
+        let err =
+            parse_object_map_handles(&too_long, &ParseConfig::default()).expect_err("too long");
+        assert!(err
+            .to_string()
+            .contains("object map handle delta is too long"));
+
+        // So is a tenth byte that asks for an eleventh.
+        too_long[11] = 0x81;
         let err =
             parse_object_map_handles(&too_long, &ParseConfig::default()).expect_err("too long");
         assert!(err
