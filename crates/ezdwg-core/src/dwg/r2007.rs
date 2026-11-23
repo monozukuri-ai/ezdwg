@@ -6,6 +6,7 @@ use crate::core::config::ParseConfig;
 use crate::core::error::{DwgError, ErrorKind};
 use crate::core::result::Result;
 use crate::io::ByteReader;
+use crate::objects::object_locator::{read_modular_char, read_unsigned_modular_char};
 use crate::objects::{Handle, ObjectClass, ObjectIndex, ObjectRecord, ObjectRef};
 
 const STREAM_BASE_OFFSET: u64 = 0x480;
@@ -518,7 +519,7 @@ fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<Object
     let mut reader = ByteReader::new(bytes);
     let mut objects = Vec::new();
 
-    let mut last_handle: i64 = 0;
+    let mut last_handle: u64 = 0;
     // Offset accumulator is reset every page before first use.
     let mut last_offset: i64;
     loop {
@@ -551,10 +552,14 @@ fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<Object
         while (reader.tell() - start) < (section_size as u64 - 2) {
             let prev_handle = last_handle;
             let prev_offset = last_offset;
-            last_handle += read_unsigned_modular_char(&mut reader)?;
+            let delta_handle = read_unsigned_modular_char(&mut reader)?;
+            last_handle = last_handle.checked_add(delta_handle).ok_or_else(|| {
+                DwgError::new(ErrorKind::Format, "AcDb:Handles handle overflow")
+                    .with_offset(reader.tell())
+            })?;
             last_offset += read_modular_char(&mut reader)?;
 
-            if last_handle < 0 || last_offset < 0 {
+            if last_offset < 0 {
                 if config.strict {
                     return Err(DwgError::new(
                         ErrorKind::Format,
@@ -581,7 +586,7 @@ fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<Object
             }
 
             objects.push(ObjectRef {
-                handle: Handle(last_handle as u64),
+                handle: Handle(last_handle),
                 offset: last_offset as u32,
             });
 
@@ -606,52 +611,6 @@ fn read_u16_be(reader: &mut ByteReader<'_>) -> Result<u16> {
     let hi = reader.read_u8()? as u16;
     let lo = reader.read_u8()? as u16;
     Ok((hi << 8) | lo)
-}
-
-/// Object-map handle offsets are unsigned modular chars: the ODA specification
-/// notes that "there is no negation used; handles in the object map are always
-/// in increasing order". Decoding them with the signed reader turned every
-/// terminating byte with bit 0x40 set into a negative delta, which shifted the
-/// handles of all following entries in that section (and dropped entries as
-/// "negative"), so objects were indexed under the wrong handles.
-fn read_unsigned_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
-    let mut value: i64 = 0;
-    let mut shift = 0;
-
-    for _ in 0..5 {
-        let byte = reader.read_u8()?;
-        value |= ((byte & 0x7F) as i64) << shift;
-        if (byte & 0x80) == 0 {
-            return Ok(value);
-        }
-        shift += 7;
-    }
-    Ok(value)
-}
-
-fn read_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
-    let mut value: i64 = 0;
-    let mut shift = 0;
-
-    for _ in 0..4 {
-        let mut byte = reader.read_u8()?;
-        if (byte & 0x80) == 0 {
-            let negative = (byte & 0x40) != 0;
-            if negative {
-                byte &= 0xBF;
-            }
-            value |= (byte as i64) << shift;
-            if negative {
-                value = -value;
-            }
-            return Ok(value);
-        }
-        byte &= 0x7F;
-        value |= (byte as i64) << shift;
-        shift += 7;
-    }
-
-    Ok(value)
 }
 
 fn read_header_data(bytes: &[u8]) -> Result<HeaderData> {
@@ -1794,6 +1753,70 @@ mod tests {
         assert!(err
             .to_string()
             .contains("AcDb:Handles contains negative handle or offset"));
+    }
+
+    #[test]
+    fn parse_object_map_handles_reads_handle_deltas_longer_than_five_bytes() {
+        // Handles above 2^35 need a six-byte delta. Reading only five bytes
+        // left the sixth for the offset and shifted every later entry.
+        let bytes = vec![
+            0x00, 0x0B, // section_size = 11 (2 bytes header + 9 bytes payload)
+            0x9A, 0xF1, 0xD9, 0xA2, 0xA3, 0x02, // +0x12_3456_789A (six bytes)
+            0x0A, // +10
+            0x01, 0x04, // +1, +4
+            0x00, 0x00, // crc
+            0x00, 0x02, // terminator section
+        ];
+        let index = parse_object_map_handles(&bytes, &ParseConfig::default()).expect("index");
+        let refs: Vec<(u64, u32)> = index
+            .objects
+            .iter()
+            .map(|obj| (obj.handle.0, obj.offset))
+            .collect();
+        assert_eq!(refs, vec![(0x12_3456_789A, 10), (0x12_3456_789B, 14)]);
+    }
+
+    #[test]
+    fn parse_object_map_handles_reads_a_ten_byte_handle_delta() {
+        // A handle is unsigned 64-bit: one at or above 2^63 takes ten bytes.
+        let bytes = vec![
+            0x00, 0x0F, // section_size = 15 (2 bytes header + 13 bytes payload)
+            0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01, // +2^63
+            0x0A, // +10
+            0x01, 0x04, // +1, +4
+            0x00, 0x00, // crc
+            0x00, 0x02, // terminator section
+        ];
+        let index = parse_object_map_handles(&bytes, &ParseConfig::default()).expect("index");
+        let refs: Vec<(u64, u32)> = index
+            .objects
+            .iter()
+            .map(|obj| (obj.handle.0, obj.offset))
+            .collect();
+        assert_eq!(refs, vec![(1 << 63, 10), ((1 << 63) + 1, 14)]);
+    }
+
+    #[test]
+    fn parse_object_map_handles_rejects_a_handle_past_64_bits() {
+        let bytes = vec![
+            0x00, 0x0F, // section_size = 15 (2 bytes header + 13 bytes payload)
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, // +(2^64 - 1)
+            0x0A, // +10
+            0x01, 0x0A, // +1: past 64 bits
+            0x00, 0x00, // crc
+            0x00, 0x02, // terminator section
+        ];
+        let err = parse_object_map_handles(&bytes, &ParseConfig::default()).expect_err("overflow");
+        assert!(err.to_string().contains("AcDb:Handles handle overflow"));
+
+        // A tenth byte with more than bit 63 is too long.
+        let mut too_long = bytes.clone();
+        too_long[11] = 0x03;
+        let err =
+            parse_object_map_handles(&too_long, &ParseConfig::default()).expect_err("too long");
+        assert!(err
+            .to_string()
+            .contains("object map handle delta is too long"));
     }
 
     #[test]

@@ -83,7 +83,7 @@ fn parse_object_map(bytes: &[u8], _config: &ParseConfig) -> Result<ObjectIndex> 
     // Assigned at each Handles-page boundary before first use (absolute first
     // handleoff/offset). Leave uninitialised so rustc does not warn about a
     // dead initial write that is always overwritten.
-    let mut last_handle: i64;
+    let mut last_handle: u64;
     let mut last_offset: i64;
     loop {
         if reader.remaining() < 2 {
@@ -131,7 +131,7 @@ fn parse_object_map(bytes: &[u8], _config: &ParseConfig) -> Result<ObjectIndex> 
                 DwgError::new(ErrorKind::Format, "object map offset overflow")
                     .with_offset(reader.tell())
             })?;
-            if last_handle < 0 || last_offset < 0 {
+            if last_offset < 0 {
                 return Err(DwgError::new(
                     ErrorKind::Format,
                     "object map contains negative handle/offset",
@@ -146,7 +146,7 @@ fn parse_object_map(bytes: &[u8], _config: &ParseConfig) -> Result<ObjectIndex> 
                 .with_offset(reader.tell()));
             }
             objects.push(ObjectRef {
-                handle: Handle(last_handle as u64),
+                handle: Handle(last_handle),
                 offset: last_offset as u32,
             });
         }
@@ -174,18 +174,24 @@ fn read_u16_be(reader: &mut ByteReader<'_>) -> Result<u16> {
 /// handles of all following entries in that section (and dropped entries as
 /// "negative"), so objects were indexed under the wrong handles.
 ///
-/// A value runs until the byte without the continuation bit. Handles are up to
-/// 64 bits wide, so a delta can take more than five bytes: a drawing whose
-/// handles jump above 2^35 writes six. Stopping after five left the last byte
-/// unread, and every following entry and page of the map was read out of step
-/// ("object map block exceeds remaining data").
-fn read_unsigned_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
-    let mut value: i64 = 0;
+/// A value runs until the byte without the continuation bit. A handle is an
+/// unsigned 64-bit value, so a delta can take up to ten bytes: nine groups of
+/// seven bits and one last bit. A drawing whose handles jump above 2^35 writes
+/// six or more; one with handles at or above 2^63 writes ten. Stopping early
+/// left the rest of the value unread, and every following entry and page of
+/// the map was read out of step ("object map block exceeds remaining data").
+/// The R2004 and R2007 object maps use the same two readers.
+pub(crate) fn read_unsigned_modular_char(reader: &mut ByteReader<'_>) -> Result<u64> {
+    let mut value: u64 = 0;
 
-    // Nine groups of seven bits fill the 63 value bits of an i64.
-    for group in 0..9 {
+    for group in 0..10 {
         let byte = reader.read_u8()?;
-        value |= ((byte & 0x7F) as i64) << (group * 7);
+        let bits = (byte & 0x7F) as u64;
+        // The tenth group holds bit 63 only.
+        if group == 9 && bits > 1 {
+            break;
+        }
+        value |= bits << (group * 7);
         if (byte & 0x80) == 0 {
             return Ok(value);
         }
@@ -199,7 +205,7 @@ fn read_unsigned_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
 /// Signed modular char: the last byte carries the sign in bit 0x40. As with the
 /// unsigned form, the value runs until the byte without the continuation bit;
 /// an offset delta of 32 bits takes five bytes.
-fn read_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
+pub(crate) fn read_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
     let mut value: i64 = 0;
     let mut shift = 0;
 
