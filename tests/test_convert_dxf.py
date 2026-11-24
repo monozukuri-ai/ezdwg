@@ -104,7 +104,7 @@ def test_to_dxf_populates_blocks_for_dimension_anonymous_references(
     monkeypatch.setattr(
         convert_module,
         "_resolve_export_entities",
-        lambda *_args, **_kwargs: [entity],
+        lambda *_args, **_kwargs: convert_module._DxfExportSelection([entity]),
     )
 
     output = tmp_path / "dim_ref_block_scan.dxf"
@@ -186,7 +186,7 @@ def test_to_dxf_preserves_mtext_anchor_and_orientation(monkeypatch, tmp_path: Pa
     monkeypatch.setattr(
         convert_module,
         "_resolve_export_entities",
-        lambda *_args, **_kwargs: [
+        lambda *_args, **_kwargs: convert_module._DxfExportSelection([
             Entity(
                 dxftype="MTEXT",
                 handle=1,
@@ -212,7 +212,7 @@ def test_to_dxf_preserves_mtext_anchor_and_orientation(monkeypatch, tmp_path: Pa
                     "rotation": 30.0,
                 },
             ),
-        ],
+        ]),
     )
     monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
 
@@ -627,6 +627,7 @@ def test_to_dxf_lwpolyline_flag_0x200_is_treated_as_closed(
 ) -> None:
     pytest.importorskip("ezdxf")
 
+    mock_object_catalog(monkeypatch, lambda _: [(0x2200, 0, 0, 0, "LWPOLYLINE", "E")])
     monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
     monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
     document_module._entity_style_map.cache_clear()
@@ -3754,53 +3755,16 @@ def test_materialize_export_entities_keeps_same_handle_across_types() -> None:
     assert len(out) == 2
 
 
-def test_resolve_export_entities_does_not_filter_modelspace_by_default(
-    monkeypatch,
-) -> None:
-    _source_path, layout = convert_module._resolve_layout(str(SAMPLES / "line_2007.dwg"))
-    called = False
-
-    def _spy_filter(
-        _decode_path: str | None,
-        entities: list[Entity],
-        *,
-        decode_cache=None,
-    ) -> list[Entity]:
-        nonlocal called
-        called = True
-        return entities
-
-    monkeypatch.setattr(convert_module, "_filter_modelspace_entities", _spy_filter)
-    entities = convert_module._resolve_export_entities(layout, "LINE", include_styles=False)
-
-    assert len(entities) == 1
-    assert called is False
-
-
-def test_resolve_export_entities_filters_modelspace_when_enabled(monkeypatch) -> None:
-    _source_path, layout = convert_module._resolve_layout(str(SAMPLES / "line_2007.dwg"))
-    called = False
-
-    def _spy_filter(
-        _decode_path: str | None,
-        entities: list[Entity],
-        *,
-        decode_cache=None,
-    ) -> list[Entity]:
-        nonlocal called
-        called = True
-        return entities
-
-    monkeypatch.setattr(convert_module, "_filter_modelspace_entities", _spy_filter)
-    entities = convert_module._resolve_export_entities(
-        layout,
-        "LINE",
-        include_styles=False,
-        modelspace_only=True,
+@pytest.mark.parametrize("modelspace_only", [True, False])
+def test_export_selection_uses_requested_layout(modelspace_only) -> None:
+    doc = ezdwg.read(str(SAMPLES / "acadsharp" / "sample_AC1018.dwg"))
+    expected = doc.modelspace() if modelspace_only else doc.entities()
+    selection = convert_module._resolve_export_entities(
+        doc.entities(), "MTEXT", include_styles=False, modelspace_only=modelspace_only
     )
-
-    assert len(entities) == 1
-    assert called is True
+    assert {e.handle for e in selection.entities} == {
+        e.handle for e in expected.query("MTEXT", include_styles=False)
+    }
 
 
 def test_to_dxf_block_export_trims_insert_block_name(monkeypatch, tmp_path: Path) -> None:
@@ -4516,6 +4480,7 @@ def test_write_entity_skips_implausible_coordinate_ranges() -> None:
 def test_to_dxf_vertex_filter_writes_owner_polyline(monkeypatch, tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 
+    mock_object_catalog(monkeypatch, lambda _: [(0x5101, 0, 0, 0, "VERTEX_2D", "E")])
     monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
     monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
     document_module._entity_style_map.cache_clear()
@@ -4567,6 +4532,7 @@ def test_to_dxf_vertex_filter_writes_owner_polyline(monkeypatch, tmp_path: Path)
 def test_to_dxf_writes_polyline_2d_as_lwpolyline(monkeypatch, tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 
+    mock_object_catalog(monkeypatch, lambda _: [(0x2D02, 0, 0, 0, "POLYLINE_2D", "E")])
     monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
     monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
     document_module._entity_style_map.cache_clear()
@@ -4605,6 +4571,7 @@ def test_to_dxf_writes_polyline_2d_as_lwpolyline(monkeypatch, tmp_path: Path) ->
 def test_to_dxf_treats_empty_polyline_2d_as_placeholder(monkeypatch, tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 
+    mock_object_catalog(monkeypatch, lambda _: [(0x2D10, 0, 0, 0, "POLYLINE_2D", "E")])
     monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
     monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
     document_module._entity_style_map.cache_clear()
@@ -4634,6 +4601,7 @@ def test_to_dxf_preserves_explicit_closing_vertex_for_open_polyline_2d(
 ) -> None:
     pytest.importorskip("ezdxf")
 
+    mock_object_catalog(monkeypatch, lambda _: [(0x2D04, 0, 0, 0, "POLYLINE_2D", "E")])
     monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
     monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
     document_module._entity_style_map.cache_clear()
@@ -4680,6 +4648,7 @@ def test_to_dxf_preserves_explicit_closing_vertex_for_open_polyline_2d(
 def test_to_dxf_writes_polyline_2d_curve_fit_as_spline(monkeypatch, tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 
+    mock_object_catalog(monkeypatch, lambda _: [(0x2D03, 0, 0, 0, "POLYLINE_2D", "E")])
     monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
     monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
     document_module._entity_style_map.cache_clear()
@@ -4753,6 +4722,7 @@ def test_to_dxf_writes_polyline_2d_curve_fit_as_spline(monkeypatch, tmp_path: Pa
 def test_to_dxf_polyline_2d_spline_prefers_control_vertices(monkeypatch, tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 
+    mock_object_catalog(monkeypatch, lambda _: [(0x2D04, 0, 0, 0, "POLYLINE_2D", "E")])
     monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
     monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
     document_module._entity_style_map.cache_clear()
@@ -4836,6 +4806,7 @@ def test_to_dxf_polyline_2d_spline_prefers_control_vertices(monkeypatch, tmp_pat
 def test_to_dxf_polyline_2d_spline_uses_tangent_dirs(monkeypatch, tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 
+    mock_object_catalog(monkeypatch, lambda _: [(0x2D05, 0, 0, 0, "POLYLINE_2D", "E")])
     monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
     monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
     document_module._entity_style_map.cache_clear()
@@ -4931,6 +4902,7 @@ def test_polyline_2d_open_uniform_knot_vector() -> None:
 def test_to_dxf_polyline_2d_curve_type_writes_control_spline(monkeypatch, tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 
+    mock_object_catalog(monkeypatch, lambda _: [(0x2D06, 0, 0, 0, "POLYLINE_2D", "E")])
     monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
     monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
     document_module._entity_style_map.cache_clear()
@@ -5012,6 +4984,7 @@ def test_to_dxf_polyline_2d_closed_curve_type_sets_closed_spline_flag(
 ) -> None:
     pytest.importorskip("ezdxf")
 
+    mock_object_catalog(monkeypatch, lambda _: [(0x2D07, 0, 0, 0, "POLYLINE_2D", "E")])
     monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
     monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
     document_module._entity_style_map.cache_clear()
@@ -5083,6 +5056,7 @@ def test_to_dxf_polyline_2d_closed_curve_fit_sets_closed_spline_flag(
 ) -> None:
     pytest.importorskip("ezdxf")
 
+    mock_object_catalog(monkeypatch, lambda _: [(0x2D08, 0, 0, 0, "POLYLINE_2D", "E")])
     monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
     monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
     document_module._entity_style_map.cache_clear()
@@ -5172,6 +5146,7 @@ def test_to_dxf_polyline_2d_closed_curve_fit_with_tangents_keeps_periodic_frame(
 ) -> None:
     pytest.importorskip("ezdxf")
 
+    mock_object_catalog(monkeypatch, lambda _: [(0x2D09, 0, 0, 0, "POLYLINE_2D", "E")])
     monkeypatch.setattr(document_module.raw, "decode_entity_styles", lambda _path: [])
     monkeypatch.setattr(document_module.raw, "decode_layer_colors", lambda _path: [])
     document_module._entity_style_map.cache_clear()
@@ -5255,3 +5230,87 @@ def test_to_dxf_polyline_2d_closed_curve_fit_with_tangents_keeps_periodic_frame(
     # Closed fit path should stay on control-frame representation.
     assert any(code == "10" for code, _ in groups)
     assert not any(code == "11" for code, _ in groups)
+
+
+def test_to_dxf_preserves_long_notes_and_layout_references(monkeypatch, tmp_path):
+    ezdxf = pytest.importorskip("ezdxf")
+    source = tmp_path / "layout.dwg"
+    output = tmp_path / "layout.dxf"
+    drawing = ezdwg.new()
+    drawing.blocks.new("PART").add_line((0, 0), (1, 1))
+    for index in range(40):
+        layout = drawing.modelspace() if index < 8 else drawing.paperspace()
+        layout.add_blockref("PART", (100 + index, 300))
+    note = r"\P".join([r"{\LReference note}"] * 80)
+    drawing.modelspace().add_mtext(note, (25, 30))
+    drawing.paperspace().add_mtext("Paper note", (55, 60))
+    drawing.save(source)
+    doc = ezdwg.read(str(source))
+    # Give the legacy object-order heuristic its strongest possible signal.
+    handles = {e.handle for e in doc.modelspace().query("INSERT MTEXT")}
+    monkeypatch.setattr(
+        convert_module, "_resolve_modelspace_entity_handles", lambda *_a, **_kw: (handles, set())
+    )
+
+    def export(**kwargs):
+        result = ezdwg.to_dxf(doc, str(output), types="INSERT MTEXT", **kwargs)
+        dxf = ezdxf.readfile(output)
+        assert len(dxf.blocks.get("PART").query("LINE")) == 1
+        model = dxf.modelspace()
+        points = sorted(int(e.dxf.insert.x) for e in model.query("INSERT"))
+        texts = {e.text for e in model.query("MTEXT")}
+        return result, points, texts
+
+    result, points, texts = export(strict=True)
+    assert (result.total_entities, result.written_entities) == (42, 42)
+    assert points == list(range(100, 140))
+    assert texts == {note, "Paper note"}
+
+    result, points, texts = export(filter_layout_entities=True)
+    assert (result.total_entities, result.written_entities, result.skipped_entities) == (42, 10, 32)
+    assert result.skipped_by_type == {"INSERT": 32}
+    assert points == list(range(100, 108))
+    assert texts == {note, "Paper note"}
+    with pytest.raises(ValueError, match="INSERT:32"):
+        export(filter_layout_entities=True, strict=True)
+
+    result, points, texts = export(modelspace_only=True, strict=True)
+    assert (result.total_entities, result.written_entities) == (9, 9)
+    assert points == list(range(100, 108))
+    assert texts == {note}
+
+
+def test_to_dxf_accounts_for_unqueried_and_undecoded_headers(monkeypatch, tmp_path):
+    pytest.importorskip("ezdxf")
+    doc = document_module.Document(path="header_inventory.dwg", version="AC1018")
+    mock_object_catalog(monkeypatch, lambda _: [
+        (1, 10, 0, 1, "LINE", "E"),
+        (2, 20, 0, 500, "CUSTOM_ENTITY", "E"),
+        (3, 30, 0, 501, "CUSTOM_OBJECT", "O"),
+        (4, 40, 0, 5, "ENDBLK", "E"),
+    ])
+    monkeypatch.setattr(document_module.raw, "decode_line_entities", lambda _: [])
+    output = str(tmp_path / "header_inventory.dxf")
+    default = ezdwg.to_dxf(doc, output, preserve_colors=False)
+    assert default.unqueried_by_type == {"CUSTOM_ENTITY": 1}
+    assert default.skipped_by_type == {"LINE": 1}
+    assert (default.total_entities, default.written_entities, default.skipped_entities) == (1, 0, 1)
+    detailed = ezdwg.to_dxf(doc, output, preserve_colors=False, include_unsupported=True)
+    assert detailed.unqueried_by_type == {}
+    assert detailed.skipped_by_type == {"CUSTOM_ENTITY": 1, "LINE": 1}
+    assert (detailed.total_entities, detailed.skipped_entities) == (2, 2)
+    with pytest.raises(ValueError, match="CUSTOM_ENTITY:1"):
+        ezdwg.to_dxf(doc, output, types=iter(["CUSTOM_*"]), strict=True, preserve_colors=False)
+
+
+def test_to_dxf_reports_an_insert_removed_before_save(monkeypatch, tmp_path):
+    ezdxf = pytest.importorskip("ezdxf")
+    source = SAMPLES / "insert_2004.dwg"
+    output = tmp_path / "no_block.dxf"
+    monkeypatch.setattr(convert_module, "_populate_block_definitions", lambda *a, **kw: None)
+    result = ezdwg.to_dxf(str(source), str(output), types="INSERT")
+    assert len(ezdxf.readfile(output).modelspace().query("INSERT")) == 0
+    assert result.skipped_by_type == {"INSERT": 1}
+    assert (result.total_entities, result.written_entities, result.skipped_entities) == (1, 0, 1)
+    with pytest.raises(ValueError, match="INSERT:1"):
+        ezdwg.to_dxf(str(source), str(output), types="INSERT", strict=True)

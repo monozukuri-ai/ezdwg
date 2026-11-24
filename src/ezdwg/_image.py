@@ -24,6 +24,10 @@ FIELDS = {
     "class_version",
     "clip_mode",
     "file_path",
+    "def_size",
+    "pixel_size",
+    "resolution_units",
+    "is_loaded",
 }
 DEF_FIELDS = {"file_path", "size", "is_loaded", "resolution_units", "pixel_size"}
 

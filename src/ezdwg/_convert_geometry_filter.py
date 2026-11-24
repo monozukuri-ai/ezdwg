@@ -124,8 +124,6 @@ def _score_text_plausibility_char(ch: str) -> int:
 def _is_plausible_text_content(text: str) -> bool:
     if text == "":
         return True
-    if len(text) > 512:
-        return False
     score = 0
     count = 0
     control_count = 0

@@ -6,6 +6,7 @@ import math
 import re
 import unicodedata
 import weakref
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
@@ -19,7 +20,9 @@ from .document import (
     Layout,
     SUPPORTED_ENTITY_TYPES,
     TYPE_ALIASES,
+    _block_header_name_map,
     _block_header_name_rows,
+    _entity_placement_map,
     _present_supported_types,
     read,
 )
@@ -153,6 +156,7 @@ _WRITABLE_ENTITY_TYPES = {
     "ATTRIB",
     "ATTDEF",
     "MTEXT",
+    "IMAGE",
     "LEADER",
     "HATCH",
     "TOLERANCE",
@@ -203,6 +207,14 @@ class ConvertResult:
     written_entities: int
     skipped_entities: int
     skipped_by_type: dict[str, int]
+    unqueried_by_type: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class _DxfExportSelection:
+    entities: list[Entity]
+    skipped: Counter[str] = field(default_factory=Counter)
+    unqueried: Counter[str] = field(default_factory=Counter)
 
 
 @dataclass(frozen=True)
@@ -561,6 +573,7 @@ def to_dxf(
     include_unsupported: bool = False,
     preserve_colors: bool = True,
     modelspace_only: bool = False,
+    filter_layout_entities: bool = False,
     explode_dimensions: bool = True,
     flatten_inserts: bool = False,
     dim_block_policy: str = "smart",
@@ -574,16 +587,17 @@ def to_dxf(
     modelspace = dxf_doc.modelspace()
     dimension_write_context = _DimensionWriteContext()
 
-    source_entities = _resolve_export_entities(
+    selection = _resolve_export_entities(
         layout,
         types,
         include_unsupported=include_unsupported,
         include_styles=preserve_colors,
         modelspace_only=modelspace_only,
-        decode_cache=decode_cache,
     )
+    source_entities = selection.entities
+    original_counts = Counter(entity.dxftype for entity in source_entities)
     prefilter_has_right_side_open30_signal = _has_right_side_open30_i_proxies(source_entities)
-    if not modelspace_only:
+    if filter_layout_entities and not modelspace_only:
         source_entities = _maybe_prefer_modelspace_filtered_entities(
             layout,
             source_entities,
@@ -599,6 +613,7 @@ def to_dxf(
             source_entities,
             decode_cache=decode_cache,
         )
+    if not modelspace_only:
         source_entities = _repair_monotonic_generated_block_insert_names(
             layout.doc.decode_path or layout.doc.path,
             source_entities,
@@ -671,12 +686,15 @@ def to_dxf(
         _BLOCK_INSERT_SAFETY_CACHE.pop(dxf_doc, None)
         _BLOCK_LOCAL_Y_SPAN_CACHE.pop(dxf_doc, None)
 
-    total = 0
+    skipped_by_type = selection.skipped
+    skipped_by_type.update(original_counts - Counter(e.dxftype for e in source_entities))
+    total = len(source_entities) + sum(skipped_by_type.values())
     written = 0
-    skipped_by_type: dict[str, int] = {}
+    retained_outputs: list[tuple[str, list[Any]]] = []
 
     for entity in source_entities:
-        total += 1
+        track_output = entity.dxftype in {"INSERT", "MINSERT", "MTEXT"}
+        start = len(modelspace) if track_output else None
         if _write_entity_to_modelspace(
             modelspace,
             entity,
@@ -685,16 +703,11 @@ def to_dxf(
             dim_block_policy=normalized_dim_block_policy,
             dimension_context=dimension_write_context,
         ):
+            if start is not None:
+                retained_outputs.append((entity.dxftype, modelspace[start:]))
             written += 1
             continue
-        skipped_by_type[entity.dxftype] = skipped_by_type.get(entity.dxftype, 0) + 1
-
-    skipped = total - written
-    if strict and skipped > 0:
-        summary = ", ".join(
-            f"{dxftype}:{count}" for dxftype, count in sorted(skipped_by_type.items())
-        )
-        raise ValueError(f"failed to convert {skipped} entities ({summary})")
+        skipped_by_type[entity.dxftype] += 1
 
     _restore_sparse_open30_left_window(modelspace)
     _restore_known_layout_frame_polylines(modelspace)
@@ -710,6 +723,20 @@ def to_dxf(
     _drop_pathological_modelspace_block_references(modelspace)
     _drop_unresolved_block_references(getattr(modelspace, "doc", None))
 
+    # A writer can suppress a layout marker or a later cleanup can remove
+    # its unresolved INSERT. Count the source once, including expanded arrays.
+    for name, outputs in retained_outputs:
+        if not any(output.is_alive for output in outputs):
+            skipped_by_type[name] += 1
+            written -= 1
+
+    skipped = total - written
+    if strict and skipped > 0:
+        summary = ", ".join(
+            f"{dxftype}:{count}" for dxftype, count in sorted(skipped_by_type.items())
+        )
+        raise ValueError(f"failed to convert {skipped} entities ({summary})")
+
     if flatten_inserts:
         _flatten_modelspace_inserts(modelspace)
 
@@ -724,6 +751,7 @@ def to_dxf(
         written_entities=written,
         skipped_entities=skipped,
         skipped_by_type=dict(sorted(skipped_by_type.items())),
+        unqueried_by_type=dict(sorted(selection.unqueried.items())),
     )
 
 
@@ -2566,33 +2594,39 @@ def _resolve_export_entities(
     include_unsupported: bool = False,
     include_styles: bool = True,
     modelspace_only: bool = False,
-    decode_cache: _ConvertDecodeCache | None = None,
-) -> list[Entity]:
-    query_types: str | Iterable[str] | None
-    if types is not None:
-        query_types = types
-    elif include_unsupported:
-        query_types = None
-    else:
+) -> _DxfExportSelection:
+    if modelspace_only:
+        if layout.name.upper() == "PAPERSPACE":
+            return _DxfExportSelection([])
+        layout = layout.doc.modelspace()
+    if types is not None and not isinstance(types, str):
+        types = tuple(types)  # A caller can pass a single-use iterable.
+    inventory = _export_entity_inventory(layout, types)
+    writable_only = types is None and not include_unsupported
+    if writable_only:
         present_types = set(_present_supported_types(layout.doc.decode_path))
         query_types = tuple(sorted(present_types & _WRITABLE_ENTITY_TYPES))
-    selected_entities = list(layout.query(query_types, include_styles=include_styles))
-    if modelspace_only:
-        selected_entities = _filter_modelspace_entities(
-            layout.doc.decode_path,
-            selected_entities,
-            decode_cache=decode_cache,
-        )
-    return _materialize_export_entities(layout, selected_entities)
+        selected = list(layout.query(query_types, include_styles=include_styles)) if query_types else []
+    else:
+        selected = list(layout.query(types, include_styles=include_styles))
+
+    selection = _DxfExportSelection(_materialize_export_entities(layout, selected))
+    for entity in selected:
+        handle = int(entity.handle)
+        if inventory.get(handle) == entity.dxftype:
+            del inventory[handle]
+    for name in inventory.values():
+        if writable_only and name not in _WRITABLE_ENTITY_TYPES:
+            selection.unqueried[name] += 1
+        else:
+            selection.skipped[name] += 1
+    return selection
 
 
-def _resolve_dwg_export_entities(
+def _export_entity_inventory(
     layout: Layout,
     types: str | Iterable[str] | None,
-) -> list[Entity]:
-    # Inventory before decoding: filtering to writable types first hides
-    # unsupported entities from strict/skipped counts. A supported type whose
-    # decoder returns no row must also count as a failed write.
+) -> dict[int, str]:
     tokens = (
         re.split(r"[,\s]+", types.strip())
         if isinstance(types, str)
@@ -2607,8 +2641,7 @@ def _resolve_dwg_export_entities(
         handle, _, _, _, raw_name, category = row[:6]
         if str(category).upper() not in {"E", "ENTITY"}:
             continue
-        name = str(raw_name).strip().upper()
-        name = TYPE_ALIASES.get(name, name)
+        name = _canonical_entity_type(raw_name)
         if name in _BLOCK_EXCLUDED_ENTITY_TYPES:
             continue  # structural children are accounted for by their parent
         if not all_types and not any(fnmatch.fnmatchcase(name, t) for t in tokens):
@@ -2617,6 +2650,14 @@ def _resolve_dwg_export_entities(
         if placement_filter is None or placement_filter(handle):
             inventory[handle] = name
 
+    return inventory
+
+
+def _resolve_dwg_export_entities(
+    layout: Layout,
+    types: str | Iterable[str] | None,
+) -> list[Entity]:
+    inventory = _export_entity_inventory(layout, types)
     writable = tuple(sorted(set(inventory.values()) & _DWG_WRITABLE_ENTITY_TYPES))
     decoded = {int(e.handle): e for e in layout.query(writable)} if writable else {}
     # Empty DXF data intentionally fails row validation for undecoded entities.
@@ -3393,6 +3434,8 @@ def _populate_block_definitions(
     if not referenced_names:
         return
 
+    # Referenced definitions can live outside the selected source layout.
+    layout = layout.doc.entities()
     decode_path = layout.doc.decode_path or layout.doc.path
     try:
         header_rows = raw.list_object_headers_with_type(decode_path)
@@ -3420,10 +3463,22 @@ def _populate_block_definitions(
         block_name_by_handle=block_name_by_handle,
         decode_cache=decode_cache,
     )
+    owned_members: dict[str, list[tuple[int, str]]] = {}
+    placements = _entity_placement_map(decode_path)
+    owner_names = _block_header_name_map(decode_path)
+    for handle, _, _, _, name, category in sorted_header_rows:
+        if category.upper() not in {"E", "ENTITY"} or name in {"BLOCK", "ENDBLK"}:
+            continue
+        mode, owner = placements.get(handle, (None, None))
+        owner_name = owner_names.get(owner) if mode == 0 else None
+        if owner_name and not _is_layout_pseudo_block_name(owner_name):
+            owned_members.setdefault(owner_name, []).append((handle, name))
+
     block_members_by_name = _collect_block_members_by_name(
         sorted_header_rows,
         block_name_by_handle,
         endblk_name_by_handle=endblk_name_by_handle,
+        owned_members=owned_members,
     )
 
     if not block_members_by_name:
@@ -3518,6 +3573,7 @@ def _populate_block_definitions(
                 sorted_header_rows,
                 block_name_by_handle,
                 endblk_name_by_handle=endblk_name_by_handle,
+                owned_members=owned_members,
             )
             selected_block_names = {
                 name for name in referenced_names if name in block_members_by_name
@@ -3713,6 +3769,7 @@ def _collect_block_members_by_name(
     block_name_by_handle: dict[int, str],
     *,
     endblk_name_by_handle: dict[int, str] | None = None,
+    owned_members: dict[str, list[tuple[int, str]]] | None = None,
 ) -> dict[str, list[tuple[int, str]]]:
     # Collect each BLOCK definition independently first, then choose one
     # representative definition per name. Prefer closing by ENDBLK name when
@@ -3812,6 +3869,11 @@ def _collect_block_members_by_name(
         stack[-1]["members"].append((handle, type_name))
 
     _close_stack_to_index(0)
+    # Some writers store the members outside the BLOCK/ENDBLK span.
+    # Recover otherwise empty definitions from their explicit owner handles.
+    for name, members in (owned_members or {}).items():
+        if not candidates_by_name.get(name):
+            candidates_by_name[name] = members
     return candidates_by_name
 
 
@@ -5075,6 +5137,9 @@ def _write_entity_to_modelspace_unsafe(
     if dxftype in {"TEXT", "ATTRIB"}:
         return _write_text_like(modelspace, dxf, dxfattribs)
 
+    if dxftype == "IMAGE":
+        return _write_image(modelspace, dxf, dxfattribs)
+
     if dxftype == "MTEXT":
         return _write_mtext(modelspace, dxf, dxfattribs)
 
@@ -5350,7 +5415,7 @@ def _write_text_like(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str,
     text = str(dxf.get("text", "") or "")
     if text == "":
         return False
-    if not _is_plausible_text_content(text):
+    if len(text) > 512 or not _is_plausible_text_content(text):
         return False
     insert = dxf.get("insert")
     if not _is_plausible_text_insert(insert):
@@ -5520,6 +5585,40 @@ def _write_attdef(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str, An
             attdef.dxf.lock_position = 1 if bool(lock_position) else 0
         except Exception:
             pass
+    return True
+
+
+def _write_image(layout: Any, dxf: dict[str, Any], dxfattribs: dict[str, Any]) -> bool:
+    path = dxf.get("file_path")
+    if not path or layout.dxfversion < "AC1015":
+        return False
+    # A source definition may be shared by images in different blocks. Its
+    # handle also distinguishes two files with the same basename.
+    key = f"Image_{dxf['image_def_handle']:X}"
+    image_dict = layout.doc.rootdict.get_required_dict("ACAD_IMAGE_DICT")
+    definition = image_dict.get(key)
+    if definition is None:
+        definition = layout.doc.add_image_def(path, dxf["def_size"], name=key)
+        definition.dxf.pixel_size = dxf["pixel_size"]
+        definition.dxf.resolution_units = dxf["resolution_units"]
+        definition.dxf.loaded = int(dxf["is_loaded"])
+
+    image = layout.new_entity("IMAGE", dxfattribs={
+        **dxfattribs,
+        "image_def": definition,
+        "insert": dxf["insert"],
+        "u_pixel": dxf["u_vector"],
+        "v_pixel": dxf["v_vector"],
+        "image_size": dxf["size"],
+        "brightness": dxf["brightness"],
+        "contrast": dxf["contrast"],
+        "fade": dxf["fade"],
+    })
+    if dxf["clip_vertices"]:
+        image.set_boundary_path(dxf["clip_vertices"])
+    # Setting a path enables clipping in ezdxf, even for an inactive boundary.
+    image.dxf.flags = dxf["display_props"]
+    image.dxf.clipping = int(dxf["clipping"])
     return True
 
 

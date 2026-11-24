@@ -107,7 +107,12 @@ ezdwg convert input.dwg output.dxf
 | `--types` | Entity filter (e.g. `"LINE ARC LWPOLYLINE"`) |
 | `--dxf-version` | Output DXF version (default: `R2010`) |
 | `--strict` | Fail if any entity cannot be converted |
-| `--include-unsupported` | Also query unsupported entity types |
+| `--include-unsupported` | Include unsupported entity headers in skipped counts and strict checks |
+| `--modelspace-only` | Select the source model space |
+| `--filter-layout-entities` | Apply legacy layout ownership heuristics and count the entities they suppress as skipped |
+
+By default, `unqueried[TYPE]` shows how many entity headers the writable-type
+selection excluded. With `--include-unsupported`, look for these in `skipped[TYPE]`.
 
 ### Examples
 

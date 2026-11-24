@@ -106,6 +106,8 @@ ezdwg.to_dxf(
     dxf_version: str = "R2010",
     strict: bool = False,
     include_unsupported: bool = False,
+    modelspace_only: bool = False,
+    filter_layout_entities: bool = False,
 ) -> ConvertResult
 ```
 
@@ -120,7 +122,17 @@ Convert a DWG file to DXF format.
 | `types` | `str \| Iterable[str] \| None` | `None` | Entity type filter |
 | `dxf_version` | `str` | `"R2010"` | DXF version string |
 | `strict` | `bool` | `False` | Fail on skipped entities |
-| `include_unsupported` | `bool` | `False` | Query unsupported types |
+| `include_unsupported` | `bool` | `False` | Include unsupported entity headers in totals, skipped counts and strict checks |
+| `modelspace_only` | `bool` | `False` | Limit the source selection to the read API's model-space membership |
+| `filter_layout_entities` | `bool` | `False` | Apply the legacy ownership heuristics for suppressing suspected duplicate layout geometry. Removed entities count as skipped. |
+
+A file or document supplies entities from all source spaces and block definitions. The
+converter writes the selection into DXF model space and rebuilds referenced blocks.
+Pass `doc.paperspace()` to export just the paper-space selection. The output uses
+a single model space for the selected content.
+
+MTEXT keeps long formatted notes. IMAGE references in DXF R2000 and newer
+retain their external file paths, pixel placement and clipping boundaries.
 
 **Returns:** A `ConvertResult` object.
 
@@ -252,6 +264,7 @@ class ConvertResult:
     written_entities: int
     skipped_entities: int
     skipped_by_type: dict[str, int]
+    unqueried_by_type: dict[str, int]
 ```
 
 Result of a DWG to DXF conversion.
@@ -260,10 +273,16 @@ Result of a DWG to DXF conversion.
 |-----------|------|-------------|
 | `source_path` | `str` | Input DWG path |
 | `output_path` | `str` | Output DXF path |
-| `total_entities` | `int` | Total entities processed |
-| `written_entities` | `int` | Successfully written |
+| `total_entities` | `int` | Selected source entities, including skips |
+| `written_entities` | `int` | Source entities processed successfully. A source entity can produce multiple DXF primitives. |
 | `skipped_entities` | `int` | Skipped count |
-| `skipped_by_type` | `dict[str, int]` | Skipped by entity type |
+| `skipped_by_type` | `dict[str, int]` | Selected headers with no decoded row, entities removed by the layout filter and failed conversions, grouped by source type |
+| `unqueried_by_type` | `dict[str, int]` | Entity headers outside the default writable-type selection, grouped by type. These counts are outside `total_entities`. |
+
+With `include_unsupported=True`, unsupported entities appear in `skipped_by_type`
+and count towards `total_entities`. The inventory respects the requested layout and
+type filter. It excludes non-entity objects and structural records such as BLOCK,
+ENDBLK and polyline vertices.
 
 ---
 

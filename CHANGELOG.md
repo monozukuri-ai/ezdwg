@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### DXF conversion
+
+- Long formatted MTEXT and external IMAGE references now survive DWG to DXF
+  conversion. IMAGE output targets DXF R2000 and later.
+- Layout ownership heuristics that could discard block references and text now
+  require `filter_layout_entities=True` or `--filter-layout-entities`.
+  Model-space-only conversion follows the read API's placement data.
+- `ConvertResult.unqueried_by_type` lists entity headers outside the default
+  writable selection. With `include_unsupported=True` these entities count
+  towards skips and strict checks. Filtered references, missing decode rows
+  and annotations or references removed before save also count as skips.
+
 ### DWG reader
 - The R2004 section map reader (AC1018, AC1024, AC1027, and AC1032) checks
   section and page counts before allocating memory. A malformed count now

@@ -2587,8 +2587,9 @@ def _image_dxf(row: tuple, defs: dict[int, dict[str, Any]]) -> tuple[int, dict]:
             "clip_vertices": [tuple(v) for v in clip_vertices],
             "image_def_handle": int(image_def_handle),
             "reactor_handle": int(reactor_handle),
-            "image_def": definition.get("image_def"),
-            "file_path": definition.get("file_path"),
+            "image_def": None,
+            "file_path": None,
+            **definition,
         },
     )
 
