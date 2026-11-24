@@ -114,3 +114,38 @@ def test_image_external_read(oda_command, tmp_path):
     assert image.image_def.dxf.filename == "logo.png"
     assert image.image_def.dxf.image_size.isclose((640, 480))
     assert len(images(resaved)) == 1
+
+
+def test_to_dxf_keeps_shared_image_definition_and_pixel_frame(tmp_path):
+    ezdxf = pytest.importorskip("ezdxf")
+    drawing = ezdwg.new()
+    drawing.image_defs["scan"] = {
+        "file_path": "images/scan.tif", "size": (640, 480), "pixel_size": (0.1, 0.2),
+        "resolution_units": 2,
+    }
+    layout = drawing.modelspace()
+    layout.add_image("scan", (10, 20), width=64)
+    layout.add_image(
+        "scan", (5, 6, 7), u_vector=(0.2, 0.1, 0.1), v_vector=(-0.1, 0.4, 0),
+        clipping=True, clip_type=2, clip_vertices=[(0, 0), (200, 0), (100, 100)],
+        brightness=70, contrast=80, fade=10, display_props=7,
+    )
+    source, output = tmp_path / "scan.dwg", tmp_path / "scan.dxf"
+    drawing.save(source)
+    result = ezdwg.to_dxf(str(source), str(output), strict=True)
+    assert result.written_entities == 2
+    dxf = ezdxf.readfile(output)
+    assert not dxf.audit().has_errors
+    first, clipped = sorted(dxf.modelspace().query("IMAGE"), key=lambda e: e.dxf.clipping)
+    assert first.image_def is clipped.image_def
+    assert first.dxf.image_def_reactor_handle != clipped.dxf.image_def_reactor_handle
+    assert first.image_def.dxf.filename == "images/scan.tif"
+    assert first.image_def.dxf.image_size.isclose((640, 480))
+    assert first.image_def.dxf.pixel_size.isclose((0.1, 0.2))
+    assert first.image_def.dxf.resolution_units == 2
+    assert first.dxf.clipping == 0 and clipped.dxf.clipping == 1
+    assert clipped.dxf.insert.isclose((5, 6, 7))
+    assert clipped.dxf.u_pixel.isclose((0.2, 0.1, 0.1))
+    assert clipped.dxf.v_pixel.isclose((-0.1, 0.4, 0))
+    assert list(map(tuple, clipped.boundary_path)) == [(0, 0), (200, 0), (100, 100), (0, 0)]
+    assert (clipped.dxf.brightness, clipped.dxf.contrast, clipped.dxf.fade) == (70, 80, 10)

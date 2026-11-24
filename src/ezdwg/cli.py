@@ -168,7 +168,7 @@ def _build_parser() -> argparse.ArgumentParser:
     convert_parser.add_argument(
         "--include-unsupported",
         action="store_true",
-        help="Also query unsupported entity types (keeps legacy skip reporting behavior).",
+        help="Include unsupported entity headers in skipped counts and strict checks.",
     )
     convert_parser.add_argument(
         "--no-colors",
@@ -179,6 +179,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--modelspace-only",
         action="store_true",
         help="Limit export to entities directly owned by *MODEL_SPACE.",
+    )
+    convert_parser.add_argument(
+        "--filter-layout-entities",
+        action="store_true",
+        help="Apply legacy layout ownership heuristics to suppress suspected duplicate geometry.",
     )
     convert_parser.add_argument(
         "--native-dimensions",
@@ -490,6 +495,7 @@ def _run_convert(
     include_unsupported: bool = False,
     preserve_colors: bool = True,
     modelspace_only: bool = False,
+    filter_layout_entities: bool = False,
     explode_dimensions: bool = False,
     flatten_inserts: bool = False,
     dim_block_policy: str = "smart",
@@ -509,6 +515,7 @@ def _run_convert(
             include_unsupported=include_unsupported,
             preserve_colors=preserve_colors,
             modelspace_only=modelspace_only,
+            filter_layout_entities=filter_layout_entities,
             explode_dimensions=explode_dimensions,
             flatten_inserts=flatten_inserts,
             dim_block_policy=dim_block_policy,
@@ -524,6 +531,8 @@ def _run_convert(
     print(f"skipped_entities: {result.skipped_entities}")
     for dxftype, count in result.skipped_by_type.items():
         print(f"skipped[{dxftype}]: {count}")
+    for dxftype, count in result.unqueried_by_type.items():
+        print(f"unqueried[{dxftype}]: {count}")
     return 0
 
 
@@ -592,6 +601,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             include_unsupported=bool(args.include_unsupported),
             preserve_colors=not bool(args.no_colors),
             modelspace_only=bool(args.modelspace_only),
+            filter_layout_entities=bool(args.filter_layout_entities),
             explode_dimensions=explode_dimensions,
             flatten_inserts=bool(args.flatten_inserts),
             dim_block_policy=str(args.dim_block_policy),
