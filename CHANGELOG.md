@@ -13,6 +13,11 @@
   writable selection. With `include_unsupported=True` these entities count
   towards skips and strict checks. Filtered references, missing decode rows
   and annotations or references removed before save also count as skips.
+- `ezdwg.raw.decode_linetype_elements(path, limit=None)` returns
+  `(handle, name, elements)` per linetype, with one element per dash:
+  `(length, flags, shape_code, x_offset, y_offset, scale, rotation,
+  style_handle, text)`. Rotation is in radians. A record whose elements cannot
+  be read is left out.
 
 ### DWG reader
 - The R2004 section map reader (AC1018, AC1024, AC1027, and AC1032) checks

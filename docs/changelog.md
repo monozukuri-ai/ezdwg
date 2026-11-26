@@ -20,6 +20,13 @@
   as `approximated` (informational in strict mode).
 - The header `DIMDSEP` is now `.`.
 
+### DXF conversion
+- `ezdwg.raw.decode_linetype_elements(path, limit=None)` returns
+  `(handle, name, elements)` per linetype, with one element per dash:
+  `(length, flags, shape_code, x_offset, y_offset, scale, rotation,
+  style_handle, text)`. Rotation is in radians. A record whose elements cannot
+  be read is left out.
+
 ### Added
 - Layouts. `Document.layouts()` returns the layout table: the model tab and
   the paper-space sheets with their name, tab order, block record, paper size,

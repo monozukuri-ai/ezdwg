@@ -1,4 +1,16 @@
 type LinetypeRow = (u64, String, String, f64, Vec<f64>);
+type LinetypeElement = (
+    f64,
+    u16,
+    u16,
+    f64,
+    f64,
+    f64,
+    f64,
+    Option<u64>,
+    Option<String>,
+);
+type LinetypeElementsRow = (u64, String, Vec<LinetypeElement>);
 type LayerLinetypeRow = (u64, u64);
 type EntityLinetypeRow = (u64, u64, u8, Option<u64>, f64);
 type EntityLineweightRow = (u64, Option<i16>, bool);
@@ -20,7 +32,7 @@ type LayoutObjectRow = (
     LayoutPlotRow,
 );
 
-/// A linetype definition holds at most 12 dash specifications in AutoCAD.
+/// The decoder accepts up to 32 dashes; AutoCAD's own limit is 12.
 const MAX_LINETYPE_DASHES: usize = 32;
 
 /// Fixed-layout start of a table record (LAYER, LTYPE, ...), read after the type code.
@@ -127,6 +139,28 @@ fn is_plausible_table_text(text: &str) -> bool {
     text.chars().count() <= 512 && !text.chars().any(|ch| ch.is_control() || ch == '\u{FFFD}')
 }
 
+struct LinetypeDash {
+    length: f64,
+    shape_code: u16,
+    x_offset: f64,
+    y_offset: f64,
+    scale: f64,
+    rotation: f64,
+    flags: u16,
+}
+
+/// A LTYPE record read up to the end of its dashes.
+struct LinetypeRecord<'a> {
+    /// Left right after the last dash.
+    reader: BitReader<'a>,
+    preamble: TableRecordPreamble,
+    handle: u64,
+    name: String,
+    description: String,
+    pattern_length: f64,
+    dashes: Vec<LinetypeDash>,
+}
+
 /// LTYPE record (ODA specification 20.4.58): name, description, pattern length and
 /// the dash lengths (positive = dash, negative = gap, 0 = dot, in drawing units).
 fn decode_linetype_record(
@@ -135,6 +169,23 @@ fn decode_linetype_record(
     version: &version::DwgVersion,
     expected_handle: u64,
 ) -> crate::core::result::Result<LinetypeRow> {
+    let ltype = read_linetype_record(record, api_header, version, expected_handle)?;
+    let dashes = ltype.dashes.iter().map(|dash| dash.length).collect();
+    Ok((
+        ltype.handle,
+        ltype.name,
+        ltype.description,
+        ltype.pattern_length,
+        dashes,
+    ))
+}
+
+fn read_linetype_record<'a>(
+    record: &'a objects::ObjectRecord<'_>,
+    api_header: &ApiObjectHeader,
+    version: &version::DwgVersion,
+    expected_handle: u64,
+) -> crate::core::result::Result<LinetypeRecord<'a>> {
     let mut reader = record.bit_reader();
     skip_object_type_prefix(&mut reader, version)?;
     let preamble = read_table_record_preamble(&mut reader, version, api_header)?;
@@ -171,17 +222,18 @@ fn decode_linetype_record(
     }
     let mut dashes = Vec::with_capacity(num_dashes);
     for _ in 0..num_dashes {
-        let length = reader.read_bd()?;
-        let _complex_shape_code = reader.read_bs()?;
-        let _x_offset = reader.read_rd(Endian::Little)?;
-        let _y_offset = reader.read_rd(Endian::Little)?;
-        let _scale = reader.read_bd()?;
-        let _rotation = reader.read_bd()?;
-        let _shape_flag = reader.read_bs()?;
-        dashes.push(length);
+        dashes.push(LinetypeDash {
+            length: reader.read_bd()?,
+            shape_code: reader.read_bs()?,
+            x_offset: reader.read_rd(Endian::Little)?,
+            y_offset: reader.read_rd(Endian::Little)?,
+            scale: reader.read_bd()?,
+            rotation: reader.read_bd()?,
+            flags: reader.read_bs()?,
+        });
     }
     if !pattern_length.is_finite()
-        || dashes.iter().any(|length| !length.is_finite())
+        || dashes.iter().any(|dash| !dash.length.is_finite())
         || !is_plausible_table_text(&name)
         || !is_plausible_table_text(&description)
     {
@@ -196,7 +248,157 @@ fn decode_linetype_record(
     } else {
         expected_handle
     };
-    Ok((handle, name, description, pattern_length, dashes))
+    Ok(LinetypeRecord {
+        reader,
+        preamble,
+        handle,
+        name,
+        description,
+        pattern_length,
+        dashes,
+    })
+}
+
+/// Dash flag 0x02: the element is a text, not a shape.
+const LINETYPE_DASH_TEXT: u16 = 0x02;
+
+/// Any decode failure leaves the record out, so callers fall back to its plain dashes.
+fn decode_linetype_element_record(
+    record: &objects::ObjectRecord<'_>,
+    api_header: &ApiObjectHeader,
+    version: &version::DwgVersion,
+    codepage: Option<u16>,
+    expected_handle: u64,
+) -> crate::core::result::Result<LinetypeElementsRow> {
+    let LinetypeRecord {
+        mut reader,
+        preamble,
+        handle,
+        name,
+        dashes,
+        ..
+    } = read_linetype_record(record, api_header, version, expected_handle)?;
+    let misaligned = |what: &str| DwgError::new(ErrorKind::Format, format!("LTYPE {what}"));
+
+    let text_count = dashes
+        .iter()
+        .filter(|dash| dash.flags & LINETYPE_DASH_TEXT != 0)
+        .count();
+    let texts = if table_record_strings_in_stream(version) {
+        // R2007+: the 512-byte UTF-16LE area exists only when some dash is a text.
+        if text_count == 0 {
+            Vec::new()
+        } else {
+            let area = reader.read_rcs(512)?;
+            let units: Vec<u16> = area
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            split_zero_terminated(&units, text_count)
+                .ok_or_else(|| misaligned("strings area holds too few texts"))?
+                .into_iter()
+                .map(|text| String::from_utf16_lossy(text))
+                .collect()
+        }
+    } else {
+        // R2004 and earlier store the 256-byte area even without a text dash.
+        let area = reader.read_rcs(256)?;
+        split_zero_terminated(&area, text_count)
+            .ok_or_else(|| misaligned("strings area holds too few texts"))?
+            .into_iter()
+            .map(|text| crate::bit::bit_reader::decode_tv_bytes(text, codepage))
+            .collect()
+    };
+    if texts.iter().any(|text| !is_plausible_table_text(text)) {
+        return Err(misaligned("text is implausible"));
+    }
+
+    let start_bit = preamble
+        .data_end_bit
+        .ok_or_else(|| misaligned("record without a handle stream position"))?;
+    if reader.tell_bits() > u64::from(start_bit) || u64::from(start_bit) >= reader.total_bits() {
+        return Err(misaligned("strings area overlaps the handle stream"));
+    }
+    reader.set_bit_pos(start_bit);
+    let _control = entities::common::read_handle_reference(&mut reader, handle)?;
+    let reactors =
+        entities::common::checked_handle_count(&reader, preamble.num_reactors as usize, "reactor")?;
+    for _ in 0..reactors {
+        let _reactor = entities::common::read_handle_reference(&mut reader, handle)?;
+    }
+    if !preamble.xdic_missing {
+        let _xdictionary = entities::common::read_handle_reference(&mut reader, handle)?;
+    }
+    let _xref_block = entities::common::read_handle_reference(&mut reader, handle)?;
+
+    let mut texts = texts.into_iter();
+    let mut elements = Vec::with_capacity(dashes.len());
+    for dash in dashes {
+        let style = entities::common::read_handle_reference(&mut reader, handle)?;
+        let values = [dash.x_offset, dash.y_offset, dash.scale, dash.rotation];
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(misaligned("element has implausible values"));
+        }
+        let text = if dash.flags & LINETYPE_DASH_TEXT != 0 {
+            texts.next()
+        } else {
+            None
+        };
+        elements.push((
+            dash.length,
+            dash.flags,
+            dash.shape_code,
+            dash.x_offset,
+            dash.y_offset,
+            dash.scale,
+            dash.rotation,
+            (style != 0).then_some(style),
+            text,
+        ));
+    }
+    Ok((handle, name, elements))
+}
+
+/// The last run may lack its terminator; `None` when the area holds fewer than `count`.
+fn split_zero_terminated<T: Copy + Default + PartialEq>(
+    area: &[T],
+    count: usize,
+) -> Option<Vec<&[T]>> {
+    let mut rest = area;
+    let mut parts = Vec::with_capacity(count);
+    for _ in 0..count {
+        if rest.is_empty() {
+            return None;
+        }
+        let end = rest
+            .iter()
+            .position(|unit| *unit == T::default())
+            .unwrap_or(rest.len());
+        parts.push(&rest[..end]);
+        rest = &rest[(end + 1).min(rest.len())..];
+    }
+    Some(parts)
+}
+
+#[cfg(test)]
+mod linetype_strings_area_tests {
+    use super::split_zero_terminated;
+
+    #[test]
+    fn walks_texts_in_order_and_rejects_a_short_area() {
+        let area = b"GAS\0AB\0\0\0";
+        assert_eq!(
+            split_zero_terminated(area, 2),
+            Some(vec![&b"GAS"[..], b"AB"])
+        );
+        assert_eq!(
+            split_zero_terminated(&area[..6], 2),
+            Some(vec![&b"GAS"[..], b"AB"])
+        );
+        assert_eq!(split_zero_terminated(&area[..4], 2), None);
+        assert_eq!(split_zero_terminated::<u8>(&[], 0), Some(vec![]));
+        assert_eq!(split_zero_terminated::<u8>(&[], 1), None);
+    }
 }
 
 /// Linetype table: `(handle, name, description, pattern_length, dash_lengths)`.
@@ -233,6 +435,61 @@ pub fn decode_linetypes(path: &str, limit: Option<usize>) -> PyResult<Vec<Linety
             Err(err) => return Err(to_py_err(err)),
         };
         // The object map can list a handle more than once; keep the first good record.
+        if !seen.insert(row.0) {
+            continue;
+        }
+        result.push(row);
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Complex elements of every linetype: `(handle, name, elements)`.
+///
+/// One element per dash, in dash order: `(length, flags, shape_code, x_offset,
+/// y_offset, scale, rotation, style_handle, text)`. `flags` 0x02 marks a text
+/// element and 0x04 a shape; `rotation` is in radians; `style_handle` is the
+/// STYLE record of the text font or shape file (`None` when 0); `text` is the
+/// string of a text element. A record whose elements cannot be read is left out.
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_linetype_elements(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<LinetypeElementsRow>> {
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let best_effort = shared.best_effort;
+    let dynamic_types = &shared.dynamic_types;
+    let index = &shared.index;
+    let mut result = Vec::new();
+    let mut seen: HashSet<u64> = HashSet::new();
+
+    for obj in decoder
+        .matching_objects(index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x39, "LTYPE", dynamic_types)
+        })
+        .iter()
+    {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x39, "LTYPE", dynamic_types) {
+            continue;
+        }
+        let Ok(row) = decode_linetype_element_record(
+            &record,
+            &header,
+            decoder.version(),
+            decoder.codepage(),
+            obj.handle.0,
+        ) else {
+            continue;
+        };
         if !seen.insert(row.0) {
             continue;
         }

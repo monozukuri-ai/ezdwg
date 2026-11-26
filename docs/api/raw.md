@@ -268,6 +268,20 @@ Decode the linetype table. Each tuple: `(handle, name, description, pattern_leng
 sign convention: positive = dash, negative = gap, 0 = dot. The table includes
 the built-in `ByBlock`, `ByLayer` and `Continuous` entries, whose pattern is empty.
 
+### decode_linetype_elements
+
+```python
+raw.decode_linetype_elements(path: str, limit: int | None = None) -> list[tuple[int, str, list[tuple[float, int, int, float, float, float, float, int | None, str | None]]]]
+```
+
+Decode the complex elements of the linetype table. Each tuple: `(handle, name, elements)`,
+one element per dash in dash order:
+`(length, flags, shape_code, x_offset, y_offset, scale, rotation, style_handle, text)`.
+`flags` 0x02 marks a text element and 0x04 a shape; `rotation` is in radians as stored.
+`style_handle` is the STYLE record of the text font or shape file, `None` when not set.
+`text` is the string of a text element, else `None`. A record whose elements cannot be
+read is left out; its plain dashes are still in `decode_linetypes`.
+
 ### decode_layer_linetypes
 
 ```python

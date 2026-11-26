@@ -186,3 +186,40 @@ def test_written_r2000_entities_keep_their_layer(tmp_path: Path) -> None:
     assert doc.layers.by_handle(line.dxf["layer_handle"]).name == "0"
     assert line.dxf["linetype"] == "BYLAYER"
     assert line.dxf["linetype_scale"] == 1.0
+
+
+ELEMENT_SAMPLES = [
+    SAMPLES / "acadsharp" / f"sample_{version}.dwg"
+    for version in ("AC1014", "AC1015", "AC1018", "AC1021", "AC1024", "AC1027", "AC1032")
+]
+
+
+def _elements(path: Path) -> dict:
+    return {name: els for _h, name, els in ezdwg.raw.decode_linetype_elements(str(path))}
+
+
+@pytest.mark.parametrize("path", ELEMENT_SAMPLES, ids=lambda path: path.stem)
+def test_linetype_elements_text_and_shapes(path: Path) -> None:
+    rows = _elements(path)
+    length, flags, code, x, y, scale, rot, style, text = rows["GAS_LINE"][1]
+    assert flags & 2 and text == "GAS" and style is not None
+    assert (x, y, scale) == pytest.approx((-0.1, -0.05, 0.1))
+    length, flags, code, x, y, scale, rot, style, text = rows["TRACKS"][0]
+    assert flags & 4 and code == 130 and scale == pytest.approx(0.25) and text is None and style is not None
+    length, flags, code, x, y, scale, rot, style, text = rows["ZIGZAG"][2]
+    assert code == 131 and x == pytest.approx(0.2) and abs(rot) == pytest.approx(math.pi)
+
+
+@pytest.mark.parametrize("path", ELEMENT_SAMPLES, ids=lambda path: path.stem)
+def test_linetype_elements_match_dash_lengths(path: Path) -> None:
+    dashes = {name: d for _h, name, _desc, _len, d in ezdwg.raw.decode_linetypes(str(path))}
+    for name, els in _elements(path).items():
+        assert [e[0] for e in els] == pytest.approx(dashes[name])
+
+
+def test_linetype_element_style_handles_are_style_records() -> None:
+    path = SAMPLES / "acadsharp" / "sample_AC1015.dwg"
+    styles = {r["handle"] for r in ezdwg.raw.decode_write_tables(str(path)) if r["kind"] == "STYLE"}
+    rows = _elements(path)
+    assert rows["GAS_LINE"][1][7] == 0x11 and rows["TRACKS"][0][7] == 0x27F
+    assert {0x11, 0x27F} <= styles
