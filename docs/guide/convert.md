@@ -97,6 +97,7 @@ INSERT, MINSERT, DIMENSION
 - Block definitions referenced by INSERT entities are reconstructed from the DWG source.
 - DIMENSION entities use native ezdxf dimension builders with a text fallback for unsupported subtypes.
 - Style, linetype, and layer properties may not be fully preserved.
+- Records with unusable names or values are skipped. References to them fall back to the default.
 
 ---
 

@@ -13,6 +13,18 @@
   writable selection. With `include_unsupported=True` these entities count
   towards skips and strict checks. Filtered references, missing decode rows
   and annotations or references removed before save also count as skips.
+- `to_dxf` writes the LTYPE table: every decoded linetype with its
+  description and pattern, complex linetypes (text and shape elements with
+  their STYLE reference) included. ByBlock, ByLayer and Continuous keep
+  ezdxf's entries with the DWG description.
+- `to_dxf` keeps layer linetypes, and the linetype and linetype scale of
+  modelspace entities, block members and attributes.
+- `to_dxf` writes the STYLE table (font file, big font, fixed height, width
+  factor, oblique angle, generation and vertical flags, shape files, and the
+  TrueType family, bold and italic data) and sets the text style on TEXT,
+  MTEXT, ATTRIB and ATTDEF.
+- Records with unusable names or values are skipped, and references to them
+  fall back to the default.
 - `ezdwg.raw.decode_linetype_elements(path, limit=None)` returns
   `(handle, name, elements)` per linetype, with one element per dash:
   `(length, flags, shape_code, x_offset, y_offset, scale, rotation,

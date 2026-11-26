@@ -68,6 +68,7 @@ def _prepare_dxf_layers(
     dxf_doc: Any,
     layer_styles_by_handle: dict[int, tuple[int, int | None]],
     layer_names_by_handle: dict[int, str] | None = None,
+    layer_linetypes_by_handle: dict[int, str] | None = None,
 ) -> dict[int, str]:
     mapping: dict[int, str] = {0: "0"}
     for handle in sorted(layer_styles_by_handle):
@@ -100,4 +101,10 @@ def _prepare_dxf_layers(
                     except Exception:
                         continue
         mapping[handle] = name
+        linetype = (layer_linetypes_by_handle or {}).get(handle)
+        if linetype is not None:
+            try:
+                dxf_doc.layers.get(name).dxf.linetype = linetype
+            except Exception:
+                pass
     return mapping

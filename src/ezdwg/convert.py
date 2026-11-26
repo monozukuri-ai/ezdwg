@@ -83,6 +83,13 @@ from ._convert_layer import (
     _layer_styles_by_handle,
     _prepare_dxf_layers,
 )
+from ._convert_tables import (
+    DxfTableContext,
+    entity_linetype,
+    prepare_dxf_linetypes,
+    prepare_dxf_styles,
+    text_style_name,
+)
 from ._convert_geometry_filter import (
     _ezdxf_entity_type,
     _has_origin_anchor_far_lwpolyline_geometry,
@@ -646,12 +653,16 @@ def to_dxf(
             except Exception:
                 continue
 
+    table_context = DxfTableContext()
+    prepare_dxf_styles(dxf_doc, layout.doc.decode_path or layout.doc.path, table_context)
+    prepare_dxf_linetypes(dxf_doc, layout.doc.decode_path or layout.doc.path, table_context)
     layer_styles_by_handle = _layer_styles_by_handle(layout.doc.decode_path or layout.doc.path)
     layer_names_by_handle = _layer_names_by_handle(layout.doc.decode_path or layout.doc.path)
     layer_name_by_handle = _prepare_dxf_layers(
         dxf_doc,
         layer_styles_by_handle,
         layer_names_by_handle,
+        table_context.linetype_name_by_layer,
     )
 
     block_reference_entities = [
@@ -680,6 +691,7 @@ def to_dxf(
             layer_name_by_handle=layer_name_by_handle,
             dim_block_policy=normalized_dim_block_policy,
             decode_cache=decode_cache,
+            table_context=table_context,
         )
         # Block definitions are assembled just above; drop memoized block
         # safety/span caches so modelspace INSERT handling sees final content.
@@ -702,6 +714,7 @@ def to_dxf(
             layer_name_by_handle=layer_name_by_handle,
             dim_block_policy=normalized_dim_block_policy,
             dimension_context=dimension_write_context,
+            table_context=table_context,
         ):
             if start is not None:
                 retained_outputs.append((entity.dxftype, modelspace[start:]))
@@ -3356,7 +3369,9 @@ def _attach_insert_attributes(
             export_entities.append(entity)
             continue
         dxf = dict(entity.dxf)
-        dxf["attributes"] = [dict(attribute.dxf) for attribute in attributes]
+        dxf["attributes"] = [
+            {**attribute.dxf, "handle": attribute.handle} for attribute in attributes
+        ]
         export_entities.append(Entity(dxftype=entity.dxftype, handle=entity.handle, dxf=dxf))
     return export_entities
 
@@ -3396,6 +3411,7 @@ def _populate_block_definitions(
     layer_name_by_handle: dict[int, str] | None = None,
     dim_block_policy: str = "smart",
     decode_cache: _ConvertDecodeCache | None = None,
+    table_context: DxfTableContext | None = None,
 ) -> None:
     if reference_entities is None:
         reference_entities = []
@@ -3761,6 +3777,7 @@ def _populate_block_definitions(
                 explode_dimensions=explode_dimensions,
                 layer_name_by_handle=layer_name_by_handle,
                 dim_block_policy=dim_block_policy,
+                table_context=table_context,
             )
 
 
@@ -4860,6 +4877,7 @@ def _write_entity_to_modelspace(
     layer_name_by_handle: dict[int, str] | None = None,
     dim_block_policy: str = "smart",
     dimension_context: _DimensionWriteContext | None = None,
+    table_context: DxfTableContext | None = None,
 ) -> bool:
     try:
         return _write_entity_to_modelspace_unsafe(
@@ -4869,6 +4887,7 @@ def _write_entity_to_modelspace(
             layer_name_by_handle=layer_name_by_handle,
             dim_block_policy=dim_block_policy,
             dimension_context=dimension_context,
+            table_context=table_context,
         )
     except Exception:
         return False
@@ -4882,10 +4901,20 @@ def _write_entity_to_modelspace_unsafe(
     layer_name_by_handle: dict[int, str] | None = None,
     dim_block_policy: str = "smart",
     dimension_context: _DimensionWriteContext | None = None,
+    table_context: DxfTableContext | None = None,
 ) -> bool:
     dxftype = entity.dxftype
     dxf = entity.dxf
-    dxfattribs = _entity_dxfattribs(dxf, layer_name_by_handle=layer_name_by_handle)
+    dxfattribs = _entity_dxfattribs(
+        dxf,
+        layer_name_by_handle=layer_name_by_handle,
+        table_context=table_context,
+        entity_handle=entity.handle,
+    )
+    if dxftype in {"TEXT", "ATTRIB", "ATTDEF", "MTEXT"}:
+        style = text_style_name(table_context, entity.handle, dxf)
+        if style is not None:
+            dxfattribs["style"] = style
     is_modelspace_layout = bool(getattr(modelspace, "is_modelspace", False))
 
     if dxftype == "LINE":
@@ -5232,6 +5261,7 @@ def _write_entity_to_modelspace_unsafe(
                         dxf,
                         dxfattribs,
                         attributes,
+                        table_context,
                     )
                 except Exception:
                     pass
@@ -5245,7 +5275,7 @@ def _write_entity_to_modelspace_unsafe(
                 ref.dxf.row_count = row_count
                 ref.dxf.column_spacing = _finite_float(dxf.get("column_spacing", 0.0), 0.0)
                 ref.dxf.row_spacing = _finite_float(dxf.get("row_spacing", 0.0), 0.0)
-                _write_insert_attributes(ref, attributes)
+                _write_insert_attributes(ref, attributes, table_context)
                 return True
             except Exception:
                 pass
@@ -5304,7 +5334,7 @@ def _write_entity_to_modelspace_unsafe(
                 ref.dxf.yscale = yscale
                 ref.dxf.zscale = zscale
                 ref.dxf.rotation = rotation
-                _write_insert_attributes(ref, list(dxf.get("attributes") or []))
+                _write_insert_attributes(ref, list(dxf.get("attributes") or []), table_context)
                 return True
             except Exception:
                 # Block definitions are not exported yet. Keep insert location visible.
@@ -5439,6 +5469,7 @@ def _write_minsert_expanded(
     dxf: dict[str, Any],
     dxfattribs: dict[str, Any],
     attributes: list[Any],
+    table_context: DxfTableContext | None = None,
 ) -> bool:
     row_count = max(1, int(dxf.get("row_count", 1)))
     column_count = max(1, int(dxf.get("column_count", 1)))
@@ -5474,7 +5505,7 @@ def _write_minsert_expanded(
                 ref.dxf.zscale = float(dxf.get("zscale", 1.0))
                 ref.dxf.rotation = rotation_deg
                 shifted_attributes = _shift_attribute_positions(attributes, offset)
-                _write_insert_attributes(ref, shifted_attributes)
+                _write_insert_attributes(ref, shifted_attributes, table_context)
                 written += 1
             except Exception:
                 continue
@@ -5506,7 +5537,9 @@ def _shift_attribute_positions(attributes: list[Any], offset: tuple[float, float
     return shifted
 
 
-def _write_insert_attributes(insert_ref: Any, attributes: list[Any]) -> None:
+def _write_insert_attributes(
+    insert_ref: Any, attributes: list[Any], table_context: DxfTableContext | None = None
+) -> None:
     if not attributes:
         return
     for attribute in attributes:
@@ -5519,7 +5552,12 @@ def _write_insert_attributes(insert_ref: Any, attributes: list[Any]) -> None:
         if tag_value == "":
             continue
         text = attribute.get("text")
-        attrib_dxfattribs = _entity_dxfattribs(attribute)
+        attrib_dxfattribs = _entity_dxfattribs(
+            attribute, table_context=table_context, entity_handle=attribute.get("handle")
+        )
+        style = text_style_name(table_context, None, attribute)
+        if style is not None:
+            attrib_dxfattribs["style"] = style
         height = attribute.get("height")
         if height is not None:
             try:
@@ -6054,8 +6092,15 @@ def _entity_dxfattribs(
     dxf: dict[str, Any],
     *,
     layer_name_by_handle: dict[int, str] | None = None,
+    table_context: DxfTableContext | None = None,
+    entity_handle: int | None = None,
 ) -> dict[str, Any]:
     attribs: dict[str, Any] = {}
+    linetype, ltscale = entity_linetype(table_context, entity_handle)
+    if linetype is not None:
+        attribs["linetype"] = linetype
+    if ltscale is not None:
+        attribs["ltscale"] = ltscale
     if isinstance(layer_name_by_handle, dict):
         layer_handle = dxf.get("layer_handle")
         try:
