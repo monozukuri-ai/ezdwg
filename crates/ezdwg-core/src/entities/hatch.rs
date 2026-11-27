@@ -24,6 +24,8 @@ enum HatchStringMode {
 pub struct HatchPath {
     pub closed: bool,
     /// The boundary as closed points, with arcs, ellipses and splines flattened.
+    /// Empty when the hatch's flattened points exceed the per-hatch budget
+    /// (262,144 points) at or before this path; `boundary` is kept in full.
     pub points: Vec<(f64, f64)>,
     /// The boundary before flattening.
     pub boundary: HatchBoundary,
@@ -56,6 +58,7 @@ pub enum HatchEdge {
         end_angle: f64,
         counter_clockwise: bool,
     },
+    /// `start_angle` and `end_angle` are ellipse parameters, not polar angles.
     Ellipse {
         center: (f64, f64),
         major_axis: (f64, f64),
@@ -568,8 +571,9 @@ fn decode_hatch_body(
                         let end = read_point2rd(reader)?;
                         require_plausible_hatch_point(start, "line edge start")?;
                         require_plausible_hatch_point(end, "line edge end")?;
-                        append_segment_points(&mut path_points, &[start, end]);
-                        charge_hatch_points(&mut tessellated_points, 2)?;
+                        if charge_hatch_points(&mut tessellated_points, 2) {
+                            append_segment_points(&mut path_points, &[start, end]);
+                        }
                         edges.push(HatchEdge::Line { start, end });
                     }
                     2 => {
@@ -582,10 +586,11 @@ fn decode_hatch_body(
                         require_plausible_hatch_length(radius, "arc edge radius")?;
                         require_plausible_hatch_scalar(start_angle, "arc edge start angle")?;
                         require_plausible_hatch_scalar(end_angle, "arc edge end angle")?;
-                        let segment =
-                            circular_arc_points(center, radius, start_angle, end_angle, is_ccw, 64);
-                        charge_hatch_points(&mut tessellated_points, segment.len())?;
-                        append_segment_points(&mut path_points, &segment);
+                        let (a0, a1) = real_edge_angles(start_angle, end_angle, is_ccw);
+                        let segment = circular_arc_points(center, radius, a0, a1, is_ccw, 64);
+                        if charge_hatch_points(&mut tessellated_points, segment.len()) {
+                            append_segment_points(&mut path_points, &segment);
+                        }
                         edges.push(HatchEdge::Arc {
                             center,
                             radius,
@@ -609,17 +614,12 @@ fn decode_hatch_body(
                         require_plausible_hatch_scalar(ratio, "ellipse edge ratio")?;
                         require_plausible_hatch_scalar(start_angle, "ellipse edge start angle")?;
                         require_plausible_hatch_scalar(end_angle, "ellipse edge end angle")?;
-                        let segment = elliptical_arc_points(
-                            center,
-                            major_endpoint,
-                            ratio,
-                            start_angle,
-                            end_angle,
-                            is_ccw,
-                            96,
-                        );
-                        charge_hatch_points(&mut tessellated_points, segment.len())?;
-                        append_segment_points(&mut path_points, &segment);
+                        let (a0, a1) = real_edge_angles(start_angle, end_angle, is_ccw);
+                        let segment =
+                            elliptical_arc_points(center, major_endpoint, ratio, a0, a1, is_ccw, 96);
+                        if charge_hatch_points(&mut tessellated_points, segment.len()) {
+                            append_segment_points(&mut path_points, &segment);
+                        }
                         edges.push(HatchEdge::Ellipse {
                             center,
                             major_axis: major_endpoint,
@@ -631,8 +631,9 @@ fn decode_hatch_body(
                     }
                     4 => {
                         let (segment, edge) = read_spline_edge(reader, spline_fit_points, debug)?;
-                        charge_hatch_points(&mut tessellated_points, segment.len())?;
-                        append_segment_points(&mut path_points, &segment);
+                        if charge_hatch_points(&mut tessellated_points, segment.len()) {
+                            append_segment_points(&mut path_points, &segment);
+                        }
                         edges.push(edge);
                     }
                     _ => {
@@ -644,6 +645,9 @@ fn decode_hatch_body(
                 }
             }
             let _num_boundary_obj_handles = reader.read_bl()?;
+            if tessellated_points > MAX_HATCH_TESSELLATION_POINTS {
+                path_points = Vec::new();
+            }
             close_path_if_needed(&mut path_points);
             paths.push(HatchPath {
                 closed: true,
@@ -656,7 +660,7 @@ fn decode_hatch_body(
         let bulges_present = reader.read_b()? != 0;
         let closed = reader.read_b()? != 0;
         let num_vertices = bounded_count(reader.read_bl()?, "hatch polyline vertices")?;
-        charge_hatch_points(&mut tessellated_points, num_vertices)?;
+        charge_hatch_points(&mut tessellated_points, num_vertices);
         // バルジは頂点ごとに最大64点へ増幅される。中間バッファの瞬間確保も
         // 抑えるため、バルジ付きは頂点数自体を実務上十分な範囲に制限する
         if bulges_present && num_vertices > 65_536 {
@@ -688,16 +692,30 @@ fn decode_hatch_body(
             vertices: vertices.clone(),
             bulges: bulges.clone(),
         };
-        let mut points = if bulges_present {
-            polyline_with_bulges_points(&vertices, &bulges, closed, 64)
+        // 頂点数分は課金済み。予算の残りを超える展開は途中で打ち切る
+        let allowed = MAX_HATCH_TESSELLATION_POINTS
+            .saturating_sub(tessellated_points)
+            .saturating_add(num_vertices);
+        let flattened = if tessellated_points > MAX_HATCH_TESSELLATION_POINTS {
+            None
+        } else if bulges_present {
+            polyline_with_bulges_points(&vertices, &bulges, closed, 64, allowed)
         } else {
-            vertices
+            Some(vertices)
         };
-        // 増幅後の実点数で課金(読み取り時に頂点数分は課金済み)
-        charge_hatch_points(
-            &mut tessellated_points,
-            points.len().saturating_sub(num_vertices),
-        )?;
+        let mut points = match flattened {
+            Some(points) => {
+                charge_hatch_points(
+                    &mut tessellated_points,
+                    points.len().saturating_sub(num_vertices),
+                );
+                points
+            }
+            None => {
+                charge_hatch_points(&mut tessellated_points, MAX_HATCH_TESSELLATION_POINTS + 1);
+                Vec::new()
+            }
+        };
         if closed {
             close_path_if_needed(&mut points);
         }
@@ -829,7 +847,8 @@ fn scan_hatch_polyline_paths(
             bulges: bulges.clone(),
         };
         let mut points = if bulges_present {
-            polyline_with_bulges_points(&vertices, &bulges, closed, 64)
+            polyline_with_bulges_points(&vertices, &bulges, closed, 64, usize::MAX)
+                .unwrap_or_default()
         } else {
             vertices
         };
@@ -852,6 +871,18 @@ fn scan_hatch_polyline_paths(
     Ok(paths)
 }
 
+/// Point count of a path; for a path the flattening budget left without points,
+/// the count of its stored boundary (two points per edge, or the vertices).
+fn path_size(path: &HatchPath) -> usize {
+    if !path.points.is_empty() {
+        return path.points.len();
+    }
+    match &path.boundary {
+        HatchBoundary::Polyline { vertices, .. } => vertices.len(),
+        HatchBoundary::Edges(edges) => edges.len().saturating_mul(2),
+    }
+}
+
 /// Score below which a candidate is a misaligned read, not a hatch.
 const HATCH_CANDIDATE_REJECT: i32 = i32::MIN / 8;
 
@@ -862,14 +893,14 @@ fn score_hatch_candidate(entity: &HatchEntity) -> i32 {
     }
     // Without a single usable boundary the candidate read the wrong bits (every
     // real hatch has a boundary with at least three points).
-    if entity.paths.is_empty() || entity.paths.iter().all(|path| path.points.len() < 3) {
+    if entity.paths.is_empty() || entity.paths.iter().all(|path| path_size(path) < 3) {
         return i32::MIN / 4;
     }
     score += (entity.paths.len().min(32) as i32) * 4;
     // A boundary needs at least three points; empty/degenerate paths are a strong
     // sign of a misaligned candidate (they used to outscore real geometry).
     for path in &entity.paths {
-        if path.points.len() >= 3 {
+        if path_size(path) >= 3 {
             score += 3;
         } else {
             score -= 8;
@@ -1370,14 +1401,16 @@ fn elliptical_arc_points(
     out
 }
 
+/// None as soon as the flattened polyline would hold more than `max_points` points.
 fn polyline_with_bulges_points(
     points: &[(f64, f64)],
     bulges: &[f64],
     closed: bool,
     arc_segments: usize,
-) -> Vec<(f64, f64)> {
+    max_points: usize,
+) -> Option<Vec<(f64, f64)>> {
     if points.len() <= 1 {
-        return points.to_vec();
+        return Some(points.to_vec());
     }
     let mut bulge_values = vec![0.0f64; points.len()];
     for (idx, bulge) in bulges.iter().enumerate().take(points.len()) {
@@ -1396,8 +1429,11 @@ fn polyline_with_bulges_points(
         let bulge = bulge_values[idx];
         let segment = bulge_segment_points(start, end, bulge, arc_segments);
         append_segment_points(&mut out, &segment);
+        if out.len() > max_points {
+            return None;
+        }
     }
-    out
+    Some(out)
 }
 
 fn bulge_segment_points(
@@ -1474,17 +1510,24 @@ fn points_equal_2d(a: (f64, f64), b: (f64, f64)) -> bool {
 /// 1つのHATCHが展開してよいテッセレーション点数の上限。実務図面のハッチは
 /// 数千点で足りる。壊れた境界データは円弧セグメント1個あたり64点(楕円96点)に
 /// 増幅されるため、カウント上限(bounded_count)だけでは数GBに膨らみうる。
+/// 上限を超えたハッチは破棄せず、超えた時点以降のパスの点だけを空にする(境界データは保持)。
 const MAX_HATCH_TESSELLATION_POINTS: usize = 262_144;
 
-fn charge_hatch_points(total: &mut usize, additional: usize) -> Result<()> {
+/// Adds `additional` points to the hatch total; false once the total is over the
+/// budget. The total only grows, so every later charge of the hatch fails too.
+fn charge_hatch_points(total: &mut usize, additional: usize) -> bool {
     *total = total.saturating_add(additional);
-    if *total > MAX_HATCH_TESSELLATION_POINTS {
-        return Err(DwgError::new(
-            ErrorKind::Format,
-            format!("hatch tessellation exceeds {MAX_HATCH_TESSELLATION_POINTS} points"),
-        ));
+    *total <= MAX_HATCH_TESSELLATION_POINTS
+}
+
+/// The real start and end angles of an arc or ellipse edge. A clockwise edge
+/// stores them mirrored (as DXF group codes 50/51 do), so its real angles are the negated ones.
+fn real_edge_angles(start_angle: f64, end_angle: f64, is_ccw: bool) -> (f64, f64) {
+    if is_ccw {
+        (start_angle, end_angle)
+    } else {
+        (-start_angle, -end_angle)
     }
-    Ok(())
 }
 
 fn bounded_count(raw: u32, label: &str) -> Result<usize> {

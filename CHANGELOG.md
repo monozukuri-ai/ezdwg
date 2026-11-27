@@ -23,8 +23,17 @@
   factor, oblique angle, generation and vertical flags, shape files, and the
   TrueType family, bold and italic data) and sets the text style on TEXT,
   MTEXT, ATTRIB and ATTDEF.
+- `to_dxf` keeps the HATCH pattern angle, scale, double flag and pattern
+  definition.
 - HATCH pattern names of R2007+ drawings are read from the string stream.
-  They were empty, and `to_dxf` named every such pattern ANSI31.
+  They were empty, and `to_dxf` named every such pattern ANSI31. A hatch
+  with a definition but no name is now written as `_USER`.
+- `to_dxf` writes HATCH boundaries as the DWG stores them: line, arc,
+  ellipse and spline edges, and polylines with their bulges. They were
+  flattened into dense polyline paths. A read HATCH path carries the stored
+  boundary under `boundary` (a `raw.decode_hatch_boundaries` row); `points`
+  stay the flattened boundary.
+- Linetypes, styles and hatch patterns are kept whatever `preserve_colors` is.
 - Records with unusable names or values are skipped, and references to them
   fall back to the default.
 - `ezdwg.raw.decode_linetype_elements(path, limit=None)` returns
@@ -34,6 +43,12 @@
   be read is left out.
 
 ### DWG reader
+- A HATCH whose flattened boundary is over 262,144 points is read instead of
+  dropped. Its boundaries are kept in full; the `points` of the path that went
+  over the budget and of the paths after it are empty.
+- Clockwise arc and ellipse edges of a HATCH boundary are flattened along the
+  right side: their stored angles are mirrored, as in DXF group codes 50/51.
+  Such arcs bulged to the wrong side.
 - The R2004 section map reader (AC1018, AC1024, AC1027, and AC1032) checks
   section and page counts before allocating memory. A malformed count now
   returns a format error. The page and section maps also honor the configured

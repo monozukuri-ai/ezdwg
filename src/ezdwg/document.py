@@ -1782,6 +1782,7 @@ class Layout:
 
         if dxftype == "HATCH":
             hatch_patterns = _hatch_pattern_map(decode_path)
+            hatch_boundaries = _hatch_boundary_map(decode_path)
             for (
                 handle,
                 name,
@@ -1791,17 +1792,21 @@ class Layout:
                 extrusion,
                 path_rows,
             ) in raw.decode_hatch_entities(decode_path):
+                boundaries = hatch_boundaries.get(handle)
+                if boundaries is not None and len(boundaries) != len(path_rows):
+                    boundaries = None
                 paths = []
-                for closed, points in path_rows:
+                for index, (closed, points) in enumerate(path_rows):
                     path_points = [(x, y, elevation) for x, y in points]
                     if bool(closed) and len(path_points) > 1 and path_points[0] != path_points[-1]:
                         path_points.append(path_points[0])
-                    paths.append(
-                        {
-                            "closed": bool(closed),
-                            "points": path_points,
-                        }
-                    )
+                    path = {
+                        "closed": bool(closed),
+                        "points": path_points,
+                    }
+                    if boundaries is not None:
+                        path["boundary"] = boundaries[index]
+                    paths.append(path)
                 hatch_dxf = {
                     "pattern_name": name,
                     "solid_fill": bool(solid_fill),
@@ -4463,6 +4468,14 @@ def _hatch_pattern_map(path: str) -> dict[int, dict[str, Any]]:
         }
         for handle, angle, scale, double, lines in rows
     }
+
+
+def _hatch_boundary_map(path: str) -> dict[int, list[tuple[Any, ...]]]:
+    """Boundary paths of every hatch before flattening, as ``raw.decode_hatch_boundaries`` rows."""
+    try:
+        return dict(raw.decode_hatch_boundaries(path))
+    except Exception:
+        return {}
 
 
 @lru_cache(maxsize=16)

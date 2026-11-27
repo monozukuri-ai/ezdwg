@@ -548,6 +548,38 @@ def test_linetypes_r12_saves(tmp_path):
     assert sum(1 for e in doc.modelspace() if e.dxf.get("linetype") == "GAS_LINE") == 1
 
 
+def test_hatch_pattern_scale_from_sample(tmp_path):
+    doc = _convert(tmp_path, AC1015)
+    scales = sorted(
+        round(h.dxf.pattern_scale, 3)
+        for h in doc.modelspace().query("HATCH")
+        if not h.dxf.solid_fill
+    )
+    assert scales == [0.1, 0.1, 0.1, 0.1, 1.0, 1.0]
+
+
+def test_hatch_definition_is_not_scaled_twice(tmp_path):
+    decoded = {
+        e.dxf["pattern_name"]: e.dxf["pattern_lines"]
+        for e in ezdwg.read(str(AC1015)).modelspace().query("HATCH")
+        if not e.dxf.get("solid_fill") and e.dxf.get("pattern_lines")
+    }
+    assert decoded
+    doc = _convert(tmp_path, AC1015)
+    checked = 0
+    for hatch in doc.modelspace().query("HATCH"):
+        lines = decoded.get(hatch.dxf.pattern_name)
+        if hatch.dxf.solid_fill or not lines:
+            continue
+        assert len(hatch.pattern.lines) == len(lines)
+        for got, want in zip(hatch.pattern.lines, lines):
+            assert got.angle == pytest.approx(want["angle"])
+            assert tuple(got.offset) == pytest.approx(want["offset"])
+            assert list(got.dash_length_items) == pytest.approx(want["dashes"])
+        checked += 1
+    assert checked == len(decoded)
+
+
 @pytest.mark.parametrize("version", ["AC1021", "AC1024", "AC1027", "AC1032"])
 def test_hatch_names_from_string_stream(version):
     def names(path):
@@ -556,3 +588,88 @@ def test_hatch_names_from_string_stream(version):
     want = names(AC1015)
     assert "ANSI31" in dict(want).values()
     assert names(ROOT / f"test_dwg/acadsharp/sample_{version}.dwg") == want
+
+
+def test_write_hatch_unnamed_pattern():
+    line = {"angle": 30.0, "base": (0.0, 0.0), "offset": (3.0, 4.0), "dashes": []}
+    user = _write_hatch_in_new_doc(_hatch_dxf(pattern_name="", pattern_lines=[line]))
+    assert (user.dxf.pattern_name, user.dxf.pattern_type) == ("_USER", 0)
+    assert tuple(user.pattern.lines[0].offset) == pytest.approx((3.0, 4.0))
+    bare = _write_hatch_in_new_doc(_hatch_dxf(pattern_name=""))
+    assert (bare.dxf.pattern_name, bare.dxf.pattern_type) == ("ANSI31", 1)
+
+
+def _hatch_dxf(**values):
+    dxf = {
+        "paths": [{"points": [(0, 0), (10, 0), (10, 10)], "closed": True}],
+        "pattern_name": "MUDST",
+    }
+    dxf.update(values)
+    return dxf
+
+
+def _write_hatch_in_new_doc(dxf):
+    from ezdwg import convert
+
+    doc = ezdxf.new("R2000")
+    doc.header["$MEASUREMENT"] = 1
+    assert convert._write_hatch(doc.modelspace(), dxf, {})
+    return list(doc.modelspace().query("HATCH"))[0]
+
+
+def test_write_hatch_angle_scale_and_lines():
+    line = {"angle": 30.0, "base": (1.0, 2.0), "offset": (3.0, 4.0), "dashes": [5.0, -2.0]}
+    hatch = _write_hatch_in_new_doc(
+        _hatch_dxf(
+            pattern_angle=45.0, pattern_scale=5.0, pattern_double=True, pattern_lines=[line]
+        )
+    )
+    assert hatch.dxf.pattern_angle == 45.0
+    assert hatch.dxf.pattern_scale == 5.0
+    assert hatch.dxf.pattern_double == 1
+    assert len(hatch.pattern.lines) == 1
+    got = hatch.pattern.lines[0]
+    assert got.angle == pytest.approx(30.0)
+    assert tuple(got.base_point) == pytest.approx((1.0, 2.0))
+    assert tuple(got.offset) == pytest.approx((3.0, 4.0))
+    assert list(got.dash_length_items) == pytest.approx([5.0, -2.0])
+
+
+def test_write_hatch_without_lines_scales_predefined():
+    hatch = _write_hatch_in_new_doc(_hatch_dxf(pattern_scale=5.0))
+    assert hatch.dxf.pattern_scale == 5.0
+    assert tuple(hatch.pattern.lines[0].offset) == pytest.approx((63.5, 31.75))
+
+
+def test_write_hatch_bad_numbers():
+    base = _write_hatch_in_new_doc(_hatch_dxf())
+    bad_line = {"angle": 0.0, "base": (0, 0), "offset": (1, 1), "dashes": [math.nan]}
+    hatch = _write_hatch_in_new_doc(
+        _hatch_dxf(
+            pattern_scale=math.nan,
+            pattern_angle=math.inf,
+            pattern_lines=[bad_line, {"angle": math.inf, "base": (0, 0), "offset": (1, 1)}],
+        )
+    )
+    assert hatch.dxf.pattern_scale == 1.0
+    assert hatch.dxf.pattern_angle == 0.0
+    assert [tuple(ln.offset) for ln in hatch.pattern.lines] == [
+        tuple(ln.offset) for ln in base.pattern.lines
+    ]
+    good = {"angle": 30.0, "base": (1.0, 2.0), "offset": (3.0, 4.0), "dashes": [5.0]}
+    mixed = _write_hatch_in_new_doc(
+        _hatch_dxf(pattern_scale=5.0, pattern_lines=[bad_line, good])
+    )
+    assert len(mixed.pattern.lines) == 1
+    assert tuple(mixed.pattern.lines[0].offset) == pytest.approx((3.0, 4.0))
+    assert mixed.pattern.lines[0].angle == pytest.approx(30.0)
+    for lines in (None, [], [bad_line]):
+        huge = _write_hatch_in_new_doc(_hatch_dxf(pattern_scale=1e308, pattern_lines=lines))
+        assert huge.dxf.pattern_scale == 1.0
+        assert all(
+            math.isfinite(v)
+            for ln in huge.pattern.lines
+            for v in (ln.angle, *ln.base_point, *ln.offset, *ln.dash_length_items)
+        )
+    for scale in (0.0, -2.0):
+        assert _write_hatch_in_new_doc(_hatch_dxf(pattern_scale=scale)).dxf.pattern_scale == 1.0
