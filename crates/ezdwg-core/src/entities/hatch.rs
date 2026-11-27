@@ -615,8 +615,15 @@ fn decode_hatch_body(
                         require_plausible_hatch_scalar(start_angle, "ellipse edge start angle")?;
                         require_plausible_hatch_scalar(end_angle, "ellipse edge end angle")?;
                         let (a0, a1) = real_edge_angles(start_angle, end_angle, is_ccw);
-                        let segment =
-                            elliptical_arc_points(center, major_endpoint, ratio, a0, a1, is_ccw, 96);
+                        let segment = elliptical_arc_points(
+                            center,
+                            major_endpoint,
+                            ratio,
+                            a0,
+                            a1,
+                            is_ccw,
+                            96,
+                        );
                         if charge_hatch_points(&mut tessellated_points, segment.len()) {
                             append_segment_points(&mut path_points, &segment);
                         }

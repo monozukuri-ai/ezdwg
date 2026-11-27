@@ -129,10 +129,11 @@ def _element_tags(element: Any, style_handles: dict[int, str]) -> list[tuple[int
     is_text = bool(flags & 2)
     if is_text and not _one_line(text):
         return None
-    tags: list[tuple[int, Any]] = [(74, flags), (75, 0 if is_text else shape)]
-    dxf_style = style_handles.get(style) if isinstance(style, int) else None
-    if dxf_style is not None:
-        tags.append((340, dxf_style))
+    dxf_style = style_handles.get(style)
+    if dxf_style is None:
+        # A complex dash must reference a STYLE. Keep its length as a plain dash.
+        return [(74, 0)]
+    tags: list[tuple[int, Any]] = [(74, flags), (75, 0 if is_text else shape), (340, dxf_style)]
     tags += [(46, float(scale)), (50, degrees), (44, float(x)), (45, float(y))]
     if is_text:
         tags.append((9, _one_line(text)))

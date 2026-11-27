@@ -167,7 +167,16 @@ def test_invalid_edge_falls_back_without_a_partial_edge_path(edge) -> None:
     assert len(path.vertices) == 4
 
 
-def test_strict_to_dwg_leaves_out_a_hatch_over_the_flattening_budget(monkeypatch, tmp_path) -> None:
+def test_unusable_hole_does_not_leave_a_solid_hatch_in_the_layout() -> None:
+    doc = ezdxf.new()
+    square = [(0, 0), (10, 0), (10, 10), (0, 10)]
+    spline = ("spline", 1, False, False, [0, 1, 0, 1], [(2, 2), (3, 3)], [], [], None, None)
+    paths = [{"points": square}, {"boundary": ("edges", [spline]), "points": []}]
+    assert not convert_module._write_hatch(doc.modelspace(), {"solid_fill": True, "paths": paths}, {})
+    assert not list(doc.modelspace().query("HATCH"))
+
+
+def test_to_dwg_reports_a_hatch_over_the_flattening_budget(monkeypatch, tmp_path) -> None:
     doc = ezdwg.new("AC1015")
     for x in (0, 5):
         doc.modelspace().add_hatch([[(x, 0), (x + 1, 0), (x + 1, 1)]])
@@ -186,8 +195,14 @@ def test_strict_to_dwg_leaves_out_a_hatch_over_the_flattening_budget(monkeypatch
         "decode_hatch_boundaries",
         lambda _path: [(first, [("polyline", True, square, [])]), (second, [edges])],
     )
-    result = ezdwg.to_dwg(source, str(tmp_path / "out.dwg"), types="HATCH", strict=True)
-    assert result.written_entities == 1
+    result = ezdwg.to_dwg(source, str(tmp_path / "out.dwg"), types="HATCH")
+    assert (result.total_entities, result.written_entities, result.skipped_entities) == (2, 1, 1)
+    assert result.skipped_by_type == {"HATCH": 1}
+    assert any(d.handle == second and d.action == "skipped" for d in result.diagnostics)
+    strict_output = tmp_path / "strict.dwg"
+    with pytest.raises(ValueError, match="HATCH:1"):
+        ezdwg.to_dwg(source, str(strict_output), types="HATCH", strict=True)
+    assert not strict_output.exists()
 
 
 def test_to_dwg_counts_a_hatch_whose_empty_path_has_an_empty_boundary(monkeypatch, tmp_path) -> None:

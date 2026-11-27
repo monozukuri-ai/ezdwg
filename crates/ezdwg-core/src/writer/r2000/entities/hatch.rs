@@ -333,7 +333,11 @@ mod tests {
             paths: paths
                 .into_iter()
                 .map(|data| HatchPathDef {
-                    flags: if matches!(data, HatchPathData::Edges(_)) { 1 } else { 3 },
+                    flags: if matches!(data, HatchPathData::Edges(_)) {
+                        1
+                    } else {
+                        3
+                    },
                     data,
                 })
                 .collect(),
@@ -405,8 +409,14 @@ mod tests {
             .iter()
             .any(|p| (p.0 - 2.).abs() < 1e-9 && (p.1 - 2.).abs() < 1e-9));
         let (start, end) = (points[1], points[points.len() - 2]);
-        assert!((start.0 - 4.).abs() < 1e-9 && start.1.abs() < 1e-9, "{start:?}");
-        assert!((end.0 - 4.).abs() < 1e-9 && (end.1 - 4.).abs() < 1e-9, "{end:?}");
+        assert!(
+            (start.0 - 4.).abs() < 1e-9 && start.1.abs() < 1e-9,
+            "{start:?}"
+        );
+        assert!(
+            (end.0 - 4.).abs() < 1e-9 && (end.1 - 4.).abs() < 1e-9,
+            "{end:?}"
+        );
     }
 
     #[test]
@@ -441,7 +451,9 @@ mod tests {
     fn bulged_paths_over_the_point_budget_store_no_more_points() {
         // Bulge 5 flattens each segment into about 56 points: 2,048 vertices give
         // about 115,000 points per path, so the third path breaks the budget.
-        let vertices: Vec<(f64, f64)> = (0..2048).map(|i| (f64::from(i), f64::from(i % 2))).collect();
+        let vertices: Vec<(f64, f64)> = (0..2048)
+            .map(|i| (f64::from(i), f64::from(i % 2)))
+            .collect();
         let path = || HatchPathData::Polyline {
             closed: true,
             vertices: vertices.clone(),
@@ -456,7 +468,9 @@ mod tests {
         assert!(stored <= 262_144 + paths.len(), "{stored}");
         for path in paths {
             match &path.boundary {
-                crate::entities::HatchBoundary::Polyline { vertices, bulges, .. } => {
+                crate::entities::HatchBoundary::Polyline {
+                    vertices, bulges, ..
+                } => {
                     assert_eq!((vertices.len(), bulges.len()), (2048, 2048));
                 }
                 other => panic!("{other:?}"),

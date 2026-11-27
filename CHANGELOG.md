@@ -57,7 +57,8 @@
 ### DWG reader
 - A HATCH whose flattened boundary is over 262,144 points is read instead of
   dropped. Its boundaries are kept in full; the `points` of the path that went
-  over the budget and of the paths after it are empty.
+  over the budget and of the paths after it are empty. Native DWG export
+  reports an unwritable HATCH in its skipped counts and rejects it in strict mode.
 - Clockwise arc and ellipse edges of a HATCH boundary are flattened along the
   right side: their stored angles are mirrored, as in DXF group codes 50/51.
   Such arcs bulged to the wrong side.

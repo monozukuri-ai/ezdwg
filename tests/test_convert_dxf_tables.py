@@ -473,7 +473,9 @@ def test_linetype_rows_edge_cases(tmp_path, monkeypatch, target):
     assert _tag_values(empty, 9) == [] and _tag_values(empty, 74) == [0, 0]
     assert _tag_values(doc.linetypes.get("TEXTY"), 9) == [text]
     nostyle = doc.linetypes.get("NOSTYLE")
-    assert _tag_values(nostyle, 340) == [] and _tag_values(nostyle, 75) == [7]
+    assert _tag_values(nostyle, 74) == [0, 0]
+    assert _tag_values(nostyle, 340) == _tag_values(nostyle, 75) == []
+    assert _tag_values(nostyle, 49) == [0.5, -0.5]
     assert _tag_values(doc.linetypes.get("HUGEROT"), 9) == []
     assert _tag_values(doc.linetypes.get("SHORTELEMENTS"), 49) == pytest.approx([0.5, -0.5])
     big = doc.linetypes.get("BIGSHAPE")

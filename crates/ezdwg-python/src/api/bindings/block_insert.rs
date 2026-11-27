@@ -994,8 +994,7 @@ pub fn decode_block_entity_names(
     let mut endblk_handles_in_order: Vec<u64> = Vec::new();
     let mut owner_by_entity: HashMap<u64, u64> = HashMap::new();
     for obj in ordered_objects.iter().copied() {
-        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
-        else {
+        let Some(header) = object_header_at(&decoder, obj.offset, best_effort)? else {
             continue;
         };
         let is_block = matches_type_name(header.type_code, 0x04, "BLOCK", dynamic_types);
@@ -1008,6 +1007,10 @@ pub fn decode_block_entity_names(
             endblk_handles_in_order.push(obj.handle.0);
         }
         if !is_r2010_plus {
+            let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+            else {
+                continue;
+            };
             if let Some((0, owner)) = entity_placement(&record, &header, decoder.version()) {
                 owner_by_entity.insert(obj.handle.0, owner);
             }

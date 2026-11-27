@@ -280,13 +280,14 @@ fn decode_linetype_element_record(
     } = read_linetype_record(record, api_header, version, expected_handle)?;
     let misaligned = |what: &str| DwgError::new(ErrorKind::Format, format!("LTYPE {what}"));
 
-    let text_count = dashes
+    let text_offsets: Vec<_> = dashes
         .iter()
         .filter(|dash| dash.flags & LINETYPE_DASH_TEXT != 0)
-        .count();
+        .map(|dash| usize::from(dash.shape_code))
+        .collect();
     let texts = if table_record_strings_in_stream(version) {
         // R2007+: the 512-byte UTF-16LE area exists only when some dash is a text.
-        if text_count == 0 {
+        if text_offsets.is_empty() {
             Vec::new()
         } else {
             let area = reader.read_rcs(512)?;
@@ -294,8 +295,8 @@ fn decode_linetype_element_record(
                 .chunks_exact(2)
                 .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                 .collect();
-            split_zero_terminated(&units, text_count)
-                .ok_or_else(|| misaligned("strings area holds too few texts"))?
+            linetype_texts_at_offsets(&units, &text_offsets)
+                .ok_or_else(|| misaligned("text offset outside strings area"))?
                 .into_iter()
                 .map(|text| String::from_utf16_lossy(text))
                 .collect()
@@ -303,8 +304,8 @@ fn decode_linetype_element_record(
     } else {
         // R2004 and earlier store the 256-byte area even without a text dash.
         let area = reader.read_rcs(256)?;
-        split_zero_terminated(&area, text_count)
-            .ok_or_else(|| misaligned("strings area holds too few texts"))?
+        linetype_texts_at_offsets(&area, &text_offsets)
+            .ok_or_else(|| misaligned("text offset outside strings area"))?
             .into_iter()
             .map(|text| crate::bit::bit_reader::decode_tv_bytes(text, codepage))
             .collect()
@@ -359,45 +360,41 @@ fn decode_linetype_element_record(
     Ok((handle, name, elements))
 }
 
-/// The last run may lack its terminator; `None` when the area holds fewer than `count`.
-fn split_zero_terminated<T: Copy + Default + PartialEq>(
-    area: &[T],
-    count: usize,
-) -> Option<Vec<&[T]>> {
-    let mut rest = area;
-    let mut parts = Vec::with_capacity(count);
-    for _ in 0..count {
-        if rest.is_empty() {
-            return None;
-        }
-        let end = rest
-            .iter()
-            .position(|unit| *unit == T::default())
-            .unwrap_or(rest.len());
-        parts.push(&rest[..end]);
-        rest = &rest[(end + 1).min(rest.len())..];
-    }
-    Some(parts)
+/// Text dashes index bytes through R2004 and UTF-16 code units from R2007.
+fn linetype_texts_at_offsets<'a, T: Copy + Default + PartialEq>(
+    area: &'a [T],
+    offsets: &[usize],
+) -> Option<Vec<&'a [T]>> {
+    offsets
+        .iter()
+        .map(|&offset| {
+            let rest = area.get(offset..).filter(|s| !s.is_empty())?;
+            let end = rest
+                .iter()
+                .position(|unit| *unit == T::default())
+                .unwrap_or(rest.len());
+            Some(&rest[..end])
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod linetype_strings_area_tests {
-    use super::split_zero_terminated;
+    use super::linetype_texts_at_offsets;
 
     #[test]
-    fn walks_texts_in_order_and_rejects_a_short_area() {
-        let area = b"GAS\0AB\0\0\0";
+    fn uses_stored_offsets_including_shared_strings_and_padding() {
+        let area = b"\0GAS\0\0AB";
         assert_eq!(
-            split_zero_terminated(area, 2),
-            Some(vec![&b"GAS"[..], b"AB"])
+            linetype_texts_at_offsets(area, &[6, 1, 6]),
+            Some(vec![&b"AB"[..], b"GAS", b"AB"])
         );
+        assert_eq!(linetype_texts_at_offsets(area, &[area.len()]), None);
+        let units = [0x9580u16, 0, 0x6728, 0];
         assert_eq!(
-            split_zero_terminated(&area[..6], 2),
-            Some(vec![&b"GAS"[..], b"AB"])
+            linetype_texts_at_offsets(&units, &[2, 0]),
+            Some(vec![&units[2..3], &units[..1]])
         );
-        assert_eq!(split_zero_terminated(&area[..4], 2), None);
-        assert_eq!(split_zero_terminated::<u8>(&[], 0), Some(vec![]));
-        assert_eq!(split_zero_terminated::<u8>(&[], 1), None);
     }
 }
 
@@ -460,6 +457,9 @@ pub fn decode_linetype_elements(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<LinetypeElementsRow>> {
+    if limit == Some(0) {
+        return Ok(Vec::new());
+    }
     let shared = decoded_file(path)?;
     let decoder = shared.decoder()?;
     let best_effort = shared.best_effort;

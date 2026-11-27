@@ -379,9 +379,6 @@ class _WriteSink:
             if kind == "ATTRIB":
                 self.deferred_attribs.append((entity, attrs.get(entity.handle)))
                 continue
-            if kind == "HATCH" and _hatch_over_flattening_budget(entity):
-                # such a hatch was not decoded at all before; it stays out without a skip
-                continue
             self.total += 1
             error = None
             row = None
@@ -3955,7 +3952,7 @@ def _members_from_owner_map(
 
     def _root(handle: int) -> int | None:
         # Follow entity owners (VERTEX -> POLYLINE, ATTRIB -> INSERT) up to the block header.
-        chain: list[int] = []
+        chain: set[int] = set()
         root: int | None = None
         current = handle
         while True:
@@ -3965,7 +3962,7 @@ def _members_from_owner_map(
             placement = placement_by_handle.get(current)
             if placement is None or current in chain:
                 break
-            chain.append(current)
+            chain.add(current)
             mode, owner = placement
             if mode in (1, 2):
                 root = elsewhere
@@ -5949,8 +5946,10 @@ def _hatch_pattern_lines(raw_lines: Any) -> list[tuple[Any, ...]]:
 
 
 def _write_hatch(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str, Any]) -> bool:
+    from ezdxf.entities import Hatch
+
     paths = dxf.get("paths", []) or []
-    if len(paths) == 0:
+    if not paths or modelspace.dxfversion < "AC1015":
         return False
 
     color = _to_valid_aci(dxf.get("resolved_color_index"))
@@ -5959,7 +5958,8 @@ def _write_hatch(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str, Any
     if color is None:
         color = 7
 
-    hatch = modelspace.add_hatch(color=color, dxfattribs=dxfattribs)
+    # Bind the HATCH only after all loops are present, including any holes.
+    hatch = Hatch.new(dxfattribs={**dxfattribs, "color": color}, doc=modelspace.doc)
     if bool(dxf.get("solid_fill", False)):
         rgb = _to_rgb(_to_valid_true_color(dxf.get("resolved_true_color")))
         hatch.set_solid_fill(color=color, rgb=rgb)
@@ -5996,21 +5996,19 @@ def _write_hatch(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str, Any
                 pattern_name, color=color, angle=angle, scale=1.0, double=double
             )
 
-    path_written = False
     for path in paths:
         if not isinstance(path, dict):
-            continue
+            return False
         boundary = path.get("boundary")
         if boundary is not None and _add_hatch_boundary(hatch.paths, boundary):
-            path_written = True
             continue
         points = path.get("points", []) or []
         xy = [(float(point[0]), float(point[1])) for point in points if len(point) >= 2]
-        if len(xy) < 2:
-            continue
+        if len(xy) < 2 or not all(math.isfinite(v) for p in xy for v in p):
+            return False
         hatch.paths.add_polyline_path(xy, is_closed=bool(path.get("closed", False)))
-        path_written = True
-    return path_written
+    modelspace.add_entity(hatch)
+    return True
 
 
 def _hatch_edge_usable(edge: Any) -> bool:
@@ -6029,6 +6027,8 @@ def _hatch_edge_usable(edge: Any) -> bool:
         _, degree, rational, _periodic, knots, control, weights, fit, t0, t1 = edge
         # AutoCAD crashes on a spline edge with invalid knots
         if degree < 1 or len(control) <= degree or len(knots) != len(control) + degree + 1:
+            return False
+        if any(a > b for a, b in zip(knots, knots[1:])) or knots[degree] >= knots[len(control)]:
             return False
         if rational and len(weights) != len(control):
             return False
@@ -6108,24 +6108,6 @@ def _add_hatch_edges(edge_path: Any, edges: Any) -> None:
                 start_tangent=t0,
                 end_tangent=t1,
             )
-
-
-def _hatch_over_flattening_budget(entity: Entity) -> bool:
-    """True for a read hatch with a path the reader's flattening budget left without points."""
-    return any(
-        isinstance(path, dict)
-        and not path.get("points")
-        and _boundary_is_drawable(path.get("boundary"))
-        for path in entity.dxf.get("paths", [])
-    )
-
-
-def _boundary_is_drawable(boundary: Any) -> bool:
-    """A ``raw.decode_hatch_boundaries`` path with at least one edge or two vertices."""
-    try:
-        return len(boundary[2]) >= 2 if boundary[0] == "polyline" else len(boundary[1]) >= 1
-    except (TypeError, IndexError):
-        return False
 
 
 def _write_dimension_native(

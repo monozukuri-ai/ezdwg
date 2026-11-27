@@ -223,3 +223,8 @@ def test_linetype_element_style_handles_are_style_records() -> None:
     rows = _elements(path)
     assert rows["GAS_LINE"][1][7] == 0x11 and rows["TRACKS"][0][7] == 0x27F
     assert {0x11, 0x27F} <= styles
+
+
+def test_linetype_elements_respect_zero_limit() -> None:
+    path = SAMPLES / "acadsharp" / "sample_AC1015.dwg"
+    assert ezdwg.raw.decode_linetype_elements(str(path), limit=0) == []
