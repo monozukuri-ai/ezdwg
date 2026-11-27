@@ -8,7 +8,7 @@ import pytest
 
 import ezdwg
 import ezdwg.document as document_module
-from ezdwg import _style_tables, raw
+from ezdwg import _convert_tables, _style_tables, raw
 
 ezdxf = pytest.importorskip("ezdxf")
 
@@ -673,3 +673,113 @@ def test_write_hatch_bad_numbers():
         )
     for scale in (0.0, -2.0):
         assert _write_hatch_in_new_doc(_hatch_dxf(pattern_scale=scale)).dxf.pattern_scale == 1.0
+
+
+def _header_vars(extmin, extmax, ltscale=float("nan")):
+    return (None, None, None, None, None, ltscale, None, extmin, extmax)
+
+
+def test_header_extents_from_dwg_header(tmp_path):
+    doc = _convert(tmp_path, AC1015, modelspace_only=True)
+    hv = ezdwg.raw.decode_header_variables(str(AC1015))
+    assert tuple(doc.header["$EXTMIN"]) == pytest.approx(hv[7])
+    assert tuple(doc.header["$EXTMAX"]) == pytest.approx(hv[8])
+    assert doc.header["$LTSCALE"] == pytest.approx(hv[5])
+    from ezdxf import bbox
+
+    box = bbox.extents(doc.modelspace())
+    eps = 1e-6
+    assert box.extmin[0] >= hv[7][0] - eps and box.extmin[1] >= hv[7][1] - eps
+    assert box.extmax[0] <= hv[8][0] + eps and box.extmax[1] <= hv[8][1] + eps
+
+
+@pytest.mark.parametrize("source", ["document", "modelspace"])
+def test_header_extents_from_document_or_modelspace_source(tmp_path, source):
+    doc = ezdwg.read(str(AC1015))
+    out = tmp_path / "out.dxf"
+    ezdwg.to_dxf(doc if source == "document" else doc.modelspace(), str(out), modelspace_only=True)
+    hv = ezdwg.raw.decode_header_variables(str(AC1015))
+    assert tuple(ezdxf.readfile(out).header["$EXTMIN"]) == pytest.approx(hv[7])
+
+
+@pytest.mark.parametrize("subset", ["types", "paperspace"])
+def test_header_subset_modelspace_keeps_sentinel_extents(tmp_path, subset):
+    out = tmp_path / "out.dxf"
+    if subset == "types":
+        ezdwg.to_dxf(str(AC1015), str(out), types="TEXT", modelspace_only=True)
+    else:
+        ezdwg.to_dxf(ezdwg.read(str(AC1015)).paperspace(), str(out), modelspace_only=True)
+    doc, fresh = ezdxf.readfile(out), ezdxf.new()
+    assert tuple(doc.header["$EXTMIN"]) == tuple(fresh.header["$EXTMIN"])
+    assert tuple(doc.header["$EXTMAX"]) == tuple(fresh.header["$EXTMAX"])
+    hv = ezdwg.raw.decode_header_variables(str(AC1015))
+    assert doc.header["$LTSCALE"] == pytest.approx(hv[5])
+
+
+def test_header_default_mode_keeps_sentinel_extents_and_copies_ltscale(tmp_path):
+    doc = _convert(tmp_path, AC1015)
+    fresh = ezdxf.new()
+    assert tuple(doc.header["$EXTMIN"]) == tuple(fresh.header["$EXTMIN"])
+    assert tuple(doc.header["$EXTMAX"]) == tuple(fresh.header["$EXTMAX"])
+    hv = ezdwg.raw.decode_header_variables(str(AC1015))
+    assert doc.header["$LTSCALE"] == pytest.approx(hv[5])
+
+
+@pytest.mark.parametrize(
+    "lo, hi",
+    [((-1e300,) * 3, (1e300,) * 3), ((0, 0, 5), (10, 10, 1))],
+)
+def test_header_rejects_out_of_range_or_inverted_z(monkeypatch, lo, hi):
+    monkeypatch.setattr(raw, "decode_header_variables", lambda _p: _header_vars(lo, hi))
+    doc = ezdxf.new()
+    doc.modelspace().add_line((1, 1), (2, 3))
+    _convert_tables.set_dxf_header(doc, "x.dwg")
+    assert tuple(doc.header["$EXTMIN"]) == (1, 1, 0)
+    assert tuple(doc.header["$EXTMAX"]) == (2, 3, 0)
+
+
+def test_header_extents_fall_back_to_bbox(tmp_path):
+    doc = _convert(tmp_path, ROOT / "test_dwg/acadsharp/sample_AC1014.dwg", modelspace_only=True)
+    lo, hi = doc.header["$EXTMIN"], doc.header["$EXTMAX"]
+    assert all(math.isfinite(v) and abs(v) < 1e19 for v in (*lo, *hi))
+    assert lo[0] <= hi[0] and lo[1] <= hi[1]
+
+
+def test_header_untouched_when_nothing_known(monkeypatch):
+    monkeypatch.setattr(raw, "decode_header_variables", lambda _p: _header_vars(None, None))
+    doc, fresh = ezdxf.new(), ezdxf.new()
+    _convert_tables.set_dxf_header(doc, "x.dwg")
+    for key in ("$EXTMIN", "$EXTMAX", "$LTSCALE"):
+        assert doc.header[key] == fresh.header[key]
+
+
+def test_header_rejects_inverted_extents(monkeypatch):
+    monkeypatch.setattr(
+        raw, "decode_header_variables", lambda _p: _header_vars((10, 10, 0), (0, 0, 0))
+    )
+    doc = ezdxf.new()
+    doc.modelspace().add_line((1, 1), (2, 3))
+    _convert_tables.set_dxf_header(doc, "x.dwg")
+    assert tuple(doc.header["$EXTMIN"]) == (1, 1, 0)
+    assert tuple(doc.header["$EXTMAX"]) == (2, 3, 0)
+
+
+def test_header_decoder_error_counts_as_not_decoded(monkeypatch):
+    def boom(_path):
+        raise RuntimeError("bad header")
+
+    monkeypatch.setattr(raw, "decode_header_variables", boom)
+    doc = ezdxf.new()
+    doc.modelspace().add_line((1, 1), (2, 3))
+    _convert_tables.set_dxf_header(doc, "x.dwg")
+    assert doc.header["$LTSCALE"] == 1.0
+    assert tuple(doc.header["$EXTMIN"]) == (1, 1, 0)
+    assert tuple(doc.header["$EXTMAX"]) == (2, 3, 0)
+
+
+@pytest.mark.parametrize("version", ["R12", "R2000", "R2018"])
+def test_header_r12_saves(tmp_path, version):
+    doc = _convert(tmp_path, AC1015, dxf_version=version, modelspace_only=True)
+    hv = ezdwg.raw.decode_header_variables(str(AC1015))
+    assert tuple(doc.header["$EXTMIN"]) == pytest.approx(hv[7])
+    assert tuple(doc.header["$EXTMAX"]) == pytest.approx(hv[8])

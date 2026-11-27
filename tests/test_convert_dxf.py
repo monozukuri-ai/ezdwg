@@ -3110,6 +3110,67 @@ def test_prepare_dxf_layers_falls_back_for_invalid_decoded_layer_name() -> None:
     assert "SD-FRAME_TEXT" in doc.layers
 
 
+def test_prepare_dxf_layers_writes_layer_state() -> None:
+    pytest.importorskip("ezdxf")
+
+    ezdxf = convert_module._require_ezdxf()
+    doc = ezdxf.new(dxfversion="R2010")
+
+    convert_module._prepare_dxf_layers(
+        doc,
+        {0x10: (3, None), 0x80: (5, None), 0x81: (999, None), 0x82: (2, None)},
+        {0x10: "0", 0x80: "A", 0x81: "B", 0x82: "C"},
+        layer_states_by_handle={
+            # (frozen, off, locked, plot)
+            0x10: (True, True, True, False),
+            0x80: (False, True, False, True),
+            0x81: (True, True, False, True),
+        },
+    )
+
+    # Layer 0 already exists in a new ezdxf document: it still gets the state.
+    zero = doc.layers.get("0")
+    assert zero.dxf.color == -7 and zero.dxf.flags & 5 == 5 and zero.dxf.plot == 0
+    a = doc.layers.get("A")
+    assert a.dxf.color == -5 and a.dxf.flags & 5 == 0 and a.dxf.plot == 1
+    # No valid decoded color: an OFF layer is written as -7.
+    b = doc.layers.get("B")
+    assert b.dxf.color == -7 and b.dxf.flags & 1
+    # No decoded state: on, thawed, unlocked.
+    c = doc.layers.get("C")
+    assert c.dxf.color == 2 and c.dxf.flags & 5 == 0
+
+
+def test_prepare_dxf_layers_keeps_defpoints_no_plot() -> None:
+    pytest.importorskip("ezdxf")
+
+    ezdxf = convert_module._require_ezdxf()
+    doc = ezdxf.new(dxfversion="R2010")
+    # R14 has no plot bit, so its layers decode as plot=True.
+    convert_module._prepare_dxf_layers(
+        doc,
+        {0x20: (7, None)},
+        {0x20: "Defpoints"},
+        layer_states_by_handle={0x20: (False, False, False, True)},
+    )
+    assert doc.layers.get("Defpoints").dxf.plot == 0
+
+
+@pytest.mark.parametrize("name", ["sample_AC1015.dwg", "sample_AC1032.dwg"])
+def test_to_dxf_keeps_layer_state(tmp_path, name) -> None:
+    pytest.importorskip("ezdxf")
+    ezdxf = convert_module._require_ezdxf()
+    source = ROOT / "test_dwg" / "acadsharp" / name
+    output = tmp_path / "layer_state.dxf"
+    convert_module.to_dxf(str(source), str(output), modelspace_only=True)
+
+    layers = {layer.dxf.name: layer for layer in ezdxf.readfile(str(output)).layers}
+    assert {n for n, l in layers.items() if l.dxf.color < 0} == {"Layer_Off"}
+    assert {n for n, l in layers.items() if l.dxf.flags & 1} == {"Layer_Freeze"}
+    assert {n for n, l in layers.items() if l.dxf.flags & 4} == {"Layer_Lock"}
+    assert {n for n, l in layers.items() if not l.dxf.plot} == {"Layer_NoPlot", "Defpoints"}
+
+
 def test_has_right_side_open30_i_proxies() -> None:
     entities = [
         Entity(

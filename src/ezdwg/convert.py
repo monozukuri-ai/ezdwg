@@ -79,6 +79,7 @@ from ._convert_polyline2d_spline import (
 )
 from ._convert_layer import (
     _layer_names_by_handle,
+    _layer_states_by_handle,
     _layer_styles_by_handle,
     _prepare_dxf_layers,
 )
@@ -87,6 +88,7 @@ from ._convert_tables import (
     entity_linetype,
     prepare_dxf_linetypes,
     prepare_dxf_styles,
+    set_dxf_header,
     text_style_name,
 )
 from ._convert_geometry_filter import (
@@ -665,6 +667,7 @@ def to_dxf(
         layer_styles_by_handle,
         layer_names_by_handle,
         table_context.linetype_name_by_layer,
+        _layer_states_by_handle(layout.doc.decode_path or layout.doc.path),
     )
 
     block_reference_entities = [
@@ -754,6 +757,12 @@ def to_dxf(
 
     if flatten_inserts:
         _flatten_modelspace_inserts(modelspace)
+
+    # The DWG extents fit only when the DXF modelspace is the whole DWG modelspace.
+    full_modelspace = (
+        modelspace_only and types is None and layout.name.upper() != "PAPERSPACE"
+    )
+    set_dxf_header(dxf_doc, layout.doc.decode_path or layout.doc.path, extents=full_modelspace)
 
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)

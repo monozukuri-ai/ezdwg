@@ -262,3 +262,43 @@ def text_style_name(
         return context.style_name_by_handle.get(int(handle))
     except (TypeError, ValueError):
         return None
+
+
+def _corner(value: Any) -> tuple[float, float, float] | None:
+    if not isinstance(value, (tuple, list)) or len(value) != 3:
+        return None
+    if not all(isinstance(v, (int, float)) and abs(v) < 1e19 for v in value):
+        return None
+    return (float(value[0]), float(value[1]), float(value[2]))
+
+
+def _ordered(lo: Any, hi: Any) -> bool:
+    return lo is not None and hi is not None and all(a <= b for a, b in zip(lo, hi))
+
+
+def set_dxf_header(dxf_doc: Any, path: str, *, extents: bool = True) -> None:
+    """Write ``$LTSCALE`` and, if ``extents``, ``$EXTMIN``/``$EXTMAX``; bad values stay as is."""
+    try:
+        header = raw.decode_header_variables(path)
+        ltscale, lo, hi = header[5], _corner(header[7]), _corner(header[8])
+    except Exception:
+        ltscale = lo = hi = None
+    if not extents:
+        lo = hi = None
+    elif not _ordered(lo, hi):
+        lo = hi = None
+        try:
+            from ezdxf import bbox
+
+            box = bbox.extents(dxf_doc.modelspace())
+            if box.has_data:
+                lo, hi = _corner(tuple(box.extmin)), _corner(tuple(box.extmax))
+        except Exception:
+            pass
+    if _ordered(lo, hi):
+        # ezdxf's save copies the modelspace values over the header ones
+        msp = dxf_doc.modelspace()
+        msp.dxf.extmin, msp.dxf.extmax = lo, hi
+        dxf_doc.header["$EXTMIN"], dxf_doc.header["$EXTMAX"] = lo, hi
+    if isinstance(ltscale, (int, float)) and _style_tables.clean_linetype_scale(ltscale) == ltscale:
+        dxf_doc.header["$LTSCALE"] = float(ltscale)

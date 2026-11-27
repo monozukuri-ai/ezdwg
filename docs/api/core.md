@@ -134,6 +134,8 @@ a single model space for the selected content.
 MTEXT keeps long formatted notes. IMAGE references in DXF R2000 and newer
 retain their external file paths, pixel placement and clipping boundaries.
 
+The DXF keeps the linetype table (complex linetypes included), layer and entity linetypes and linetype scale, the text style table with font files and TrueType font data, text style names, HATCH pattern angle, scale and definition, `$LTSCALE`, and with `modelspace_only=True` and no `types` filter the drawing extents. See the [conversion guide](../guide/convert.md#limitations) for what is not kept.
+
 **Returns:** A `ConvertResult` object.
 
 **Raises:** `ValueError` in strict mode if entities are skipped. `ImportError` if ezdxf is not installed.

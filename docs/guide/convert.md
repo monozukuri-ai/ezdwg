@@ -96,7 +96,8 @@ INSERT, MINSERT, DIMENSION
 - Conversion is best-effort — some entities may be skipped if they cannot be represented in DXF.
 - Block definitions referenced by INSERT entities are reconstructed from the DWG source.
 - DIMENSION entities use native ezdxf dimension builders with a text fallback for unsupported subtypes.
-- Style, linetype, and layer properties may not be fully preserved.
+- Kept: the linetype table (complex linetypes with text and shape elements included), layer and entity linetypes and linetype scale, the text style table (font files and TrueType font data), text style names on TEXT, MTEXT, ATTRIB and ATTDEF, HATCH pattern angle, scale and definition, HATCH boundaries as stored (line, arc, ellipse and spline edges, polylines with bulges), the layer state (off, frozen, locked, not plotted), `$LTSCALE`, and with `modelspace_only=True` and no `types` filter the drawing extents. These do not depend on `preserve_colors`.
+- Not kept: the text style of the dimension text fallback, HATCH pattern type and style, paper-space extents, and complex linetypes in R12 output (written as plain dashes). In R12 output, names outside the R12 code page are written escaped.
 - Records with unusable names or values are skipped. References to them fall back to the default.
 
 ---
