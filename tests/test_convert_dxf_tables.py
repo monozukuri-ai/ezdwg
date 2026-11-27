@@ -546,3 +546,13 @@ def test_linetypes_r12_saves(tmp_path):
     assert _tag_values(gas, 9) == []
     assert _tag_values(gas, 49) == pytest.approx([0.5, -0.2, -0.25])
     assert sum(1 for e in doc.modelspace() if e.dxf.get("linetype") == "GAS_LINE") == 1
+
+
+@pytest.mark.parametrize("version", ["AC1021", "AC1024", "AC1027", "AC1032"])
+def test_hatch_names_from_string_stream(version):
+    def names(path):
+        return sorted((row[0], row[1]) for row in raw.decode_hatch_entities(str(path)))
+
+    want = names(AC1015)
+    assert "ANSI31" in dict(want).values()
+    assert names(ROOT / f"test_dwg/acadsharp/sample_{version}.dwg") == want

@@ -5,7 +5,7 @@ use crate::entities::common::parse_common_entity_header_r14_with_handle;
 use crate::entities::common::{
     parse_common_entity_handles, parse_common_entity_header, parse_common_entity_header_r2007,
     parse_common_entity_header_r2010, parse_common_entity_header_r2013,
-    parse_common_entity_layer_handle, CommonEntityHeader,
+    parse_common_entity_layer_handle, string_stream_reader, CommonEntityHeader,
 };
 
 /// How string fields (pattern name, gradient name) are stored in the data stream.
@@ -510,8 +510,14 @@ fn decode_hatch_body(
             header.obj_size
         );
     }
+    // R2007+: the string stream holds the gradient name, then the pattern name.
+    let mut strings = if string_mode == HatchStringMode::StringStream {
+        string_stream_reader(reader, header.obj_size)
+    } else {
+        None
+    };
     if skip_gradient {
-        skip_gradient_payload(reader, string_mode)?;
+        skip_gradient_payload(reader, string_mode, &mut strings)?;
         if debug {
             eprintln!("[hatch trace] after gradient bit={}", reader.tell_bits());
         }
@@ -519,7 +525,7 @@ fn decode_hatch_body(
 
     let elevation = reader.read_bd()?;
     let extrusion = reader.read_3bd()?;
-    let name = read_hatch_string(reader, string_mode)?;
+    let name = read_hatch_string(reader, string_mode, &mut strings)?;
     let solid_fill = reader.read_b()? != 0;
     let associative = reader.read_b()? != 0;
 
@@ -957,15 +963,42 @@ fn is_plausible_tangent_component(value: f64) -> bool {
     value.is_finite() && (value == 0.0 || (1.0e-9..=1.0e8).contains(&value.abs()))
 }
 
-fn read_hatch_string(reader: &mut BitReader<'_>, mode: HatchStringMode) -> Result<String> {
+/// The string stream of an R2007+ object: a reader at its next string and the
+/// bit where the strings end (see `string_stream_reader`).
+type HatchStrings<'a> = Option<(BitReader<'a>, u32)>;
+
+fn read_hatch_string(
+    reader: &mut BitReader<'_>,
+    mode: HatchStringMode,
+    strings: &mut HatchStrings<'_>,
+) -> Result<String> {
     match mode {
         HatchStringMode::InlineTv => reader.read_tv(),
         HatchStringMode::InlineTu => reader.read_tu(),
-        HatchStringMode::StringStream => Ok(String::new()),
+        HatchStringMode::StringStream => Ok(next_stream_string(strings)),
     }
 }
 
-fn skip_gradient_payload(reader: &mut BitReader<'_>, string_mode: HatchStringMode) -> Result<()> {
+/// The next string of the string stream, or an empty one when there is no
+/// stream or the string does not fit in it: a lost name does not fail the hatch.
+fn next_stream_string(strings: &mut HatchStrings<'_>) -> String {
+    let Some((stream, end)) = strings.as_mut() else {
+        return String::new();
+    };
+    match stream.read_tu() {
+        Ok(text) if stream.tell_bits() <= u64::from(*end) => text,
+        _ => {
+            *strings = None;
+            String::new()
+        }
+    }
+}
+
+fn skip_gradient_payload(
+    reader: &mut BitReader<'_>,
+    string_mode: HatchStringMode,
+    strings: &mut HatchStrings<'_>,
+) -> Result<()> {
     let _is_gradient = reader.read_bl()?;
     let _reserved = reader.read_bl()?;
     let _gradient_angle = reader.read_bd()?;
@@ -979,7 +1012,7 @@ fn skip_gradient_payload(reader: &mut BitReader<'_>, string_mode: HatchStringMod
         let _rgb_color = reader.read_bl()?;
         let _ignored_color_byte = reader.read_rc()?;
     }
-    let _gradient_name = read_hatch_string(reader, string_mode)?;
+    let _gradient_name = read_hatch_string(reader, string_mode, strings)?;
     Ok(())
 }
 
@@ -1469,6 +1502,29 @@ fn bounded_count(raw: u32, label: &str) -> Result<usize> {
 mod tests {
     use super::*;
     use crate::bit::BitWriter;
+
+    #[test]
+    fn stream_strings_are_read_in_order_and_bounded() {
+        let mut writer = BitWriter::new();
+        for text in ["", "ANSI31"] {
+            writer.write_bs(text.len() as u16).expect("write length");
+            for unit in text.encode_utf16() {
+                writer.write_rs(Endian::Little, unit).expect("write unit");
+            }
+        }
+        // A third string claims more units than the stream holds.
+        let end = writer.tell_bits() as u32;
+        writer.write_bs(40).expect("write length");
+        writer.write_rs(Endian::Little, 0x41).expect("write unit");
+        let bytes = writer.into_bytes();
+
+        let mut strings: HatchStrings<'_> = Some((BitReader::new(&bytes), end));
+        assert_eq!(next_stream_string(&mut strings), "");
+        assert_eq!(next_stream_string(&mut strings), "ANSI31");
+        assert_eq!(next_stream_string(&mut strings), "");
+        assert!(strings.is_none());
+        assert_eq!(next_stream_string(&mut strings), "");
+    }
 
     #[test]
     fn bspline_sampler_reproduces_a_polyline_for_degree_one() {

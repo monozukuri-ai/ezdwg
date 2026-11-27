@@ -31,6 +31,8 @@
   factor, oblique angle, generation and vertical flags, shape files, and the
   TrueType family, bold and italic data) and sets the text style on TEXT,
   MTEXT, ATTRIB and ATTDEF.
+- HATCH pattern names of R2007+ drawings are read from the string stream.
+  They were empty, and `to_dxf` named every such pattern ANSI31.
 - Records with unusable names or values are skipped, and references to them
   fall back to the default.
 - `ezdwg.raw.decode_linetype_elements(path, limit=None)` returns
