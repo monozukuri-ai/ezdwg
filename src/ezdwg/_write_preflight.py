@@ -12,6 +12,7 @@ from ._aci import describe_approximation, nearest_aci
 from ._dimension import dimension_error
 from ._hatch import hatch_error
 from ._image import image_error
+from ._style_tables import clean_linetype_scale, linetype_rows, text_style_rows
 from ._viewport import viewport_error
 from ._write_spline import FIELDS as SPLINE_FIELDS
 from ._write_spline import validate_spline
@@ -311,24 +312,27 @@ def prepare_attributes(doc: Any, entities: list[Entity], *, version="AC1015"):
         layers_by_handle = {}
         report(None, "DOCUMENT", "layers", "source layer table could not be decoded")
     try:
-        linetypes = doc.linetypes()
-        table_rows = raw.decode_write_tables(path)
+        ltype_table = linetype_rows(path)
+        styles_by_handle = text_style_rows(path)
     except (OSError, ValueError, NotImplementedError):
-        linetypes, table_rows = {}, []
+        ltype_table, styles_by_handle = {}, {}
         report(
             None,
             "DOCUMENT",
             "tables",
             "source style/linetype tables could not be decoded",
         )
-    styles_by_handle = {r["handle"]: r for r in table_rows if r["kind"] == "STYLE"}
+    linetypes = {}
+    for r in ltype_table.values():
+        if r["dashes"] is not None:
+            linetypes.setdefault(r["name"], r)
     # The lossless table decoder can resolve a layer's linetype even when the
     # general layer reader cannot interpret null material/plot-style slots.
     layer_linetypes = {}
     if version == "AC1032":
         try:
             ltype_names = {
-                r["handle"]: r["name"] for r in table_rows if r["kind"] == "LTYPE"
+                h: r["name"] for h, r in ltype_table.items() if r["complex"] is not None
             }
             layer_linetypes = {
                 layer: ltype_names.get(ltype)
@@ -337,14 +341,10 @@ def prepare_attributes(doc: Any, entities: list[Entity], *, version="AC1015"):
         except (OSError, ValueError, NotImplementedError):
             pass
     extended_ltypes = {
-        r["name"].upper()
-        for r in table_rows
-        if r["kind"] == "LTYPE" and r.get("extended_data")
+        r["name"].upper() for r in ltype_table.values() if r["extended_data"]
     }
     simple_ltypes = {
-        r["name"].upper()
-        for r in table_rows
-        if r["kind"] == "LTYPE" and not r["complex"]
+        r["name"].upper() for r in ltype_table.values() if r["complex"] is False
     }
     try:
         header = doc.header_variables()
@@ -374,11 +374,7 @@ def prepare_attributes(doc: Any, entities: list[Entity], *, version="AC1015"):
         if metadata[key] not in allowed:
             report(None, "HEADER", key, "value is not supported by AC1015")
             metadata[key] = defaults[key]
-    if (
-        not isinstance(metadata["ltscale"], (int, float))
-        or not math.isfinite(metadata["ltscale"])
-        or metadata["ltscale"] <= 0
-    ):
+    if clean_linetype_scale(metadata["ltscale"]) != metadata["ltscale"]:
         report(None, "HEADER", "ltscale", "LTSCALE must be finite and positive")
         metadata["ltscale"] = 1.0
 
@@ -694,15 +690,13 @@ def prepare_attributes(doc: Any, entities: list[Entity], *, version="AC1015"):
                 )
         a["linetype"] = linetype(d.get("linetype"), handle, e.dxftype)
         scale = d.get("linetype_scale", 1.0)
-        if (
-            not isinstance(scale, (int, float))
-            or not math.isfinite(scale)
-            or scale <= 0
-        ):
+        cleaned = clean_linetype_scale(scale)
+        # The type check reports a non-number equal to 1, such as Decimal(1).
+        if type(cleaned) is not type(scale) or cleaned != scale:
             report(
                 handle, e.dxftype, "linetype_scale", "invalid scale is replaced with 1"
             )
-            scale = 1.0
+        scale = cleaned
         a["linetype_scale"] = scale
         weight = d.get("lineweight", -1)
         if weight is None:

@@ -148,6 +148,79 @@ def test_to_dxf_without_color_resolution_skips_style_decoders(
     assert len(dxf_entities_of_type(output, "LINE")) == 1
 
 
+@pytest.mark.parametrize("preserve_colors", [True, False])
+def test_to_dxf_keeps_circle_extrusion_in_modelspace_and_blocks(
+    monkeypatch, tmp_path: Path, preserve_colors: bool
+) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+    from ezdxf.math import OCS
+
+    raw = document_module.raw
+    decode_circles = raw.decode_circle_entities
+    decode_geometry = raw.decode_write_geometry
+
+    # The sample circles sit at the origin with a default extrusion; move them and flip them.
+    def circles(path):
+        return [(h, x + 5.0, y + 7.0, z + 1.0, r) for h, x, y, z, r in decode_circles(path)]
+
+    def geometry(path):
+        flipped = {row[0] for row in decode_circles(path)}
+        return [
+            (h, t, (0.0, 0.0, -1.0) if h in flipped else e, el)
+            for h, t, e, el in decode_geometry(path)
+        ]
+
+    def no_bulk_rows(_path):
+        raise RuntimeError("use the per-type decoders")
+
+    monkeypatch.setattr(raw, "decode_circle_entities", circles)
+    monkeypatch.setattr(raw, "decode_write_geometry", geometry)
+    monkeypatch.setattr(raw, "decode_line_arc_circle_entities", no_bulk_rows)
+    ezdwg.clear_decode_caches()
+    output = tmp_path / "circle_extrusion.dxf"
+    try:
+        ezdwg.to_dxf(
+            str(SAMPLES / "acadsharp" / "BLOCKPOINTPARAMETER.dwg"),
+            str(output),
+            preserve_colors=preserve_colors,
+        )
+    finally:
+        ezdwg.clear_decode_caches()
+
+    written = ezdxf.readfile(output)
+    found = {"modelspace": 0, "block": 0}
+    for layout in [written.modelspace(), *written.blocks]:
+        for circle in layout.query("CIRCLE"):
+            assert tuple(circle.dxf.extrusion) == pytest.approx((0.0, 0.0, -1.0))
+            ocs = OCS(circle.dxf.extrusion)
+            x, y, z = circle.dxf.center
+            assert tuple(ocs.to_wcs(circle.dxf.center)) == pytest.approx((-x, y, -z))
+            assert (x, y) == pytest.approx((5.0, 7.0))
+            found["modelspace" if layout.is_modelspace else "block"] += 1
+    assert found["modelspace"] > 0
+    assert found["block"] > 0
+
+
+@pytest.mark.parametrize(
+    ("extrusion", "expected"),
+    [
+        ((0.0, 0.0, -2.0), (0.0, 0.0, -1.0)),
+        ((0.0, 3.0, 4.0), (0.0, 0.6, 0.8)),
+        ((0.0, 0.0, 1.0), None),
+        ((0.0, 0.0, 0.0), None),
+        ((0.0, math.nan, 1.0), None),
+        ((0.0, 0.0, math.inf), None),
+        ((0.0, 1.0), None),
+        (None, None),
+    ],
+)
+def test_entity_extrusion_writes_only_a_unit_non_default_vector(extrusion, expected) -> None:
+    from ezdwg._convert_tables import entity_extrusion
+
+    result = entity_extrusion(None, 1, {"extrusion": extrusion})
+    assert result == (None if expected is None else pytest.approx(expected))
+
+
 def test_document_export_dxf_writes_arc_angles(tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 
@@ -2237,6 +2310,236 @@ def test_collect_block_members_by_name_keeps_first_shadow_duplicate_at_same_offs
     assert members == {"_Open30": [(101, "LINE")]}
 
 
+def _row(handle: int, offset: int, type_name: str) -> tuple:
+    return (handle, offset, 10, 0, type_name, "Entity")
+
+
+HDR_B, HDR_C, MODEL = 1, 2, 3
+
+
+def test_block_members_include_owned_entities_outside_span() -> None:
+    rows = [
+        _row(13, 20, "LINE"),
+        _row(10, 100, "BLOCK"),
+        _row(11, 110, "LINE"),
+        _row(12, 120, "ENDBLK"),
+    ]
+    placement = {10: (0, HDR_B), 11: (0, HDR_B), 12: (0, HDR_B), 13: (0, HDR_B)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {10: "B"}, placement_by_handle=placement
+    )
+
+    assert out["B"] == [(13, "LINE"), (11, "LINE")]
+
+
+def test_block_members_exclude_entities_owned_elsewhere() -> None:
+    rows = [
+        _row(10, 100, "BLOCK"),
+        _row(14, 110, "LINE"),
+        _row(19, 115, "LINE"),
+        _row(12, 120, "ENDBLK"),
+        _row(30, 200, "BLOCK"),
+        _row(31, 210, "LINE"),
+        _row(32, 220, "ENDBLK"),
+    ]
+    placement = {
+        10: (0, HDR_B),
+        14: (0, HDR_C),
+        19: (2, MODEL),
+        12: (0, HDR_B),
+        30: (0, HDR_C),
+        31: (0, HDR_C),
+        32: (0, HDR_C),
+    }
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {10: "B", 30: "C"}, placement_by_handle=placement
+    )
+
+    assert out["B"] == []
+    assert out["C"] == [(14, "LINE"), (31, "LINE")]
+
+
+def test_block_members_keep_span_entities_without_owner() -> None:
+    rows = [
+        _row(10, 100, "BLOCK"),
+        _row(15, 110, "LINE"),
+        _row(21, 115, "LINE"),
+        _row(12, 120, "ENDBLK"),
+    ]
+    placement = {10: (0, HDR_B), 21: (0, 0), 12: (0, HDR_B)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {10: "B"}, placement_by_handle=placement
+    )
+
+    assert out["B"] == [(15, "LINE"), (21, "LINE")]
+
+
+def test_block_members_keep_polyline_children() -> None:
+    # Type names as test_dwg/acadsharp/sample_AC1015.dwg lists them.
+    rows = [
+        _row(10, 100, "BLOCK"),
+        _row(16, 110, "POLYLINE_3D"),
+        _row(17, 111, "VERTEX_3D"),
+        _row(18, 112, "SEQEND"),
+        _row(12, 120, "ENDBLK"),
+    ]
+    placement = {10: (0, HDR_B), 16: (0, HDR_B), 17: (0, 16), 18: (0, 16), 12: (0, HDR_B)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {10: "B"}, placement_by_handle=placement
+    )
+
+    assert out["B"] == [(16, "POLYLINE_3D"), (17, "VERTEX_3D"), (18, "SEQEND")]
+
+
+def test_block_members_duplicate_names_do_not_merge() -> None:
+    rows = [
+        _row(100, 10, "BLOCK"),
+        _row(101, 11, "LINE"),
+        _row(102, 12, "ENDBLK"),
+        _row(200, 20, "BLOCK"),
+        _row(201, 21, "LINE"),
+        _row(202, 22, "ENDBLK"),
+    ]
+    placement = {100: (0, 1), 101: (0, 1), 102: (0, 1), 200: (0, 2), 201: (0, 2), 202: (0, 2)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {100: "BLK_DUP", 200: "BLK_DUP"}, placement_by_handle=placement
+    )
+
+    assert out == {"BLK_DUP": [(101, "LINE")]}
+
+
+def test_block_members_shadow_block_sharing_the_owner_gets_no_entry() -> None:
+    # Two BLOCK handles at one offset are one record, so the decoder gives both the same owner.
+    rows = [
+        _row(100, 10, "BLOCK"),
+        _row(200, 10, "BLOCK"),
+        _row(101, 11, "LINE"),
+        _row(102, 12, "ENDBLK"),
+    ]
+    placement = {100: (0, 1), 200: (0, 1), 101: (0, 1), 102: (0, 1)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {100: "_Open30", 200: "*D193"}, placement_by_handle=placement
+    )
+
+    assert out == {"_Open30": [(101, "LINE")]}
+
+
+def test_block_members_keep_children_of_a_parent_without_placement() -> None:
+    rows = [
+        _row(10, 100, "BLOCK"),
+        _row(16, 110, "POLYLINE_3D"),
+        _row(17, 111, "VERTEX_3D"),
+        _row(18, 112, "SEQEND"),
+        _row(12, 120, "ENDBLK"),
+    ]
+    placement = {10: (0, HDR_B), 17: (0, 16), 18: (0, 16), 12: (0, HDR_B)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {10: "B"}, placement_by_handle=placement
+    )
+
+    assert out["B"] == [(16, "POLYLINE_3D"), (17, "VERTEX_3D"), (18, "SEQEND")]
+
+
+def test_block_members_keep_span_entity_whose_owner_is_no_header() -> None:
+    rows = [
+        (HDR_B, 5, 10, 0, "BLOCK_HEADER", "Object"),
+        _row(10, 100, "BLOCK"),
+        _row(15, 110, "LINE"),
+        _row(12, 120, "ENDBLK"),
+    ]
+    placement = {10: (0, HDR_B), 15: (0, 999), 12: (0, HDR_B)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {10: "B"}, placement_by_handle=placement
+    )
+
+    assert out["B"] == [(15, "LINE")]
+
+
+def test_block_members_tied_spans_prefer_the_header_that_owns_members() -> None:
+    rows = [
+        _row(13, 20, "LINE"),
+        _row(100, 100, "BLOCK"),
+        _row(102, 120, "ENDBLK"),
+        _row(200, 200, "BLOCK"),
+        _row(202, 220, "ENDBLK"),
+    ]
+    placement = {13: (0, 2), 100: (0, 1), 102: (0, 1), 200: (0, 2), 202: (0, 2)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {100: "X", 200: "X"}, placement_by_handle=placement
+    )
+
+    assert out == {"X": [(13, "LINE")]}
+
+
+def test_block_members_tied_layout_pseudo_blocks_keep_the_first_span() -> None:
+    rows = [
+        _row(13, 20, "LINE"),
+        _row(100, 100, "BLOCK"),
+        _row(101, 110, "LINE"),
+        _row(102, 120, "ENDBLK"),
+        _row(200, 200, "BLOCK"),
+        _row(201, 210, "LINE"),
+        _row(202, 220, "ENDBLK"),
+    ]
+    placement = {13: (0, 2), 100: (0, 1), 101: (0, 1), 200: (0, 2), 201: (0, 2)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {100: "*Paper_Space", 200: "*Paper_Space"}, placement_by_handle=placement
+    )
+
+    assert out == {"*Paper_Space": [(101, "LINE")]}
+
+
+def test_to_dxf_block_members_include_owned_entities_outside_span(tmp_path: Path) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+    output = tmp_path / "owned_members.dxf"
+
+    ezdwg.to_dxf(str(SAMPLES / "acadsharp" / "sample_AC1018.dwg"), str(output))
+
+    block = ezdxf.readfile(str(output)).blocks.get("MyBlock")
+    assert Counter(entity.dxftype() for entity in block) == {"LINE": 2, "CIRCLE": 1, "ATTDEF": 1}
+
+
+def test_block_entity_names_match_their_owner_header() -> None:
+    path = str(SAMPLES / "acadsharp" / "sample_AC1018.dwg")
+    placements = document_module._entity_placement_map(path)
+    header_names = document_module._block_header_name_map(path)
+
+    owned = {
+        (handle, kind): (name, header_names[placements[handle][1]])
+        for handle, kind, name in ezdwg.raw.decode_block_entity_names(path)
+        if placements.get(handle, (None, 0))[0] == 0
+        and placements[handle][1] in header_names
+    }
+
+    assert {kind for _handle, kind in owned} == {"BLOCK", "ENDBLK"}
+    assert {key: pair for key, pair in owned.items() if pair[0] != pair[1]} == {}
+
+
+def test_block_members_without_placement_match_span_result() -> None:
+    rows = [
+        _row(13, 20, "LINE"),
+        _row(10, 100, "BLOCK"),
+        _row(11, 110, "LINE"),
+        _row(12, 120, "ENDBLK"),
+    ]
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {10: "B"}, placement_by_handle=None
+    )
+
+    assert out["B"] == [(11, "LINE")]
+
+
 def test_normalize_recursive_block_insert_remaps_dimension_self_reference() -> None:
     entity = Entity(
         dxftype="INSERT",
@@ -2878,6 +3181,67 @@ def test_prepare_dxf_layers_falls_back_for_invalid_decoded_layer_name() -> None:
     assert "LAYER_80" in doc.layers
     assert mapping[0x85] == "SD-FRAME_TEXT"
     assert "SD-FRAME_TEXT" in doc.layers
+
+
+def test_prepare_dxf_layers_writes_layer_state() -> None:
+    pytest.importorskip("ezdxf")
+
+    ezdxf = convert_module._require_ezdxf()
+    doc = ezdxf.new(dxfversion="R2010")
+
+    convert_module._prepare_dxf_layers(
+        doc,
+        {0x10: (3, None), 0x80: (5, None), 0x81: (999, None), 0x82: (2, None)},
+        {0x10: "0", 0x80: "A", 0x81: "B", 0x82: "C"},
+        layer_states_by_handle={
+            # (frozen, off, locked, plot)
+            0x10: (True, True, True, False),
+            0x80: (False, True, False, True),
+            0x81: (True, True, False, True),
+        },
+    )
+
+    # Layer 0 already exists in a new ezdxf document: it still gets the state.
+    zero = doc.layers.get("0")
+    assert zero.dxf.color == -7 and zero.dxf.flags & 5 == 5 and zero.dxf.plot == 0
+    a = doc.layers.get("A")
+    assert a.dxf.color == -5 and a.dxf.flags & 5 == 0 and a.dxf.plot == 1
+    # No valid decoded color: an OFF layer is written as -7.
+    b = doc.layers.get("B")
+    assert b.dxf.color == -7 and b.dxf.flags & 1
+    # No decoded state: on, thawed, unlocked.
+    c = doc.layers.get("C")
+    assert c.dxf.color == 2 and c.dxf.flags & 5 == 0
+
+
+def test_prepare_dxf_layers_keeps_defpoints_no_plot() -> None:
+    pytest.importorskip("ezdxf")
+
+    ezdxf = convert_module._require_ezdxf()
+    doc = ezdxf.new(dxfversion="R2010")
+    # R14 has no plot bit, so its layers decode as plot=True.
+    convert_module._prepare_dxf_layers(
+        doc,
+        {0x20: (7, None)},
+        {0x20: "Defpoints"},
+        layer_states_by_handle={0x20: (False, False, False, True)},
+    )
+    assert doc.layers.get("Defpoints").dxf.plot == 0
+
+
+@pytest.mark.parametrize("name", ["sample_AC1015.dwg", "sample_AC1032.dwg"])
+def test_to_dxf_keeps_layer_state(tmp_path, name) -> None:
+    pytest.importorskip("ezdxf")
+    ezdxf = convert_module._require_ezdxf()
+    source = ROOT / "test_dwg" / "acadsharp" / name
+    output = tmp_path / "layer_state.dxf"
+    convert_module.to_dxf(str(source), str(output), modelspace_only=True)
+
+    layers = {layer.dxf.name: layer for layer in ezdxf.readfile(str(output)).layers}
+    assert {n for n, l in layers.items() if l.dxf.color < 0} == {"Layer_Off"}
+    assert {n for n, l in layers.items() if l.dxf.flags & 1} == {"Layer_Freeze"}
+    assert {n for n, l in layers.items() if l.dxf.flags & 4} == {"Layer_Lock"}
+    assert {n for n, l in layers.items() if not l.dxf.plot} == {"Layer_NoPlot", "Defpoints"}
 
 
 def test_has_right_side_open30_i_proxies() -> None:
@@ -3699,6 +4063,92 @@ def test_resolve_block_name_by_handle_does_not_use_positional_fallback(monkeypat
     assert resolved == {100: "BLK_A"}
 
 
+def _block_header_row(handle: int, offset: int) -> tuple:
+    return (handle, offset, 0, 0x31, "BLOCK_HEADER", "Object")
+
+
+def test_resolve_block_name_by_handle_names_unlisted_blocks_by_their_owner(monkeypatch) -> None:
+    # Owned BLOCKs missing from the name rows; the paper-space header lies after the other headers.
+    header_rows = [
+        _block_header_row(21, 5),
+        _block_header_row(3, 6),
+        _block_header_row(4, 7),
+        _block_header_row(22, 8),
+        (11, 10, 0, 0x04, "BLOCK", "Entity"),
+        (12, 20, 0, 0x04, "BLOCK", "Entity"),
+        (13, 30, 0, 0x04, "BLOCK", "Entity"),
+        (14, 40, 0, 0x04, "BLOCK", "Entity"),
+    ]
+    monkeypatch.setattr(
+        convert_module.raw,
+        "decode_block_header_names",
+        lambda _path, _limit=None: [
+            (3, "BLK_A"),
+            (4, "BLK_B"),
+            (11, "*Model_Space"),
+            (12, "*Paper_Space"),
+            (21, "*Model_Space"),
+            (22, "*Paper_Space"),
+        ],
+    )
+    monkeypatch.setattr(
+        convert_module,
+        "_entity_placement_map",
+        lambda _path: {11: (2, 0), 12: (1, 0), 13: (0, 3), 14: (0, 4)},
+    )
+
+    resolved = convert_module._resolve_block_name_by_handle(
+        "dummy.dwg", header_rows, referenced_names={"BLK_A"}
+    )
+
+    assert resolved == {11: "*Model_Space", 12: "*Paper_Space", 13: "BLK_A", 14: "BLK_B"}
+
+
+def test_resolve_block_name_by_handle_ownerless_blocks_take_only_unclaimed_names(
+    monkeypatch,
+) -> None:
+    # insert_2004.dwg's name rows (BLOCK 40 listed as *Model_Space), one more block, paper-space LINEs.
+    rows = [
+        _block_header_row(27, 530),
+        _block_header_row(29, 489),
+        (40, 2747, 0, 0x04, "BLOCK", "Entity"),
+        _block_header_row(41, 454),
+        (42, 2780, 0, 0x13, "LINE", "Entity"),
+        (43, 2815, 0, 0x05, "ENDBLK", "Entity"),
+        (44, 2900, 0, 0x07, "INSERT", "Entity"),
+        (50, 2816, 0, 0x04, "BLOCK", "Entity"),
+        _block_header_row(51, 460),
+        (52, 2820, 0, 0x13, "LINE", "Entity"),
+        (53, 2830, 0, 0x05, "ENDBLK", "Entity"),
+        (54, 2910, 0, 0x07, "INSERT", "Entity"),
+        (63, 2834, 0, 0x04, "BLOCK", "Entity"),
+        (64, 2934, 0, 0x05, "ENDBLK", "Entity"),
+        (65, 2951, 0, 0x04, "BLOCK", "Entity"),
+        (66, 2981, 0, 0x05, "ENDBLK", "Entity"),
+        (70, 2960, 0, 0x13, "LINE", "Entity"),
+        (71, 2970, 0, 0x13, "LINE", "Entity"),
+    ]
+    names = [(27, "*Paper_Space"), (29, "*Model_Space"), (40, "*Model_Space"), (41, "BLK_A"), (51, "BLK_B")]
+    placement = {
+        40: (0, 41), 42: (0, 41), 43: (0, 41),
+        50: (0, 51), 52: (0, 51), 53: (0, 51),
+        44: (2, 0), 54: (2, 0), 63: (2, 0), 64: (2, 0),
+        65: (1, 0), 66: (1, 0), 70: (1, 0), 71: (1, 0),
+    }
+    monkeypatch.setattr(convert_module.raw, "decode_block_header_names", lambda _p, _l=None: names)
+    monkeypatch.setattr(convert_module, "_entity_placement_map", lambda _path: placement)
+
+    resolved = convert_module._resolve_block_name_by_handle(
+        "dummy.dwg", rows, referenced_names={"BLK_A", "BLK_B"}
+    )
+    members = convert_module._collect_block_members_by_name(
+        sorted(rows, key=lambda row: row[1]), resolved, placement_by_handle=placement
+    )
+
+    assert resolved == {40: "BLK_A", 50: "BLK_B", 63: "*Model_Space", 65: "*Paper_Space"}
+    assert members["BLK_A"] == [(42, "LINE")]
+
+
 def test_resolve_block_end_name_by_handle_exact_fills_missing_endblk_names(monkeypatch) -> None:
     header_rows = [
         (100, 10, 0, 0x04, "BLOCK", "Entity"),
@@ -3753,6 +4203,95 @@ def test_materialize_export_entities_keeps_same_handle_across_types() -> None:
     ]
     out = convert_module._materialize_export_entities(layout, selected)
     assert len(out) == 2
+
+
+def test_materialize_export_entities_dedup_semantics() -> None:
+    doc = ezdwg.read(str(SAMPLES / "line_2007.dwg"))
+    layout = doc.modelspace()
+
+    def line(end_x: float, **extra: Any) -> Entity:
+        return Entity(
+            dxftype="LINE", handle=10, dxf={"start": (0.0, 0.0, 0.0), "end": (end_x, 0.0, 0.0), **extra}
+        )
+
+    selected = [
+        line(1.0),
+        line(1.0 + 1e-14),  # equal after rounding to 12 digits: dropped
+        line(2.0),  # different geometry: kept
+        line(1.0),  # equal to the first: dropped
+        line(2.0),  # equal to a later one: dropped
+        line(1.0, layer="A"),  # extra key: kept
+        Entity(dxftype="LINE", handle=11, dxf={"start": (0.0, 0.0, 0.0), "end": (1.0, 0.0, 0.0)}),
+    ]
+    out = convert_module._materialize_export_entities(layout, selected)
+    assert out == [selected[0], selected[2], selected[5], selected[6]]
+
+    # Polyline reached from its row and each vertex: once; an owner with other content: kept.
+    points = [(float(i), 0.0, 0.0) for i in range(5)]
+    poly = Entity(dxftype="POLYLINE_3D", handle=20, dxf={"points": list(points)})
+    other = Entity(dxftype="POLYLINE_3D", handle=20, dxf={"points": points[:2]})
+    vertices = [
+        Entity(dxftype="VERTEX_3D", handle=100 + i, dxf={"owner_handle": 20, "owner_type": "POLYLINE_3D"})
+        for i in range(5)
+    ]
+    same_owner = Entity(dxftype="POLYLINE_3D", handle=20, dxf={"points": list(points)})
+    out = convert_module._materialize_export_entities(
+        layout, [poly, *vertices], owners_by_handle={20: same_owner}
+    )
+    assert out == [poly]
+    out = convert_module._materialize_export_entities(
+        layout, [poly, *vertices], owners_by_handle={20: other}
+    )
+    assert out == [poly, other]
+    out = convert_module._materialize_export_entities(
+        layout, vertices, owners_by_handle={20: poly}, allowed_owner_handles={20}
+    )
+    assert out == [poly]
+    out = convert_module._materialize_export_entities(
+        layout, vertices, owners_by_handle={20: poly}, allowed_owner_handles={21}
+    )
+    assert out == []
+
+
+def test_block_materialize_drops_attribs_owned_by_member_inserts() -> None:
+    # Owner-map membership admits an INSERT's ATTRIBs; the INSERT already writes them.
+    layout = ezdwg.read(str(SAMPLES / "line_2007.dwg")).modelspace()
+    insert = Entity(dxftype="INSERT", handle=30, dxf={"name": "B", "insert": (0.0, 0.0, 0.0)})
+    owned = Entity(dxftype="ATTRIB", handle=31, dxf={"owner_handle": 30, "text": "A"})
+    orphan = Entity(dxftype="ATTRIB", handle=32, dxf={"owner_handle": 99, "text": "B"})
+
+    out = convert_module._materialize_export_entities(
+        layout, [insert, owned, orphan], allowed_owner_handles={30, 31, 32}
+    )
+    assert out == [insert, orphan]
+    out = convert_module._materialize_export_entities(layout, [insert, owned, orphan])
+    assert out == [insert, owned, orphan]
+
+
+def test_materialize_export_entities_freezes_owner_once_not_per_vertex(monkeypatch) -> None:
+    doc = ezdwg.read(str(SAMPLES / "line_2007.dwg"))
+    layout = doc.modelspace()
+    points = [(float(i), 0.0, 0.0) for i in range(200)]
+    poly = Entity(dxftype="POLYLINE_3D", handle=20, dxf={"points": points})
+    owner = Entity(dxftype="POLYLINE_3D", handle=20, dxf={"points": list(points)})
+    vertices = [
+        Entity(dxftype="VERTEX_3D", handle=1000 + i, dxf={"owner_handle": 20, "owner_type": "POLYLINE_3D"})
+        for i in range(200)
+    ]
+    calls = 0
+    freeze = convert_module._freeze_dxf_value
+
+    def counting_freeze(value: Any) -> str:
+        nonlocal calls
+        calls += 1
+        return freeze(value)
+
+    monkeypatch.setattr(convert_module, "_freeze_dxf_value", counting_freeze)
+    out = convert_module._materialize_export_entities(
+        layout, [poly, *vertices], owners_by_handle={20: owner}
+    )
+    assert out == [poly]
+    assert calls <= 2
 
 
 @pytest.mark.parametrize("modelspace_only", [True, False])

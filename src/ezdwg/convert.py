@@ -20,7 +20,6 @@ from .document import (
     Layout,
     SUPPORTED_ENTITY_TYPES,
     TYPE_ALIASES,
-    _block_header_name_map,
     _block_header_name_rows,
     _entity_placement_map,
     _present_supported_types,
@@ -80,8 +79,18 @@ from ._convert_polyline2d_spline import (
 )
 from ._convert_layer import (
     _layer_names_by_handle,
+    _layer_states_by_handle,
     _layer_styles_by_handle,
     _prepare_dxf_layers,
+)
+from ._convert_tables import (
+    DxfTableContext,
+    entity_extrusion,
+    entity_linetype,
+    prepare_dxf_linetypes,
+    prepare_dxf_styles,
+    set_dxf_header,
+    text_style_name,
 )
 from ._convert_geometry_filter import (
     _ezdxf_entity_type,
@@ -646,12 +655,19 @@ def to_dxf(
             except Exception:
                 continue
 
+    table_context = DxfTableContext(
+        extrusion_path=None if preserve_colors else layout.doc.decode_path or layout.doc.path
+    )
+    prepare_dxf_styles(dxf_doc, layout.doc.decode_path or layout.doc.path, table_context)
+    prepare_dxf_linetypes(dxf_doc, layout.doc.decode_path or layout.doc.path, table_context)
     layer_styles_by_handle = _layer_styles_by_handle(layout.doc.decode_path or layout.doc.path)
     layer_names_by_handle = _layer_names_by_handle(layout.doc.decode_path or layout.doc.path)
     layer_name_by_handle = _prepare_dxf_layers(
         dxf_doc,
         layer_styles_by_handle,
         layer_names_by_handle,
+        table_context.linetype_name_by_layer,
+        _layer_states_by_handle(layout.doc.decode_path or layout.doc.path),
     )
 
     block_reference_entities = [
@@ -680,6 +696,7 @@ def to_dxf(
             layer_name_by_handle=layer_name_by_handle,
             dim_block_policy=normalized_dim_block_policy,
             decode_cache=decode_cache,
+            table_context=table_context,
         )
         # Block definitions are assembled just above; drop memoized block
         # safety/span caches so modelspace INSERT handling sees final content.
@@ -702,6 +719,7 @@ def to_dxf(
             layer_name_by_handle=layer_name_by_handle,
             dim_block_policy=normalized_dim_block_policy,
             dimension_context=dimension_write_context,
+            table_context=table_context,
         ):
             if start is not None:
                 retained_outputs.append((entity.dxftype, modelspace[start:]))
@@ -739,6 +757,12 @@ def to_dxf(
 
     if flatten_inserts:
         _flatten_modelspace_inserts(modelspace)
+
+    # The DWG extents fit only when the DXF modelspace is the whole DWG modelspace.
+    full_modelspace = (
+        modelspace_only and types is None and layout.name.upper() != "PAPERSPACE"
+    )
+    set_dxf_header(dxf_doc, layout.doc.decode_path or layout.doc.path, extents=full_modelspace)
 
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3201,6 +3225,13 @@ def _materialize_export_entities(
                     )
                 )
             continue
+        if (
+            entity.dxftype == "ATTRIB"
+            and allowed_owner_handles is not None
+            and entity.dxf.get("owner_handle") in allowed_owner_handles
+        ):
+            # Its INSERT is a member and writes it as an attribute; a copy here would draw it twice.
+            continue
         if not _append_unique_export_entity(
             export_entities,
             entity,
@@ -3226,7 +3257,8 @@ def _materialize_export_entities(
             for handle, entity in owners_by_handle.items()
             if entity.dxftype in requested_owner_types
         }
-    for owner_handle, _owner_type in owner_requests:
+    # One request per vertex; a repeat resolves to the same owner and is always dropped.
+    for owner_handle in dict.fromkeys(owner_handle for owner_handle, _ in owner_requests):
         owner_entity = resolved_owners_by_handle.get(owner_handle)
         if owner_entity is None:
             continue
@@ -3356,7 +3388,9 @@ def _attach_insert_attributes(
             export_entities.append(entity)
             continue
         dxf = dict(entity.dxf)
-        dxf["attributes"] = [dict(attribute.dxf) for attribute in attributes]
+        dxf["attributes"] = [
+            {**attribute.dxf, "handle": attribute.handle} for attribute in attributes
+        ]
         export_entities.append(Entity(dxftype=entity.dxftype, handle=entity.handle, dxf=dxf))
     return export_entities
 
@@ -3396,6 +3430,7 @@ def _populate_block_definitions(
     layer_name_by_handle: dict[int, str] | None = None,
     dim_block_policy: str = "smart",
     decode_cache: _ConvertDecodeCache | None = None,
+    table_context: DxfTableContext | None = None,
 ) -> None:
     if reference_entities is None:
         reference_entities = []
@@ -3463,22 +3498,12 @@ def _populate_block_definitions(
         block_name_by_handle=block_name_by_handle,
         decode_cache=decode_cache,
     )
-    owned_members: dict[str, list[tuple[int, str]]] = {}
     placements = _entity_placement_map(decode_path)
-    owner_names = _block_header_name_map(decode_path)
-    for handle, _, _, _, name, category in sorted_header_rows:
-        if category.upper() not in {"E", "ENTITY"} or name in {"BLOCK", "ENDBLK"}:
-            continue
-        mode, owner = placements.get(handle, (None, None))
-        owner_name = owner_names.get(owner) if mode == 0 else None
-        if owner_name and not _is_layout_pseudo_block_name(owner_name):
-            owned_members.setdefault(owner_name, []).append((handle, name))
-
     block_members_by_name = _collect_block_members_by_name(
         sorted_header_rows,
         block_name_by_handle,
         endblk_name_by_handle=endblk_name_by_handle,
-        owned_members=owned_members,
+        placement_by_handle=placements,
     )
 
     if not block_members_by_name:
@@ -3573,7 +3598,7 @@ def _populate_block_definitions(
                 sorted_header_rows,
                 block_name_by_handle,
                 endblk_name_by_handle=endblk_name_by_handle,
-                owned_members=owned_members,
+                placement_by_handle=placements,
             )
             selected_block_names = {
                 name for name in referenced_names if name in block_members_by_name
@@ -3761,6 +3786,7 @@ def _populate_block_definitions(
                 explode_dimensions=explode_dimensions,
                 layer_name_by_handle=layer_name_by_handle,
                 dim_block_policy=dim_block_policy,
+                table_context=table_context,
             )
 
 
@@ -3769,7 +3795,7 @@ def _collect_block_members_by_name(
     block_name_by_handle: dict[int, str],
     *,
     endblk_name_by_handle: dict[int, str] | None = None,
-    owned_members: dict[str, list[tuple[int, str]]] | None = None,
+    placement_by_handle: dict[int, tuple[int, int]] | None = None,
 ) -> dict[str, list[tuple[int, str]]]:
     # Collect each BLOCK definition independently first, then choose one
     # representative definition per name. Prefer closing by ENDBLK name when
@@ -3780,10 +3806,14 @@ def _collect_block_members_by_name(
 
     candidates_by_name: dict[str, list[tuple[int, str]]] = {}
     candidate_scores: dict[str, tuple[int, int]] = {}
+    tied_candidates_by_name: dict[str, list[tuple[int, list[tuple[int, str]]]]] = {}
+    first_block_handle_by_name: dict[str, int] = {}
 
     stack: list[dict[str, Any]] = []
 
-    def _commit_candidate(name: str | None, members: list[tuple[int, str]]) -> None:
+    def _commit_candidate(
+        name: str | None, members: list[tuple[int, str]], block_handle: int
+    ) -> None:
         if name is None:
             return
         member_count = len(members)
@@ -3795,12 +3825,15 @@ def _collect_block_members_by_name(
         if previous_score is None or score > previous_score:
             candidate_scores[name] = score
             candidates_by_name[name] = list(members)
+            tied_candidates_by_name[name] = [(block_handle, list(members))]
+        elif score == previous_score:
+            tied_candidates_by_name[name].append((block_handle, list(members)))
 
     def _close_stack_to_index(index: int) -> None:
         # Close nested/overlapping contexts from inside-out.
         while len(stack) - 1 >= index:
             context = stack.pop()
-            _commit_candidate(context["name"], context["members"])
+            _commit_candidate(context["name"], context["members"], context["handle"])
 
     for row in sorted_header_rows:
         if not isinstance(row, tuple) or len(row) < 6:
@@ -3823,6 +3856,8 @@ def _collect_block_members_by_name(
             normalized_block_name = (
                 block_name.strip() if isinstance(block_name, str) and block_name.strip() != "" else None
             )
+            if normalized_block_name is not None:
+                first_block_handle_by_name.setdefault(normalized_block_name, handle)
 
             # Some R2010+ drawings contain shadow BLOCK records at the same
             # stream offset before any members. Keep the first mapped name to
@@ -3840,6 +3875,7 @@ def _collect_block_members_by_name(
                     "name": normalized_block_name,
                     "members": [],
                     "offset": offset,
+                    "handle": handle,
                 }
             )
             continue
@@ -3869,12 +3905,120 @@ def _collect_block_members_by_name(
         stack[-1]["members"].append((handle, type_name))
 
     _close_stack_to_index(0)
-    # Some writers store the members outside the BLOCK/ENDBLK span.
-    # Recover otherwise empty definitions from their explicit owner handles.
-    for name, members in (owned_members or {}).items():
-        if not candidates_by_name.get(name):
-            candidates_by_name[name] = members
-    return candidates_by_name
+    if not placement_by_handle:
+        return candidates_by_name
+    shadow_block_by_name = {
+        name: handle
+        for name, handle in first_block_handle_by_name.items()
+        if name not in tied_candidates_by_name
+    }
+    return _members_from_owner_map(
+        sorted_header_rows, tied_candidates_by_name, shadow_block_by_name, placement_by_handle
+    )
+
+
+def _members_from_owner_map(
+    sorted_header_rows: list[tuple[Any, ...]],
+    tied_candidates_by_name: dict[str, list[tuple[int, list[tuple[int, str]]]]],
+    shadow_block_by_name: dict[str, int],
+    placement_by_handle: dict[int, tuple[int, int]],
+) -> dict[str, list[tuple[int, str]]]:
+    # Writers can store a block's entities outside its BLOCK..ENDBLK span; the owner is exact.
+    elsewhere = -1
+    entity_rows: list[tuple[int, str]] = []
+    header_handles: set[int] = set()
+    for row in sorted_header_rows:
+        if not isinstance(row, tuple) or len(row) < 6:
+            continue
+        type_name = str(row[4]).strip().upper()
+        try:
+            handle = int(row[0])
+        except Exception:
+            continue
+        if type_name == "BLOCK_HEADER":
+            header_handles.add(handle)
+            continue
+        if str(row[5]).strip().upper() not in {"E", "ENTITY"}:
+            continue
+        if type_name == "BLOCK":
+            mode, owner = placement_by_handle.get(handle, (None, 0))
+            if mode == 0 and owner:
+                header_handles.add(owner)
+            continue
+        if type_name != "ENDBLK":
+            entity_rows.append((handle, type_name))
+
+    root_by_handle: dict[int, int | None] = {}
+
+    def _root(handle: int) -> int | None:
+        # Follow entity owners (VERTEX -> POLYLINE, ATTRIB -> INSERT) up to the block header.
+        chain: set[int] = set()
+        root: int | None = None
+        current = handle
+        while True:
+            if current in root_by_handle:
+                root = root_by_handle[current]
+                break
+            placement = placement_by_handle.get(current)
+            if placement is None or current in chain:
+                break
+            chain.add(current)
+            mode, owner = placement
+            if mode in (1, 2):
+                root = elsewhere
+                break
+            if owner in header_handles:
+                root = owner
+                break
+            if owner not in placement_by_handle:
+                break
+            current = owner
+        for item in chain:
+            root_by_handle[item] = root
+        return root
+
+    position_by_handle: dict[int, int] = {}
+    type_by_handle: dict[int, str] = {}
+    members_by_header: dict[int, list[int]] = {}
+    for position, (handle, type_name) in enumerate(entity_rows):
+        position_by_handle.setdefault(handle, position)
+        type_by_handle.setdefault(handle, type_name)
+        root = _root(handle)
+        if root is not None and root != elsewhere:
+            members_by_header.setdefault(root, []).append(handle)
+
+    def _header(block_handle: int) -> int:
+        mode, owner = placement_by_handle.get(block_handle, (None, 0))
+        return owner if mode == 0 else 0
+
+    def _owned_count(candidate: tuple[int, list[tuple[int, str]]]) -> int:
+        return len(members_by_header.get(_header(candidate[0]), []))
+
+    def _members(name: str, block_handle: int, span_members: list[tuple[int, str]]) -> list:
+        header = _header(block_handle)
+        if not header or _is_layout_pseudo_block_name(name):
+            return span_members
+        handles = set(members_by_header.get(header, []))
+        handles.update(handle for handle, _ in span_members if _root(handle) is None)
+        return [
+            (handle, type_by_handle[handle])
+            for handle in sorted(handles, key=lambda item: position_by_handle.get(item, -1))
+            if handle in type_by_handle
+        ]
+
+    result: dict[str, list[tuple[int, str]]] = {}
+    claimed_headers: set[int] = set()
+    for name, tied in tied_candidates_by_name.items():
+        # max() keeps the first candidate on equal counts, as the span scoring does.
+        best = tied[0] if _is_layout_pseudo_block_name(name) else max(tied, key=_owned_count)
+        block_handle, span_members = best
+        claimed_headers.add(_header(block_handle))
+        result[name] = _members(name, block_handle, span_members)
+    for name, block_handle in shadow_block_by_name.items():
+        header = _header(block_handle)
+        if header and header not in claimed_headers:
+            result[name] = _members(name, block_handle, [])
+    return result
 
 
 def _block_prefers_open30_arrowhead(entities: list[Entity]) -> bool:
@@ -4300,8 +4444,9 @@ def _resolve_block_name_by_handle(
     # declarations and all directly referenced names are present, skip the
     # expensive exact BLOCK entity-name decode.
     if referenced_names is not None:
-        candidate_map = dict(header_map)
-        if len(candidate_map) < len(block_handles_in_order):
+        owner_names = _block_names_from_owners(decode_path, header_rows, by_header_handle)
+        candidate_map = owner_names or dict(header_map)
+        if not owner_names and len(candidate_map) < len(block_handles_in_order):
             ordered_names = [
                 normalized_name
                 for row in rows
@@ -4372,6 +4517,42 @@ def _resolve_block_name_by_handle(
     if decode_cache is not None:
         decode_cache.block_name_by_handle_cache[cache_key] = exact_map
     return exact_map
+
+
+def _block_names_from_owners(
+    decode_path: str,
+    header_rows: list[tuple[Any, ...]],
+    name_by_handle: dict[int, str],
+) -> dict[int, str]:
+    # File order shifts names after one out-of-order record, so only ownerless BLOCKs pair by it.
+    placements = _entity_placement_map(decode_path)
+    names: dict[int, str] = {}
+    claimed: set[int] = set()
+    ownerless: list[int] = []
+    headers: list[int] = []
+    rows = [row for row in header_rows if isinstance(row, tuple) and len(row) >= 6]
+    for row in sorted(rows, key=lambda row: int(row[1])):
+        try:
+            handle = int(row[0])
+        except Exception:
+            continue
+        type_name = str(row[4]).strip().upper()
+        if type_name == "BLOCK_HEADER":
+            headers.append(handle)
+            continue
+        if type_name != "BLOCK" or str(row[5]).strip().upper() not in {"E", "ENTITY"}:
+            continue
+        mode, owner = placements.get(handle, (None, 0))
+        if mode == 0 and owner in name_by_handle:
+            names[handle] = name_by_handle[owner]
+            claimed.add(owner)
+        else:
+            ownerless.append(handle)
+    if not names:
+        return {}
+    unclaimed = [name_by_handle[h] for h in headers if h not in claimed and h in name_by_handle]
+    names.update(zip(ownerless, unclaimed))
+    return names
 
 
 def _rows_to_named_handle_map(rows: Any) -> dict[int, str]:
@@ -4852,6 +5033,15 @@ def _canonical_entity_type(raw_type_name: str) -> str:
     return TYPE_ALIASES.get(token, token)
 
 
+# Written from OCS coordinates (LINE, POINT, ELLIPSE: WCS, the extrusion is their normal).
+_EXTRUSION_ENTITY_TYPES = frozenset(
+    {
+        "LINE", "POINT", "ARC", "CIRCLE", "ELLIPSE", "LWPOLYLINE", "POLYLINE_2D",
+        "SOLID", "TRACE", "TEXT", "ATTRIB", "ATTDEF", "INSERT", "HATCH",
+    }
+)
+
+
 def _write_entity_to_modelspace(
     modelspace: Any,
     entity: Entity,
@@ -4860,6 +5050,7 @@ def _write_entity_to_modelspace(
     layer_name_by_handle: dict[int, str] | None = None,
     dim_block_policy: str = "smart",
     dimension_context: _DimensionWriteContext | None = None,
+    table_context: DxfTableContext | None = None,
 ) -> bool:
     try:
         return _write_entity_to_modelspace_unsafe(
@@ -4869,6 +5060,7 @@ def _write_entity_to_modelspace(
             layer_name_by_handle=layer_name_by_handle,
             dim_block_policy=dim_block_policy,
             dimension_context=dimension_context,
+            table_context=table_context,
         )
     except Exception:
         return False
@@ -4882,10 +5074,24 @@ def _write_entity_to_modelspace_unsafe(
     layer_name_by_handle: dict[int, str] | None = None,
     dim_block_policy: str = "smart",
     dimension_context: _DimensionWriteContext | None = None,
+    table_context: DxfTableContext | None = None,
 ) -> bool:
     dxftype = entity.dxftype
     dxf = entity.dxf
-    dxfattribs = _entity_dxfattribs(dxf, layer_name_by_handle=layer_name_by_handle)
+    dxfattribs = _entity_dxfattribs(
+        dxf,
+        layer_name_by_handle=layer_name_by_handle,
+        table_context=table_context,
+        entity_handle=entity.handle,
+    )
+    if dxftype in {"TEXT", "ATTRIB", "ATTDEF", "MTEXT"}:
+        style = text_style_name(table_context, entity.handle, dxf)
+        if style is not None:
+            dxfattribs["style"] = style
+    if dxftype in _EXTRUSION_ENTITY_TYPES:
+        extrusion = entity_extrusion(table_context, entity.handle, dxf)
+        if extrusion is not None:
+            dxfattribs["extrusion"] = extrusion
     is_modelspace_layout = bool(getattr(modelspace, "is_modelspace", False))
 
     if dxftype == "LINE":
@@ -5232,6 +5438,7 @@ def _write_entity_to_modelspace_unsafe(
                         dxf,
                         dxfattribs,
                         attributes,
+                        table_context,
                     )
                 except Exception:
                     pass
@@ -5245,7 +5452,7 @@ def _write_entity_to_modelspace_unsafe(
                 ref.dxf.row_count = row_count
                 ref.dxf.column_spacing = _finite_float(dxf.get("column_spacing", 0.0), 0.0)
                 ref.dxf.row_spacing = _finite_float(dxf.get("row_spacing", 0.0), 0.0)
-                _write_insert_attributes(ref, attributes)
+                _write_insert_attributes(ref, attributes, table_context)
                 return True
             except Exception:
                 pass
@@ -5304,7 +5511,7 @@ def _write_entity_to_modelspace_unsafe(
                 ref.dxf.yscale = yscale
                 ref.dxf.zscale = zscale
                 ref.dxf.rotation = rotation
-                _write_insert_attributes(ref, list(dxf.get("attributes") or []))
+                _write_insert_attributes(ref, list(dxf.get("attributes") or []), table_context)
                 return True
             except Exception:
                 # Block definitions are not exported yet. Keep insert location visible.
@@ -5376,13 +5583,27 @@ def _write_spline(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str, An
         return True
 
     closed = bool(dxf.get("closed", False))
-    if len(control_points) > 1 and control_points[0] == control_points[-1]:
-        control_points = control_points[:-1]
-
     degree = max(2, int(dxf.get("degree", 3)))
     knots = [float(v) for v in dxf.get("knots", [])]
     weights = [float(v) for v in dxf.get("weights", [])]
     rational = bool(dxf.get("rational", False))
+
+    # Knots that fit the control points define the curve: write it as stored.
+    if len(knots) == len(control_points) + degree + 1:
+        if rational and len(weights) == len(control_points):
+            spline = modelspace.add_rational_spline(
+                control_points, weights, degree=degree, knots=knots, dxfattribs=dxfattribs
+            )
+        else:
+            spline = modelspace.add_open_spline(
+                control_points, degree=degree, knots=knots, dxfattribs=dxfattribs
+            )
+        spline.set_flag_state(spline.CLOSED, closed)
+        spline.set_flag_state(spline.PERIODIC, closed and bool(dxf.get("periodic", False)))
+        return True
+
+    if len(control_points) > 1 and control_points[0] == control_points[-1]:
+        control_points = control_points[:-1]
 
     if closed and len(control_points) >= 3:
         spline = modelspace.add_spline(dxfattribs=dxfattribs)
@@ -5439,6 +5660,7 @@ def _write_minsert_expanded(
     dxf: dict[str, Any],
     dxfattribs: dict[str, Any],
     attributes: list[Any],
+    table_context: DxfTableContext | None = None,
 ) -> bool:
     row_count = max(1, int(dxf.get("row_count", 1)))
     column_count = max(1, int(dxf.get("column_count", 1)))
@@ -5474,7 +5696,7 @@ def _write_minsert_expanded(
                 ref.dxf.zscale = float(dxf.get("zscale", 1.0))
                 ref.dxf.rotation = rotation_deg
                 shifted_attributes = _shift_attribute_positions(attributes, offset)
-                _write_insert_attributes(ref, shifted_attributes)
+                _write_insert_attributes(ref, shifted_attributes, table_context)
                 written += 1
             except Exception:
                 continue
@@ -5506,7 +5728,9 @@ def _shift_attribute_positions(attributes: list[Any], offset: tuple[float, float
     return shifted
 
 
-def _write_insert_attributes(insert_ref: Any, attributes: list[Any]) -> None:
+def _write_insert_attributes(
+    insert_ref: Any, attributes: list[Any], table_context: DxfTableContext | None = None
+) -> None:
     if not attributes:
         return
     for attribute in attributes:
@@ -5519,7 +5743,15 @@ def _write_insert_attributes(insert_ref: Any, attributes: list[Any]) -> None:
         if tag_value == "":
             continue
         text = attribute.get("text")
-        attrib_dxfattribs = _entity_dxfattribs(attribute)
+        attrib_dxfattribs = _entity_dxfattribs(
+            attribute, table_context=table_context, entity_handle=attribute.get("handle")
+        )
+        style = text_style_name(table_context, None, attribute)
+        if style is not None:
+            attrib_dxfattribs["style"] = style
+        extrusion = entity_extrusion(table_context, attribute.get("handle"), attribute)
+        if extrusion is not None:
+            attrib_dxfattribs["extrusion"] = extrusion
         height = attribute.get("height")
         if height is not None:
             try:
@@ -5695,9 +5927,29 @@ def _write_mtext(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str, Any
     return True
 
 
+def _hatch_pattern_lines(raw_lines: Any) -> list[tuple[Any, ...]]:
+    """Pattern lines for ezdxf; a line with a missing or non-finite number is dropped."""
+    lines: list[tuple[Any, ...]] = []
+    if not isinstance(raw_lines, (list, tuple)):
+        return lines
+    for line in raw_lines:
+        try:
+            angle = float(line["angle"])
+            base = (float(line["base"][0]), float(line["base"][1]))
+            offset = (float(line["offset"][0]), float(line["offset"][1]))
+            dashes = [float(item) for item in line.get("dashes") or []]
+        except Exception:
+            continue
+        if all(math.isfinite(v) for v in (angle, *base, *offset, *dashes)):
+            lines.append((angle, base, offset, dashes))
+    return lines
+
+
 def _write_hatch(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str, Any]) -> bool:
+    from ezdxf.entities import Hatch
+
     paths = dxf.get("paths", []) or []
-    if len(paths) == 0:
+    if not paths or modelspace.dxfversion < "AC1015":
         return False
 
     color = _to_valid_aci(dxf.get("resolved_color_index"))
@@ -5706,25 +5958,156 @@ def _write_hatch(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str, Any
     if color is None:
         color = 7
 
-    hatch = modelspace.add_hatch(color=color, dxfattribs=dxfattribs)
+    # Bind the HATCH only after all loops are present, including any holes.
+    hatch = Hatch.new(dxfattribs={**dxfattribs, "color": color}, doc=modelspace.doc)
     if bool(dxf.get("solid_fill", False)):
         rgb = _to_rgb(_to_valid_true_color(dxf.get("resolved_true_color")))
         hatch.set_solid_fill(color=color, rgb=rgb)
     else:
-        pattern_name = str(dxf.get("pattern_name") or "ANSI31")
-        hatch.set_pattern_fill(pattern_name, color=color)
+        lines = _hatch_pattern_lines(dxf.get("pattern_lines"))
+        # unnamed but defined: AutoCAD's name for a user-defined pattern (type 0)
+        pattern_name = str(dxf.get("pattern_name") or ("_USER" if lines else "ANSI31"))
+        pattern_type = 0 if pattern_name == "_USER" else 1
+        scale = _float_or_none(dxf.get("pattern_scale"))
+        if scale is None or not math.isfinite(scale) or scale <= 0.0:
+            scale = 1.0
+        angle = _float_or_none(dxf.get("pattern_angle"))
+        if angle is None or not math.isfinite(angle):
+            angle = 0.0
+        double = 1 if dxf.get("pattern_double") else 0
+        hatch.set_pattern_fill(
+            pattern_name,
+            color=color,
+            angle=angle,
+            scale=scale,
+            double=double,
+            pattern_type=pattern_type,
+        )
+        if lines:
+            # decoded lines are already rotated and scaled by the hatch angle and scale
+            hatch.set_pattern_definition(lines, factor=1, angle=0)
+        elif not all(
+            math.isfinite(v)
+            for ln in hatch.pattern.lines
+            for v in (ln.angle, *ln.base_point, *ln.offset, *ln.dash_length_items)
+        ):
+            # a huge but finite scale overflows the predefined numbers
+            hatch.set_pattern_fill(
+                pattern_name, color=color, angle=angle, scale=1.0, double=double
+            )
 
-    path_written = False
     for path in paths:
         if not isinstance(path, dict):
+            return False
+        boundary = path.get("boundary")
+        if boundary is not None and _add_hatch_boundary(hatch.paths, boundary):
             continue
         points = path.get("points", []) or []
         xy = [(float(point[0]), float(point[1])) for point in points if len(point) >= 2]
-        if len(xy) < 2:
-            continue
+        if len(xy) < 2 or not all(math.isfinite(v) for p in xy for v in p):
+            return False
         hatch.paths.add_polyline_path(xy, is_closed=bool(path.get("closed", False)))
-        path_written = True
-    return path_written
+    modelspace.add_entity(hatch)
+    return True
+
+
+def _hatch_edge_usable(edge: Any) -> bool:
+    kind = edge[0]
+    if kind == "line":
+        values = (*edge[1], *edge[2])
+    elif kind == "arc":
+        values = (*edge[1], *edge[2:5])
+        if not edge[2] > 0.0:
+            return False
+    elif kind == "ellipse":
+        values = (*edge[1], *edge[2], *edge[3:6])
+        if not any(edge[2]) or not 0.0 < edge[3] <= 1.0:
+            return False
+    elif kind == "spline":
+        _, degree, rational, _periodic, knots, control, weights, fit, t0, t1 = edge
+        # AutoCAD crashes on a spline edge with invalid knots
+        if degree < 1 or len(control) <= degree or len(knots) != len(control) + degree + 1:
+            return False
+        if any(a > b for a, b in zip(knots, knots[1:])) or knots[degree] >= knots[len(control)]:
+            return False
+        if rational and len(weights) != len(control):
+            return False
+        values = (
+            *knots,
+            *(v for p in control for v in p),
+            *weights,
+            *(v for p in fit for v in p),
+            *(t0 or ()),
+            *(t1 or ()),
+        )
+    else:
+        return False
+    return all(map(math.isfinite, values))
+
+
+def _add_hatch_boundary(hatch_paths: Any, boundary: Any) -> bool:
+    """Add a ``raw.decode_hatch_boundaries`` path as written in the DWG; False when unusable."""
+    try:
+        if boundary[0] == "polyline":
+            _, closed, vertices, bulges = boundary
+            if len(vertices) < 2 or (bulges and len(bulges) != len(vertices)):
+                return False
+            rows = (
+                [(x, y, b) for (x, y), b in zip(vertices, bulges)]
+                if bulges
+                else [(x, y) for x, y in vertices]
+            )
+            if not all(math.isfinite(v) for row in rows for v in row):
+                return False
+            hatch_paths.add_polyline_path(rows, is_closed=bool(closed))
+            return True
+        edges = boundary[1]
+        if boundary[0] != "edges" or not edges or not all(map(_hatch_edge_usable, edges)):
+            return False
+    except (TypeError, ValueError, IndexError):
+        return False
+    edge_path = hatch_paths.add_edge_path()
+    try:
+        _add_hatch_edges(edge_path, edges)
+    except Exception:
+        # a value ezdxf still rejects must not leave a half-built path
+        hatch_paths.paths.remove(edge_path)
+        return False
+    return True
+
+
+def _add_hatch_edges(edge_path: Any, edges: Any) -> None:
+    for edge in edges:
+        kind = edge[0]
+        if kind == "line":
+            edge_path.add_line(edge[1], edge[2])
+        elif kind in ("arc", "ellipse"):
+            *shape, start, end, ccw = edge[1:]
+            if kind == "ellipse":
+                # DWG stores ellipse parameters, DXF 50/51 the angles they reach (same turn)
+                ratio = shape[2]
+                start, end = (
+                    t + math.remainder(math.atan2(ratio * math.sin(t), math.cos(t)) - t, math.tau)
+                    for t in (start, end)
+                )
+            start, end = math.degrees(start), math.degrees(end)
+            if not ccw:
+                # ezdxf exports a cw edge as 360-end / 360-start: 50/51 get the DWG values
+                start, end = 360.0 - end, 360.0 - start
+            add = edge_path.add_arc if kind == "arc" else edge_path.add_ellipse
+            add(*shape, start_angle=start, end_angle=end, ccw=bool(ccw))
+        else:
+            _, degree, rational, periodic, knots, control, weights, fit, t0, t1 = edge
+            edge_path.add_spline(
+                fit_points=fit or None,
+                control_points=control,
+                knot_values=knots,
+                weights=weights if rational else None,
+                degree=degree,
+                periodic=int(periodic),
+                start_tangent=t0,
+                end_tangent=t1,
+            )
 
 
 def _write_dimension_native(
@@ -6054,8 +6437,15 @@ def _entity_dxfattribs(
     dxf: dict[str, Any],
     *,
     layer_name_by_handle: dict[int, str] | None = None,
+    table_context: DxfTableContext | None = None,
+    entity_handle: int | None = None,
 ) -> dict[str, Any]:
     attribs: dict[str, Any] = {}
+    linetype, ltscale = entity_linetype(table_context, entity_handle)
+    if linetype is not None:
+        attribs["linetype"] = linetype
+    if ltscale is not None:
+        attribs["ltscale"] = ltscale
     if isinstance(layer_name_by_handle, dict):
         layer_handle = dxf.get("layer_handle")
         try:

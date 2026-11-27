@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -164,6 +165,25 @@ def test_invalid_geometry_is_reported_before_write(monkeypatch, tmp_path, kind, 
     assert result.skipped_by_type == {kind: 1}
     assert any(d.action == "skipped" for d in result.diagnostics)
     assert not list(ezdwg.read(str(out)).modelspace().query())
+
+
+@pytest.mark.parametrize(
+    "scale, reported",
+    [(Decimal(1), True), (float("nan"), True), (2, False), (2.0, False), (1.0, False)],
+)
+def test_linetype_scale_replacement_is_reported(monkeypatch, tmp_path, scale, reported):
+    source = tmp_path / "source.dwg"
+    ezdwg.raw.write_ac1015_line_dwg(str(source), [(10, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0)])
+    doc = ezdwg.read(str(source))
+    entity = next(doc.modelspace().query())
+    entity.dxf["linetype_scale"] = scale
+    monkeypatch.setattr(
+        convert_module, "_resolve_dwg_export_entities", lambda *args: [entity]
+    )
+    result = ezdwg.to_dwg(doc, str(tmp_path / "out.dwg"))
+    assert result.written_entities == 1
+    found = [d for d in result.diagnostics if d.attribute == "linetype_scale"]
+    assert bool(found) is reported
 
 
 def test_attribute_loss_rejects_in_strict_and_reports_in_normal(monkeypatch, tmp_path):

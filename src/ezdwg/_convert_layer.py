@@ -33,6 +33,26 @@ def _layer_styles_by_handle(decode_path: str | None) -> dict[int, tuple[int, int
     return styles
 
 
+def _layer_states_by_handle(
+    decode_path: str | None,
+) -> dict[int, tuple[bool, bool, bool, bool]]:
+    """``(frozen, off, locked, plot)`` of every layer, by handle."""
+    if not decode_path:
+        return {}
+    try:
+        rows = raw.decode_layer_states(decode_path)
+    except Exception:
+        return {}
+    states: dict[int, tuple[bool, bool, bool, bool]] = {}
+    for row in rows:
+        try:
+            handle, frozen, off, _frozen_new, locked, plot = row[:6]
+            states[int(handle)] = (bool(frozen), bool(off), bool(locked), bool(plot))
+        except Exception:
+            continue
+    return states
+
+
 def _layer_names_by_handle(decode_path: str | None) -> dict[int, str]:
     if not decode_path:
         return {}
@@ -68,6 +88,8 @@ def _prepare_dxf_layers(
     dxf_doc: Any,
     layer_styles_by_handle: dict[int, tuple[int, int | None]],
     layer_names_by_handle: dict[int, str] | None = None,
+    layer_linetypes_by_handle: dict[int, str] | None = None,
+    layer_states_by_handle: dict[int, tuple[bool, bool, bool, bool]] | None = None,
 ) -> dict[int, str]:
     mapping: dict[int, str] = {0: "0"}
     for handle in sorted(layer_styles_by_handle):
@@ -100,4 +122,29 @@ def _prepare_dxf_layers(
                     except Exception:
                         continue
         mapping[handle] = name
+        linetype = (layer_linetypes_by_handle or {}).get(handle)
+        if linetype is not None:
+            try:
+                dxf_doc.layers.get(name).dxf.linetype = linetype
+            except Exception:
+                pass
+        state = (layer_states_by_handle or {}).get(handle)
+        if state is not None:
+            try:
+                _apply_layer_state(dxf_doc.layers.get(name), *state)
+            except Exception:
+                pass
     return mapping
+
+
+def _apply_layer_state(
+    layer: Any, frozen: bool, off: bool, locked: bool, plot: bool
+) -> None:
+    # OFF is the sign of the layer color; a layer without a decoded color keeps 7.
+    color = abs(int(layer.dxf.get("color", 7))) or 7
+    layer.dxf.color = -color if off else color
+    flags = int(layer.dxf.get("flags", 0)) & ~(1 | 4)
+    layer.dxf.flags = flags | (1 if frozen else 0) | (4 if locked else 0)
+    # R13/R14 store no plot bit (decoded as True): never turn plotting back on.
+    if not plot:
+        layer.dxf.plot = 0

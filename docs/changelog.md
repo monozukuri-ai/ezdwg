@@ -20,6 +20,48 @@
   as `approximated` (informational in strict mode).
 - The header `DIMDSEP` is now `.`.
 
+### DXF conversion
+- `to_dxf` writes the LTYPE table: every decoded linetype with its
+  description and pattern, complex linetypes (text and shape elements with
+  their STYLE reference) included. ByBlock, ByLayer and Continuous keep
+  ezdxf's entries with the DWG description.
+- `to_dxf` keeps layer linetypes, and the linetype and linetype scale of
+  modelspace entities, block members and attributes.
+- `to_dxf` writes the STYLE table (font file, big font, fixed height, width
+  factor, oblique angle, generation and vertical flags, shape files, and the
+  TrueType family, bold and italic data) and sets the text style on TEXT,
+  MTEXT, ATTRIB and ATTDEF.
+- `to_dxf` keeps the HATCH pattern angle, scale, double flag and pattern
+  definition.
+- HATCH pattern names of R2007+ drawings are read from the string stream.
+  They were empty, and `to_dxf` named every such pattern ANSI31. A hatch
+  with a definition but no name is now written as `_USER`.
+- `to_dxf` writes HATCH boundaries as the DWG stores them: line, arc,
+  ellipse and spline edges, and polylines with their bulges. They were
+  flattened into dense polyline paths. A read HATCH path carries the stored
+  boundary under `boundary` (a `raw.decode_hatch_boundaries` row); `points`
+  stay the flattened boundary.
+- `to_dxf` takes block members from the DWG owner data. Blocks were cut short
+  when the BLOCK..ENDBLK span in the file was wrong.
+- `to_dxf` writes `$LTSCALE` from the DWG header. With `modelspace_only=True`
+  and no `types` filter it also writes `$EXTMIN` and `$EXTMAX`, from the
+  header or else the modelspace bounding box.
+- `to_dxf` keeps the extrusion of LINE, POINT, ARC, CIRCLE, ELLIPSE,
+  LWPOLYLINE, 2D POLYLINE, SOLID, TRACE, TEXT, ATTRIB, ATTDEF, INSERT and
+  HATCH. Entities with a flipped extrusion were drawn mirrored.
+- `to_dxf` keeps the layer state: off (negative layer color, -7 when the
+  layer has no usable color), frozen, locked and not plotted. Every layer
+  was written on, thawed, unlocked and plotted.
+- Linetypes, styles, hatch patterns, extrusions and layer states are kept
+  whatever `preserve_colors` is.
+- Records with unusable names or values are skipped, and references to them
+  fall back to the default.
+- `ezdwg.raw.decode_linetype_elements(path, limit=None)` returns
+  `(handle, name, elements)` per linetype, with one element per dash:
+  `(length, flags, shape_code, x_offset, y_offset, scale, rotation,
+  style_handle, text)`. Rotation is in radians. A record whose elements cannot
+  be read is left out.
+
 ### Added
 - Layouts. `Document.layouts()` returns the layout table: the model tab and
   the paper-space sheets with their name, tab order, block record, paper size,
@@ -136,6 +178,13 @@
   to account for `material flags`, `shadow flags`, R2010 visual-style bits, and the R2013+ ds-binary-data flag.
 
 ### Fixed
+- A HATCH whose flattened boundary is over 262,144 points is read instead of
+  dropped. Its boundaries are kept in full; the `points` of the path that went
+  over the budget and of the paths after it are empty. Native DWG export
+  reports an unwritable HATCH in its skipped counts and rejects it in strict mode.
+- Clockwise arc and ellipse edges of a HATCH boundary are flattened along the
+  right side: their stored angles are mirrored, as in DXF group codes 50/51.
+  Such arcs bulged to the wrong side.
 - A spline-fit 3D polyline is returned along its fitted vertices
   (`decode_polyline_3d_with_vertices`, `POLYLINE_3D` points). The control
   points of its frame, which the file stores in front of them, used to be part

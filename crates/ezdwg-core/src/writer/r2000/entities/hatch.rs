@@ -324,4 +324,192 @@ mod tests {
             "the bulge is tessellated"
         );
     }
+
+    fn solid_hatch_payload(paths: Vec<HatchPathData>) -> Vec<u8> {
+        let hatch = HatchEntity {
+            common: CommonEntityProps::default(),
+            name: "SOLID".into(),
+            solid_fill: true,
+            paths: paths
+                .into_iter()
+                .map(|data| HatchPathDef {
+                    flags: if matches!(data, HatchPathData::Edges(_)) {
+                        1
+                    } else {
+                        3
+                    },
+                    data,
+                })
+                .collect(),
+            style: 0,
+            pattern_type: 1,
+            pattern: None,
+            pixel_size: None,
+            seed_points: vec![],
+        };
+        encode_hatch_entity_payload(common(), &hatch).unwrap()
+    }
+
+    fn decode_paths(paths: Vec<HatchPathData>) -> crate::entities::hatch::HatchEntity {
+        let payload = solid_hatch_payload(paths);
+        let mut reader = BitReader::new(&payload);
+        reader.set_pre_r2004_layout(true);
+        reader.read_bs().unwrap();
+        decode_hatch(&mut reader).unwrap()
+    }
+
+    fn decode_edge_paths(paths: Vec<Vec<HatchEdge>>) -> crate::entities::hatch::HatchEntity {
+        decode_paths(paths.into_iter().map(HatchPathData::Edges).collect())
+    }
+
+    fn long_line_path() -> Vec<HatchEdge> {
+        // 140,000 line edges charge 280,000 points, over the 262,144 budget.
+        (0..140_000)
+            .map(|i| HatchEdge::Line {
+                start: (f64::from(i), 0.),
+                end: (f64::from(i + 1), 0.),
+            })
+            .collect()
+    }
+
+    fn square(x: f64) -> Vec<HatchEdge> {
+        let corners = [(x, 0.), (x + 1., 0.), (x + 1., 1.), (x, 1.)];
+        (0..4)
+            .map(|i| HatchEdge::Line {
+                start: corners[i],
+                end: corners[(i + 1) % 4],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn clockwise_arc_edge_is_flattened_from_its_mirrored_angles() {
+        // Bottom (4, 0) clockwise through (2, 2) to top (4, 4): stored as the
+        // negated real angles -90 and -270 degrees, as DXF group codes 50/51 store them.
+        let decoded = decode_edge_paths(vec![vec![
+            HatchEdge::Line {
+                start: (0., 0.),
+                end: (4., 0.),
+            },
+            HatchEdge::Arc {
+                center: (4., 2.),
+                radius: 2.,
+                start_angle: std::f64::consts::FRAC_PI_2,
+                end_angle: 3. * std::f64::consts::FRAC_PI_2,
+                ccw: false,
+            },
+            HatchEdge::Line {
+                start: (4., 4.),
+                end: (0., 0.),
+            },
+        ]]);
+        let points = &decoded.paths[0].points;
+        assert!(points.iter().all(|p| p.0 <= 4. + 1e-9), "{points:?}");
+        assert!(points
+            .iter()
+            .any(|p| (p.0 - 2.).abs() < 1e-9 && (p.1 - 2.).abs() < 1e-9));
+        let (start, end) = (points[1], points[points.len() - 2]);
+        assert!(
+            (start.0 - 4.).abs() < 1e-9 && start.1.abs() < 1e-9,
+            "{start:?}"
+        );
+        assert!(
+            (end.0 - 4.).abs() < 1e-9 && (end.1 - 4.).abs() < 1e-9,
+            "{end:?}"
+        );
+    }
+
+    #[test]
+    fn clockwise_ellipse_edge_is_flattened_from_its_mirrored_parameters() {
+        // (4, 1) clockwise through (2, 2) to (4, 3): real parameters -90 and -270 degrees.
+        let decoded = decode_edge_paths(vec![vec![
+            HatchEdge::Line {
+                start: (0., 1.),
+                end: (4., 1.),
+            },
+            HatchEdge::Ellipse {
+                center: (4., 2.),
+                major_endpoint: (2., 0.),
+                ratio: 0.5,
+                start_angle: std::f64::consts::FRAC_PI_2,
+                end_angle: 3. * std::f64::consts::FRAC_PI_2,
+                ccw: false,
+            },
+            HatchEdge::Line {
+                start: (4., 3.),
+                end: (0., 1.),
+            },
+        ]]);
+        let points = &decoded.paths[0].points;
+        assert!(points.iter().all(|p| p.0 <= 4. + 1e-9), "{points:?}");
+        assert!(points
+            .iter()
+            .any(|p| (p.0 - 2.).abs() < 1e-9 && (p.1 - 2.).abs() < 1e-9));
+    }
+
+    #[test]
+    fn bulged_paths_over_the_point_budget_store_no_more_points() {
+        // Bulge 5 flattens each segment into about 56 points: 2,048 vertices give
+        // about 115,000 points per path, so the third path breaks the budget.
+        let vertices: Vec<(f64, f64)> = (0..2048)
+            .map(|i| (f64::from(i), f64::from(i % 2)))
+            .collect();
+        let path = || HatchPathData::Polyline {
+            closed: true,
+            vertices: vertices.clone(),
+            bulges: Some(vec![5.; vertices.len()]),
+        };
+        let decoded = decode_paths(vec![path(), path(), path(), path()]);
+        let paths = &decoded.paths;
+        assert_eq!(paths.len(), 4);
+        assert!(!paths[0].points.is_empty());
+        assert!(paths[2].points.is_empty() && paths[3].points.is_empty());
+        let stored: usize = paths.iter().map(|p| p.points.capacity()).sum();
+        assert!(stored <= 262_144 + paths.len(), "{stored}");
+        for path in paths {
+            match &path.boundary {
+                crate::entities::HatchBoundary::Polyline {
+                    vertices, bulges, ..
+                } => {
+                    assert_eq!((vertices.len(), bulges.len()), (2048, 2048));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn r2004_hatch_whose_first_path_breaks_the_budget_is_kept() {
+        // R2004+ decoding scores candidate layouts; a hatch whose every path lost
+        // its points to the budget must not be taken for a misaligned read.
+        let payload = solid_hatch_payload(vec![HatchPathData::Edges(long_line_path())]);
+        let mut reader = BitReader::new(&payload);
+        reader.set_pre_r2004_layout(true);
+        reader.read_bs().unwrap();
+        let decoded = crate::entities::hatch::decode_hatch_r2004(&mut reader).expect("decoded");
+        assert_eq!(decoded.paths.len(), 1);
+        assert!(decoded.paths[0].points.is_empty());
+        match &decoded.paths[0].boundary {
+            crate::entities::HatchBoundary::Edges(edges) => assert_eq!(edges.len(), 140_000),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn hatch_over_the_point_budget_keeps_every_boundary() {
+        let decoded = decode_edge_paths(vec![square(0.), long_line_path(), square(5.)]);
+        let paths = &decoded.paths;
+        assert_eq!(paths.len(), 3);
+        assert_eq!(paths[0].points.len(), 5);
+        // From the path that broke the budget on, the points are empty.
+        assert!(paths[1].points.is_empty() && paths[2].points.is_empty());
+        let edge_counts: Vec<usize> = paths
+            .iter()
+            .map(|path| match &path.boundary {
+                crate::entities::HatchBoundary::Edges(edges) => edges.len(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(edge_counts, vec![4, 140_000, 4]);
+    }
 }

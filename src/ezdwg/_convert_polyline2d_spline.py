@@ -69,11 +69,13 @@ def _polyline_2d_spline_payload(dxf: dict[str, Any]) -> dict[str, Any] | None:
                 control_points = control_points[:-1]
             if len(control_points) >= 2:
                 degree = max(2, min(spline_degree, max(2, len(control_points) - 1)))
+                closed = bool(dxf.get("closed", False))
                 return {
                     "control_points": control_points,
                     "degree": degree,
-                    "knots": _open_uniform_knot_vector(len(control_points), degree),
-                    "closed": bool(dxf.get("closed", False)),
+                    # Clamped knots would open a closed frame: let _write_spline wrap it.
+                    "knots": [] if closed else _open_uniform_knot_vector(len(control_points), degree),
+                    "closed": closed,
                 }
 
     spline_tangents = _polyline_2d_spline_tangents(dxf)

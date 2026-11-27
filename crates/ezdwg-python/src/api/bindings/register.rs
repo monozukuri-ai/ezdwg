@@ -62,6 +62,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(decode_layer_filter_xrecords, module)?)?;
     module.add_function(wrap_pyfunction!(decode_layer_filter_tree, module)?)?;
     module.add_function(wrap_pyfunction!(decode_linetypes, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_linetype_elements, module)?)?;
     module.add_function(wrap_pyfunction!(decode_layer_linetypes, module)?)?;
     module.add_function(wrap_pyfunction!(decode_entity_linetypes, module)?)?;
     module.add_function(wrap_pyfunction!(decode_entity_lineweights, module)?)?;
