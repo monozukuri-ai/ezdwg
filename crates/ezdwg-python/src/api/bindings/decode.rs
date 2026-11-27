@@ -2222,45 +2222,10 @@ pub fn decode_entity_placements(
         if resolved_type_class(header.type_code, &type_name, dynamic_type_classes) != "E" {
             continue;
         }
-        let mut reader = record.bit_reader();
-        if skip_object_type_prefix(&mut reader, &version).is_err() {
-            continue;
-        }
-        let common = match version {
-            version::DwgVersion::R13 | version::DwgVersion::R14 => {
-                entities::common::parse_common_entity_header_r14(&mut reader)
-            }
-            version::DwgVersion::R2000 | version::DwgVersion::R2004 => {
-                entities::common::parse_common_entity_header(&mut reader)
-            }
-            version::DwgVersion::R2007 => {
-                entities::common::parse_common_entity_header_r2007(&mut reader)
-            }
-            version::DwgVersion::R2010 => match resolve_r2010_object_data_end_bit(&header) {
-                Ok(end_bit) => {
-                    entities::common::parse_common_entity_header_r2010(&mut reader, end_bit)
-                }
-                Err(_) => continue,
-            },
-            version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
-                match resolve_r2010_object_data_end_bit(&header) {
-                    Ok(end_bit) => {
-                        entities::common::parse_common_entity_header_r2013(&mut reader, end_bit)
-                    }
-                    Err(_) => continue,
-                }
-            }
-            version::DwgVersion::Unknown(_) => continue,
-        };
-        let Ok(common) = common else {
+        let Some((entity_mode, owner)) = entity_placement(&record, &header, &version) else {
             continue;
         };
-        reader.set_bit_pos(common.obj_size);
-        let owner = entities::common::parse_common_entity_handles(&mut reader, &common)
-            .ok()
-            .and_then(|handles| handles.owner_ref)
-            .unwrap_or(0);
-        result.push((obj.handle.0, common.entity_mode, owner));
+        result.push((obj.handle.0, entity_mode, owner));
         if let Some(limit) = limit {
             if result.len() >= limit {
                 break;
@@ -2268,6 +2233,52 @@ pub fn decode_entity_placements(
         }
     }
     Ok(result)
+}
+
+/// `(entmode, owner_handle)` of an entity record, from its common entity header
+/// (`owner_handle` is 0 when none is stored or it could not be read).
+fn entity_placement(
+    record: &objects::ObjectRecord<'_>,
+    header: &ApiObjectHeader,
+    version: &version::DwgVersion,
+) -> Option<(u8, u64)> {
+    let mut reader = record.bit_reader();
+    skip_object_type_prefix(&mut reader, version).ok()?;
+    let common = match version {
+        version::DwgVersion::R13 | version::DwgVersion::R14 => {
+            entities::common::parse_common_entity_header_r14(&mut reader)
+        }
+        version::DwgVersion::R2000 | version::DwgVersion::R2004 => {
+            entities::common::parse_common_entity_header(&mut reader)
+        }
+        version::DwgVersion::R2007 => {
+            entities::common::parse_common_entity_header_r2007(&mut reader)
+        }
+        version::DwgVersion::R2010 => match resolve_r2010_object_data_end_bit(header) {
+            Ok(end_bit) => {
+                entities::common::parse_common_entity_header_r2010(&mut reader, end_bit)
+            }
+            Err(_) => return None,
+        },
+        version::DwgVersion::R2013 | version::DwgVersion::R2018 => {
+            match resolve_r2010_object_data_end_bit(header) {
+                Ok(end_bit) => {
+                    entities::common::parse_common_entity_header_r2013(&mut reader, end_bit)
+                }
+                Err(_) => return None,
+            }
+        }
+        version::DwgVersion::Unknown(_) => return None,
+    };
+    let Ok(common) = common else {
+        return None;
+    };
+    reader.set_bit_pos(common.obj_size);
+    let owner = entities::common::parse_common_entity_handles(&mut reader, &common)
+        .ok()
+        .and_then(|handles| handles.owner_ref)
+        .unwrap_or(0);
+    Some((common.entity_mode, owner))
 }
 
 #[pyfunction(signature = (path, limit=None))]

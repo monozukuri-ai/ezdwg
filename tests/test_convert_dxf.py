@@ -2237,6 +2237,22 @@ def test_collect_block_members_by_name_keeps_first_shadow_duplicate_at_same_offs
     assert members == {"_Open30": [(101, "LINE")]}
 
 
+def test_block_entity_names_match_their_owner_header() -> None:
+    path = str(SAMPLES / "acadsharp" / "sample_AC1018.dwg")
+    placements = document_module._entity_placement_map(path)
+    header_names = document_module._block_header_name_map(path)
+
+    owned = {
+        (handle, kind): (name, header_names[placements[handle][1]])
+        for handle, kind, name in ezdwg.raw.decode_block_entity_names(path)
+        if placements.get(handle, (None, 0))[0] == 0
+        and placements[handle][1] in header_names
+    }
+
+    assert {kind for _handle, kind in owned} == {"BLOCK", "ENDBLK"}
+    assert {key: pair for key, pair in owned.items() if pair[0] != pair[1]} == {}
+
+
 def test_normalize_recursive_block_insert_remaps_dimension_self_reference() -> None:
     entity = Entity(
         dxftype="INSERT",
@@ -3697,6 +3713,88 @@ def test_resolve_block_name_by_handle_does_not_use_positional_fallback(monkeypat
 
     resolved = convert_module._resolve_block_name_by_handle("dummy.dwg", header_rows)
     assert resolved == {100: "BLK_A"}
+
+
+def _block_header_row(handle: int, offset: int) -> tuple:
+    return (handle, offset, 0, 0x31, "BLOCK_HEADER", "Object")
+
+
+def test_resolve_block_name_by_handle_names_unlisted_blocks_by_their_owner(monkeypatch) -> None:
+    # Owned BLOCKs missing from the name rows; the paper-space header lies after the other headers.
+    header_rows = [
+        _block_header_row(21, 5),
+        _block_header_row(3, 6),
+        _block_header_row(4, 7),
+        _block_header_row(22, 8),
+        (11, 10, 0, 0x04, "BLOCK", "Entity"),
+        (12, 20, 0, 0x04, "BLOCK", "Entity"),
+        (13, 30, 0, 0x04, "BLOCK", "Entity"),
+        (14, 40, 0, 0x04, "BLOCK", "Entity"),
+    ]
+    monkeypatch.setattr(
+        convert_module.raw,
+        "decode_block_header_names",
+        lambda _path, _limit=None: [
+            (3, "BLK_A"),
+            (4, "BLK_B"),
+            (11, "*Model_Space"),
+            (12, "*Paper_Space"),
+            (21, "*Model_Space"),
+            (22, "*Paper_Space"),
+        ],
+    )
+    monkeypatch.setattr(
+        convert_module,
+        "_entity_placement_map",
+        lambda _path: {11: (2, 0), 12: (1, 0), 13: (0, 3), 14: (0, 4)},
+    )
+
+    resolved = convert_module._resolve_block_name_by_handle(
+        "dummy.dwg", header_rows, referenced_names={"BLK_A"}
+    )
+
+    assert resolved == {11: "*Model_Space", 12: "*Paper_Space", 13: "BLK_A", 14: "BLK_B"}
+
+
+def test_resolve_block_name_by_handle_ownerless_blocks_take_only_unclaimed_names(
+    monkeypatch,
+) -> None:
+    # insert_2004.dwg's name rows (BLOCK 40 listed as *Model_Space), one more block, paper-space LINEs.
+    rows = [
+        _block_header_row(27, 530),
+        _block_header_row(29, 489),
+        (40, 2747, 0, 0x04, "BLOCK", "Entity"),
+        _block_header_row(41, 454),
+        (42, 2780, 0, 0x13, "LINE", "Entity"),
+        (43, 2815, 0, 0x05, "ENDBLK", "Entity"),
+        (44, 2900, 0, 0x07, "INSERT", "Entity"),
+        (50, 2816, 0, 0x04, "BLOCK", "Entity"),
+        _block_header_row(51, 460),
+        (52, 2820, 0, 0x13, "LINE", "Entity"),
+        (53, 2830, 0, 0x05, "ENDBLK", "Entity"),
+        (54, 2910, 0, 0x07, "INSERT", "Entity"),
+        (63, 2834, 0, 0x04, "BLOCK", "Entity"),
+        (64, 2934, 0, 0x05, "ENDBLK", "Entity"),
+        (65, 2951, 0, 0x04, "BLOCK", "Entity"),
+        (66, 2981, 0, 0x05, "ENDBLK", "Entity"),
+        (70, 2960, 0, 0x13, "LINE", "Entity"),
+        (71, 2970, 0, 0x13, "LINE", "Entity"),
+    ]
+    names = [(27, "*Paper_Space"), (29, "*Model_Space"), (40, "*Model_Space"), (41, "BLK_A"), (51, "BLK_B")]
+    placement = {
+        40: (0, 41), 42: (0, 41), 43: (0, 41),
+        50: (0, 51), 52: (0, 51), 53: (0, 51),
+        44: (2, 0), 54: (2, 0), 63: (2, 0), 64: (2, 0),
+        65: (1, 0), 66: (1, 0), 70: (1, 0), 71: (1, 0),
+    }
+    monkeypatch.setattr(convert_module.raw, "decode_block_header_names", lambda _p, _l=None: names)
+    monkeypatch.setattr(convert_module, "_entity_placement_map", lambda _path: placement)
+
+    resolved = convert_module._resolve_block_name_by_handle(
+        "dummy.dwg", rows, referenced_names={"BLK_A", "BLK_B"}
+    )
+
+    assert resolved == {40: "BLK_A", 50: "BLK_B", 63: "*Model_Space", 65: "*Paper_Space"}
 
 
 def test_resolve_block_end_name_by_handle_exact_fills_missing_endblk_names(monkeypatch) -> None:

@@ -4320,8 +4320,9 @@ def _resolve_block_name_by_handle(
     # declarations and all directly referenced names are present, skip the
     # expensive exact BLOCK entity-name decode.
     if referenced_names is not None:
-        candidate_map = dict(header_map)
-        if len(candidate_map) < len(block_handles_in_order):
+        owner_names = _block_names_from_owners(decode_path, header_rows, by_header_handle)
+        candidate_map = owner_names or dict(header_map)
+        if not owner_names and len(candidate_map) < len(block_handles_in_order):
             ordered_names = [
                 normalized_name
                 for row in rows
@@ -4392,6 +4393,42 @@ def _resolve_block_name_by_handle(
     if decode_cache is not None:
         decode_cache.block_name_by_handle_cache[cache_key] = exact_map
     return exact_map
+
+
+def _block_names_from_owners(
+    decode_path: str,
+    header_rows: list[tuple[Any, ...]],
+    name_by_handle: dict[int, str],
+) -> dict[int, str]:
+    # File order shifts names after one out-of-order record, so only ownerless BLOCKs pair by it.
+    placements = _entity_placement_map(decode_path)
+    names: dict[int, str] = {}
+    claimed: set[int] = set()
+    ownerless: list[int] = []
+    headers: list[int] = []
+    rows = [row for row in header_rows if isinstance(row, tuple) and len(row) >= 6]
+    for row in sorted(rows, key=lambda row: int(row[1])):
+        try:
+            handle = int(row[0])
+        except Exception:
+            continue
+        type_name = str(row[4]).strip().upper()
+        if type_name == "BLOCK_HEADER":
+            headers.append(handle)
+            continue
+        if type_name != "BLOCK" or str(row[5]).strip().upper() not in {"E", "ENTITY"}:
+            continue
+        mode, owner = placements.get(handle, (None, 0))
+        if mode == 0 and owner in name_by_handle:
+            names[handle] = name_by_handle[owner]
+            claimed.add(owner)
+        else:
+            ownerless.append(handle)
+    if not names:
+        return {}
+    unclaimed = [name_by_handle[h] for h in headers if h not in claimed and h in name_by_handle]
+    names.update(zip(ownerless, unclaimed))
+    return names
 
 
 def _rows_to_named_handle_map(rows: Any) -> dict[int, str]:

@@ -950,15 +950,15 @@ pub fn decode_block_entity_names(
         best_effort,
         &block_header_names,
     )?;
-    let header_names_in_order: Vec<String> = if is_r2010_plus {
+    let header_entries_in_order: Vec<(u64, String)> = if is_r2010_plus {
         header_entries
             .into_iter()
             .filter_map(
-                |(_raw_handle, _decoded_handle, name)| {
+                |(raw_handle, _decoded_handle, name)| {
                     if name.is_empty() {
                         None
                     } else {
-                        Some(name)
+                        Some((raw_handle, name))
                     }
                 },
             )
@@ -977,7 +977,7 @@ pub fn decode_block_entity_names(
                 .cloned()
                 .filter(|value| !value.is_empty())
             {
-                names.push(name);
+                names.push((obj.handle.0, name));
                 continue;
             }
             if let Some(name) = header_entry_name_by_handle
@@ -985,23 +985,32 @@ pub fn decode_block_entity_names(
                 .cloned()
                 .filter(|value| !value.is_empty())
             {
-                names.push(name);
+                names.push((obj.handle.0, name));
             }
         }
         names
     };
     let mut block_handles_in_order: Vec<u64> = Vec::new();
     let mut endblk_handles_in_order: Vec<u64> = Vec::new();
+    let mut owner_by_entity: HashMap<u64, u64> = HashMap::new();
     for obj in ordered_objects.iter().copied() {
-        let Some(header) = object_header_at(&decoder, obj.offset, best_effort)? else {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
             continue;
         };
-        if matches_type_name(header.type_code, 0x04, "BLOCK", dynamic_types) {
-            block_handles_in_order.push(obj.handle.0);
+        let is_block = matches_type_name(header.type_code, 0x04, "BLOCK", dynamic_types);
+        if !is_block && !matches_type_name(header.type_code, 0x05, "ENDBLK", dynamic_types) {
             continue;
         }
-        if matches_type_name(header.type_code, 0x05, "ENDBLK", dynamic_types) {
+        if is_block {
+            block_handles_in_order.push(obj.handle.0);
+        } else {
             endblk_handles_in_order.push(obj.handle.0);
+        }
+        if !is_r2010_plus {
+            if let Some((0, owner)) = entity_placement(&record, &header, decoder.version()) {
+                owner_by_entity.insert(obj.handle.0, owner);
+            }
         }
     }
 
@@ -1038,47 +1047,20 @@ pub fn decode_block_entity_names(
         }
     }
 
-    if !header_names_in_order.is_empty() {
-        if !is_r2010_plus && block_handles_in_order.len() == header_names_in_order.len() {
-            block_aliases = HashMap::new();
-            for (handle, name) in block_handles_in_order
-                .iter()
-                .copied()
-                .zip(header_names_in_order.iter())
-            {
-                block_aliases.insert(handle, name.clone());
-            }
-        } else {
-            for (index, handle) in block_handles_in_order.iter().copied().enumerate() {
-                if block_aliases.contains_key(&handle) {
-                    continue;
-                }
-                if let Some(name) = header_names_in_order.get(index) {
-                    block_aliases.insert(handle, name.clone());
-                }
-            }
-        }
-
-        if !is_r2010_plus && endblk_handles_in_order.len() == header_names_in_order.len() {
-            endblk_aliases = HashMap::new();
-            for (handle, name) in endblk_handles_in_order
-                .iter()
-                .copied()
-                .zip(header_names_in_order.iter())
-            {
-                endblk_aliases.insert(handle, name.clone());
-            }
-        } else {
-            for (index, handle) in endblk_handles_in_order.iter().copied().enumerate() {
-                if endblk_aliases.contains_key(&handle) {
-                    continue;
-                }
-                if let Some(name) = header_names_in_order.get(index) {
-                    endblk_aliases.insert(handle, name.clone());
-                }
-            }
-        }
-    }
+    block_aliases = name_block_entities(
+        &block_handles_in_order,
+        &header_entries_in_order,
+        &owner_by_entity,
+        block_aliases,
+        !is_r2010_plus,
+    );
+    endblk_aliases = name_block_entities(
+        &endblk_handles_in_order,
+        &header_entries_in_order,
+        &owner_by_entity,
+        endblk_aliases,
+        !is_r2010_plus,
+    );
 
     let mut rows: Vec<BlockEntityNameRow> = Vec::new();
     rows.reserve(block_aliases.len().saturating_add(endblk_aliases.len()));
@@ -1093,6 +1075,82 @@ pub fn decode_block_entity_names(
         rows.truncate(limit);
     }
     Ok(rows)
+}
+
+/// Before R2010 names come from the owner header: file order shifts names after one out-of-order record.
+fn name_block_entities(
+    entities_in_order: &[u64],
+    headers_in_order: &[(u64, String)],
+    owner_by_entity: &HashMap<u64, u64>,
+    mut aliases: HashMap<u64, String>,
+    owner_pairing: bool,
+) -> HashMap<u64, String> {
+    if headers_in_order.is_empty() {
+        return aliases;
+    }
+    if owner_pairing {
+        return pair_block_entities_with_headers(
+            entities_in_order,
+            headers_in_order,
+            owner_by_entity,
+            &aliases,
+        );
+    }
+    for (index, handle) in entities_in_order.iter().copied().enumerate() {
+        if aliases.contains_key(&handle) {
+            continue;
+        }
+        if let Some((_, name)) = headers_in_order.get(index) {
+            aliases.insert(handle, name.clone());
+        }
+    }
+    aliases
+}
+
+/// Ownerless entities keep an alias no owned entity took, else take the untaken headers in file order.
+fn pair_block_entities_with_headers(
+    entities_in_order: &[u64],
+    headers_in_order: &[(u64, String)],
+    owner_by_entity: &HashMap<u64, u64>,
+    aliases: &HashMap<u64, String>,
+) -> HashMap<u64, String> {
+    let name_by_header: HashMap<u64, &String> =
+        headers_in_order.iter().map(|(handle, name)| (*handle, name)).collect();
+    let mut names: HashMap<u64, String> = HashMap::new();
+    let mut claimed_headers: HashSet<u64> = HashSet::new();
+    let mut unowned: Vec<u64> = Vec::new();
+    for &entity in entities_in_order {
+        let owner = owner_by_entity.get(&entity).copied();
+        match owner.and_then(|header| name_by_header.get(&header).map(|name| (header, name))) {
+            Some((header, name)) => {
+                names.insert(entity, (*name).clone());
+                claimed_headers.insert(header);
+            }
+            None => unowned.push(entity),
+        }
+    }
+    let claimed_names: HashSet<String> = names.values().cloned().collect();
+    let mut unclaimed: Vec<&String> = headers_in_order
+        .iter()
+        .filter(|(handle, _)| !claimed_headers.contains(handle))
+        .map(|(_, name)| name)
+        .collect();
+    let mut remainder: Vec<u64> = Vec::new();
+    for entity in unowned {
+        match aliases.get(&entity).filter(|name| !claimed_names.contains(*name)) {
+            Some(name) => {
+                if let Some(index) = unclaimed.iter().position(|header| *header == name) {
+                    unclaimed.remove(index);
+                }
+                names.insert(entity, name.clone());
+            }
+            None => remainder.push(entity),
+        }
+    }
+    for (entity, name) in remainder.into_iter().zip(unclaimed) {
+        names.insert(entity, name.clone());
+    }
+    names
 }
 
 #[pyfunction(signature = (path, limit=None))]
@@ -3661,6 +3719,14 @@ fn decode_block_header_name_record(
     } else {
         reader.read_tv()?
     };
+    // A misaligned read (type code not skipped) can decode a TV of control characters without failing.
+    // C0 and DEL only: Latin-1 / cp1252 decode bytes 0x80-0x9F of real (TCVN3, VNI) names to C1 controls.
+    if entry_name.chars().any(|ch| ch < ' ' || ch == '\u{7F}') {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            "block header name contains control characters",
+        ));
+    }
 
     let handle = if record_handle != 0 {
         record_handle
@@ -3956,6 +4022,58 @@ mod block_header_xref_tests {
             );
         }
     }
+
+    /// R2004 BLOCK_HEADER data from its size field on, with a TV name of the given raw bytes.
+    fn r2004_block_header_with_tv(name: &[u8]) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        w.write_rl(Endian::Little, 4096).unwrap(); // object size in bits
+        w.write_h(0, 0x2A).unwrap();
+        w.write_bs(0).unwrap(); // no EED
+        w.write_bl(0).unwrap(); // no reactors
+        w.write_b(1).unwrap(); // XDic missing
+        w.write_bs(name.len() as u16).unwrap();
+        w.write_rcs(name).unwrap();
+        w.write_bl(0xBEEF).unwrap();
+        w.into_bytes()
+    }
+
+    #[test]
+    fn a_block_header_name_made_of_control_characters_is_a_misaligned_read() {
+        // A read that skipped no type code can land on such a TV; an error lets the caller retry.
+        let data = r2004_block_header_with_tv(&[0x80, 0x00, 0x40, 0x01, 0x80, 0xC0, 0x01]);
+        let mut reader = BitReader::new(&data);
+        assert!(
+            decode_block_header_name_record(&mut reader, &version::DwgVersion::R2004, 0x2A, None)
+                .is_err()
+        );
+
+        let data = r2004_block_header_with_tv(b"Caythango");
+        let mut reader = BitReader::new(&data);
+        assert_eq!(
+            decode_block_header_name_record(&mut reader, &version::DwgVersion::R2004, 0x2A, None)
+                .unwrap(),
+            (0x2A, "Caythango".to_string())
+        );
+    }
+
+    #[test]
+    fn a_block_header_name_with_bytes_0x80_to_0x9f_is_kept() {
+        let data = r2004_block_header_with_tv(&[b'C', 0x81, 0x9F, b'y']);
+        for (codepage, expected) in [
+            (0, "C\u{81}\u{9F}y"),
+            (1, "C\u{81}\u{9F}y"),
+            (30, "C\u{81}\u{178}y"), // cp1252: 0x81 is unmapped, 0x9F is Ÿ
+        ] {
+            let mut reader = BitReader::new_with_codepage(&data, Some(codepage));
+            assert_eq!(
+                decode_block_header_name_record(&mut reader, &version::DwgVersion::R2004, 0x2A, None)
+                    .unwrap()
+                    .1,
+                expected,
+                "codepage {codepage}"
+            );
+        }
+    }
 }
 
 /// Where every ACAD_TABLE is placed and the block it draws:
@@ -4026,4 +4144,76 @@ pub fn decode_table_placements(
         ));
     }
     Ok(rows)
+}
+
+#[cfg(test)]
+mod block_entity_pairing_tests {
+    use super::*;
+
+    fn headers() -> Vec<(u64, String)> {
+        // File order: the paper-space header comes after the headers of the named blocks.
+        vec![
+            (1, "*Model_Space".to_string()),
+            (3, "BLK_A".to_string()),
+            (4, "BLK_B".to_string()),
+            (2, "*Paper_Space".to_string()),
+        ]
+    }
+
+    #[test]
+    fn a_layout_block_before_its_header_does_not_shift_the_names_after_it() {
+        let owners = HashMap::from([(13, 3), (14, 4)]);
+
+        let names = pair_block_entities_with_headers(&[11, 12, 13, 14], &headers(), &owners, &HashMap::new());
+
+        assert_eq!(names[&11], "*Model_Space");
+        assert_eq!(names[&12], "*Paper_Space");
+        assert_eq!(names[&13], "BLK_A");
+        assert_eq!(names[&14], "BLK_B");
+    }
+
+    #[test]
+    fn without_owners_the_entities_pair_with_the_headers_in_file_order() {
+        let headers = vec![(1, "A".to_string()), (2, "B".to_string())];
+
+        let names = pair_block_entities_with_headers(&[10, 20], &headers, &HashMap::new(), &HashMap::new());
+
+        assert_eq!(names, HashMap::from([(10, "A".to_string()), (20, "B".to_string())]));
+    }
+
+    #[test]
+    fn owners_name_the_blocks_when_the_counts_differ() {
+        // One more BLOCK than named headers: an orphan without a usable owner.
+        let owners = HashMap::from([(13, 3), (14, 4)]);
+        let blocks = [11, 12, 15, 13, 14];
+
+        let names = name_block_entities(&blocks, &headers(), &owners, HashMap::new(), true);
+
+        assert_eq!(names[&11], "*Model_Space");
+        assert_eq!(names[&12], "*Paper_Space");
+        assert_eq!(names[&13], "BLK_A");
+        assert_eq!(names[&14], "BLK_B");
+        assert!(!names.contains_key(&15));
+    }
+
+    #[test]
+    fn an_ownerless_block_keeps_only_an_alias_no_owned_block_took() {
+        let owners = HashMap::from([(13, 3), (14, 4)]);
+        let aliases = HashMap::from([(11, "*Model_Space".to_string()), (12, "BLK_A".to_string())]);
+
+        let names = name_block_entities(&[11, 12, 13, 14, 15], &headers(), &owners, aliases, true);
+
+        assert_eq!(names[&11], "*Model_Space");
+        assert_eq!(names[&12], "*Paper_Space");
+        assert_eq!(names[&13], "BLK_A");
+    }
+
+    #[test]
+    fn without_owner_pairing_missing_names_fill_by_position() {
+        let aliases = HashMap::from([(11, "X".to_string())]);
+
+        let names = name_block_entities(&[11, 12], &headers(), &HashMap::new(), aliases, false);
+
+        assert_eq!(names, HashMap::from([(11, "X".to_string()), (12, "BLK_A".to_string())]));
+    }
 }
