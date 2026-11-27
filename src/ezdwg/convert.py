@@ -20,7 +20,6 @@ from .document import (
     Layout,
     SUPPORTED_ENTITY_TYPES,
     TYPE_ALIASES,
-    _block_header_name_map,
     _block_header_name_rows,
     _entity_placement_map,
     _present_supported_types,
@@ -3217,6 +3216,13 @@ def _materialize_export_entities(
                     )
                 )
             continue
+        if (
+            entity.dxftype == "ATTRIB"
+            and allowed_owner_handles is not None
+            and entity.dxf.get("owner_handle") in allowed_owner_handles
+        ):
+            # Its INSERT is a member and writes it as an attribute; a copy here would draw it twice.
+            continue
         if not _append_unique_export_entity(
             export_entities,
             entity,
@@ -3242,7 +3248,8 @@ def _materialize_export_entities(
             for handle, entity in owners_by_handle.items()
             if entity.dxftype in requested_owner_types
         }
-    for owner_handle, _owner_type in owner_requests:
+    # One request per vertex; a repeat resolves to the same owner and is always dropped.
+    for owner_handle in dict.fromkeys(owner_handle for owner_handle, _ in owner_requests):
         owner_entity = resolved_owners_by_handle.get(owner_handle)
         if owner_entity is None:
             continue
@@ -3482,22 +3489,12 @@ def _populate_block_definitions(
         block_name_by_handle=block_name_by_handle,
         decode_cache=decode_cache,
     )
-    owned_members: dict[str, list[tuple[int, str]]] = {}
     placements = _entity_placement_map(decode_path)
-    owner_names = _block_header_name_map(decode_path)
-    for handle, _, _, _, name, category in sorted_header_rows:
-        if category.upper() not in {"E", "ENTITY"} or name in {"BLOCK", "ENDBLK"}:
-            continue
-        mode, owner = placements.get(handle, (None, None))
-        owner_name = owner_names.get(owner) if mode == 0 else None
-        if owner_name and not _is_layout_pseudo_block_name(owner_name):
-            owned_members.setdefault(owner_name, []).append((handle, name))
-
     block_members_by_name = _collect_block_members_by_name(
         sorted_header_rows,
         block_name_by_handle,
         endblk_name_by_handle=endblk_name_by_handle,
-        owned_members=owned_members,
+        placement_by_handle=placements,
     )
 
     if not block_members_by_name:
@@ -3592,7 +3589,7 @@ def _populate_block_definitions(
                 sorted_header_rows,
                 block_name_by_handle,
                 endblk_name_by_handle=endblk_name_by_handle,
-                owned_members=owned_members,
+                placement_by_handle=placements,
             )
             selected_block_names = {
                 name for name in referenced_names if name in block_members_by_name
@@ -3789,7 +3786,7 @@ def _collect_block_members_by_name(
     block_name_by_handle: dict[int, str],
     *,
     endblk_name_by_handle: dict[int, str] | None = None,
-    owned_members: dict[str, list[tuple[int, str]]] | None = None,
+    placement_by_handle: dict[int, tuple[int, int]] | None = None,
 ) -> dict[str, list[tuple[int, str]]]:
     # Collect each BLOCK definition independently first, then choose one
     # representative definition per name. Prefer closing by ENDBLK name when
@@ -3800,10 +3797,14 @@ def _collect_block_members_by_name(
 
     candidates_by_name: dict[str, list[tuple[int, str]]] = {}
     candidate_scores: dict[str, tuple[int, int]] = {}
+    tied_candidates_by_name: dict[str, list[tuple[int, list[tuple[int, str]]]]] = {}
+    first_block_handle_by_name: dict[str, int] = {}
 
     stack: list[dict[str, Any]] = []
 
-    def _commit_candidate(name: str | None, members: list[tuple[int, str]]) -> None:
+    def _commit_candidate(
+        name: str | None, members: list[tuple[int, str]], block_handle: int
+    ) -> None:
         if name is None:
             return
         member_count = len(members)
@@ -3815,12 +3816,15 @@ def _collect_block_members_by_name(
         if previous_score is None or score > previous_score:
             candidate_scores[name] = score
             candidates_by_name[name] = list(members)
+            tied_candidates_by_name[name] = [(block_handle, list(members))]
+        elif score == previous_score:
+            tied_candidates_by_name[name].append((block_handle, list(members)))
 
     def _close_stack_to_index(index: int) -> None:
         # Close nested/overlapping contexts from inside-out.
         while len(stack) - 1 >= index:
             context = stack.pop()
-            _commit_candidate(context["name"], context["members"])
+            _commit_candidate(context["name"], context["members"], context["handle"])
 
     for row in sorted_header_rows:
         if not isinstance(row, tuple) or len(row) < 6:
@@ -3843,6 +3847,8 @@ def _collect_block_members_by_name(
             normalized_block_name = (
                 block_name.strip() if isinstance(block_name, str) and block_name.strip() != "" else None
             )
+            if normalized_block_name is not None:
+                first_block_handle_by_name.setdefault(normalized_block_name, handle)
 
             # Some R2010+ drawings contain shadow BLOCK records at the same
             # stream offset before any members. Keep the first mapped name to
@@ -3860,6 +3866,7 @@ def _collect_block_members_by_name(
                     "name": normalized_block_name,
                     "members": [],
                     "offset": offset,
+                    "handle": handle,
                 }
             )
             continue
@@ -3889,12 +3896,120 @@ def _collect_block_members_by_name(
         stack[-1]["members"].append((handle, type_name))
 
     _close_stack_to_index(0)
-    # Some writers store the members outside the BLOCK/ENDBLK span.
-    # Recover otherwise empty definitions from their explicit owner handles.
-    for name, members in (owned_members or {}).items():
-        if not candidates_by_name.get(name):
-            candidates_by_name[name] = members
-    return candidates_by_name
+    if not placement_by_handle:
+        return candidates_by_name
+    shadow_block_by_name = {
+        name: handle
+        for name, handle in first_block_handle_by_name.items()
+        if name not in tied_candidates_by_name
+    }
+    return _members_from_owner_map(
+        sorted_header_rows, tied_candidates_by_name, shadow_block_by_name, placement_by_handle
+    )
+
+
+def _members_from_owner_map(
+    sorted_header_rows: list[tuple[Any, ...]],
+    tied_candidates_by_name: dict[str, list[tuple[int, list[tuple[int, str]]]]],
+    shadow_block_by_name: dict[str, int],
+    placement_by_handle: dict[int, tuple[int, int]],
+) -> dict[str, list[tuple[int, str]]]:
+    # Writers can store a block's entities outside its BLOCK..ENDBLK span; the owner is exact.
+    elsewhere = -1
+    entity_rows: list[tuple[int, str]] = []
+    header_handles: set[int] = set()
+    for row in sorted_header_rows:
+        if not isinstance(row, tuple) or len(row) < 6:
+            continue
+        type_name = str(row[4]).strip().upper()
+        try:
+            handle = int(row[0])
+        except Exception:
+            continue
+        if type_name == "BLOCK_HEADER":
+            header_handles.add(handle)
+            continue
+        if str(row[5]).strip().upper() not in {"E", "ENTITY"}:
+            continue
+        if type_name == "BLOCK":
+            mode, owner = placement_by_handle.get(handle, (None, 0))
+            if mode == 0 and owner:
+                header_handles.add(owner)
+            continue
+        if type_name != "ENDBLK":
+            entity_rows.append((handle, type_name))
+
+    root_by_handle: dict[int, int | None] = {}
+
+    def _root(handle: int) -> int | None:
+        # Follow entity owners (VERTEX -> POLYLINE, ATTRIB -> INSERT) up to the block header.
+        chain: list[int] = []
+        root: int | None = None
+        current = handle
+        while True:
+            if current in root_by_handle:
+                root = root_by_handle[current]
+                break
+            placement = placement_by_handle.get(current)
+            if placement is None or current in chain:
+                break
+            chain.append(current)
+            mode, owner = placement
+            if mode in (1, 2):
+                root = elsewhere
+                break
+            if owner in header_handles:
+                root = owner
+                break
+            if owner not in placement_by_handle:
+                break
+            current = owner
+        for item in chain:
+            root_by_handle[item] = root
+        return root
+
+    position_by_handle: dict[int, int] = {}
+    type_by_handle: dict[int, str] = {}
+    members_by_header: dict[int, list[int]] = {}
+    for position, (handle, type_name) in enumerate(entity_rows):
+        position_by_handle.setdefault(handle, position)
+        type_by_handle.setdefault(handle, type_name)
+        root = _root(handle)
+        if root is not None and root != elsewhere:
+            members_by_header.setdefault(root, []).append(handle)
+
+    def _header(block_handle: int) -> int:
+        mode, owner = placement_by_handle.get(block_handle, (None, 0))
+        return owner if mode == 0 else 0
+
+    def _owned_count(candidate: tuple[int, list[tuple[int, str]]]) -> int:
+        return len(members_by_header.get(_header(candidate[0]), []))
+
+    def _members(name: str, block_handle: int, span_members: list[tuple[int, str]]) -> list:
+        header = _header(block_handle)
+        if not header or _is_layout_pseudo_block_name(name):
+            return span_members
+        handles = set(members_by_header.get(header, []))
+        handles.update(handle for handle, _ in span_members if _root(handle) is None)
+        return [
+            (handle, type_by_handle[handle])
+            for handle in sorted(handles, key=lambda item: position_by_handle.get(item, -1))
+            if handle in type_by_handle
+        ]
+
+    result: dict[str, list[tuple[int, str]]] = {}
+    claimed_headers: set[int] = set()
+    for name, tied in tied_candidates_by_name.items():
+        # max() keeps the first candidate on equal counts, as the span scoring does.
+        best = tied[0] if _is_layout_pseudo_block_name(name) else max(tied, key=_owned_count)
+        block_handle, span_members = best
+        claimed_headers.add(_header(block_handle))
+        result[name] = _members(name, block_handle, span_members)
+    for name, block_handle in shadow_block_by_name.items():
+        header = _header(block_handle)
+        if header and header not in claimed_headers:
+            result[name] = _members(name, block_handle, [])
+    return result
 
 
 def _block_prefers_open30_arrowhead(entities: list[Entity]) -> bool:

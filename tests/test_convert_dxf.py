@@ -2237,6 +2237,205 @@ def test_collect_block_members_by_name_keeps_first_shadow_duplicate_at_same_offs
     assert members == {"_Open30": [(101, "LINE")]}
 
 
+def _row(handle: int, offset: int, type_name: str) -> tuple:
+    return (handle, offset, 10, 0, type_name, "Entity")
+
+
+HDR_B, HDR_C, MODEL = 1, 2, 3
+
+
+def test_block_members_include_owned_entities_outside_span() -> None:
+    rows = [
+        _row(13, 20, "LINE"),
+        _row(10, 100, "BLOCK"),
+        _row(11, 110, "LINE"),
+        _row(12, 120, "ENDBLK"),
+    ]
+    placement = {10: (0, HDR_B), 11: (0, HDR_B), 12: (0, HDR_B), 13: (0, HDR_B)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {10: "B"}, placement_by_handle=placement
+    )
+
+    assert out["B"] == [(13, "LINE"), (11, "LINE")]
+
+
+def test_block_members_exclude_entities_owned_elsewhere() -> None:
+    rows = [
+        _row(10, 100, "BLOCK"),
+        _row(14, 110, "LINE"),
+        _row(19, 115, "LINE"),
+        _row(12, 120, "ENDBLK"),
+        _row(30, 200, "BLOCK"),
+        _row(31, 210, "LINE"),
+        _row(32, 220, "ENDBLK"),
+    ]
+    placement = {
+        10: (0, HDR_B),
+        14: (0, HDR_C),
+        19: (2, MODEL),
+        12: (0, HDR_B),
+        30: (0, HDR_C),
+        31: (0, HDR_C),
+        32: (0, HDR_C),
+    }
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {10: "B", 30: "C"}, placement_by_handle=placement
+    )
+
+    assert out["B"] == []
+    assert out["C"] == [(14, "LINE"), (31, "LINE")]
+
+
+def test_block_members_keep_span_entities_without_owner() -> None:
+    rows = [
+        _row(10, 100, "BLOCK"),
+        _row(15, 110, "LINE"),
+        _row(21, 115, "LINE"),
+        _row(12, 120, "ENDBLK"),
+    ]
+    placement = {10: (0, HDR_B), 21: (0, 0), 12: (0, HDR_B)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {10: "B"}, placement_by_handle=placement
+    )
+
+    assert out["B"] == [(15, "LINE"), (21, "LINE")]
+
+
+def test_block_members_keep_polyline_children() -> None:
+    # Type names as test_dwg/acadsharp/sample_AC1015.dwg lists them.
+    rows = [
+        _row(10, 100, "BLOCK"),
+        _row(16, 110, "POLYLINE_3D"),
+        _row(17, 111, "VERTEX_3D"),
+        _row(18, 112, "SEQEND"),
+        _row(12, 120, "ENDBLK"),
+    ]
+    placement = {10: (0, HDR_B), 16: (0, HDR_B), 17: (0, 16), 18: (0, 16), 12: (0, HDR_B)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {10: "B"}, placement_by_handle=placement
+    )
+
+    assert out["B"] == [(16, "POLYLINE_3D"), (17, "VERTEX_3D"), (18, "SEQEND")]
+
+
+def test_block_members_duplicate_names_do_not_merge() -> None:
+    rows = [
+        _row(100, 10, "BLOCK"),
+        _row(101, 11, "LINE"),
+        _row(102, 12, "ENDBLK"),
+        _row(200, 20, "BLOCK"),
+        _row(201, 21, "LINE"),
+        _row(202, 22, "ENDBLK"),
+    ]
+    placement = {100: (0, 1), 101: (0, 1), 102: (0, 1), 200: (0, 2), 201: (0, 2), 202: (0, 2)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {100: "BLK_DUP", 200: "BLK_DUP"}, placement_by_handle=placement
+    )
+
+    assert out == {"BLK_DUP": [(101, "LINE")]}
+
+
+def test_block_members_shadow_block_sharing_the_owner_gets_no_entry() -> None:
+    # Two BLOCK handles at one offset are one record, so the decoder gives both the same owner.
+    rows = [
+        _row(100, 10, "BLOCK"),
+        _row(200, 10, "BLOCK"),
+        _row(101, 11, "LINE"),
+        _row(102, 12, "ENDBLK"),
+    ]
+    placement = {100: (0, 1), 200: (0, 1), 101: (0, 1), 102: (0, 1)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {100: "_Open30", 200: "*D193"}, placement_by_handle=placement
+    )
+
+    assert out == {"_Open30": [(101, "LINE")]}
+
+
+def test_block_members_keep_children_of_a_parent_without_placement() -> None:
+    rows = [
+        _row(10, 100, "BLOCK"),
+        _row(16, 110, "POLYLINE_3D"),
+        _row(17, 111, "VERTEX_3D"),
+        _row(18, 112, "SEQEND"),
+        _row(12, 120, "ENDBLK"),
+    ]
+    placement = {10: (0, HDR_B), 17: (0, 16), 18: (0, 16), 12: (0, HDR_B)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {10: "B"}, placement_by_handle=placement
+    )
+
+    assert out["B"] == [(16, "POLYLINE_3D"), (17, "VERTEX_3D"), (18, "SEQEND")]
+
+
+def test_block_members_keep_span_entity_whose_owner_is_no_header() -> None:
+    rows = [
+        (HDR_B, 5, 10, 0, "BLOCK_HEADER", "Object"),
+        _row(10, 100, "BLOCK"),
+        _row(15, 110, "LINE"),
+        _row(12, 120, "ENDBLK"),
+    ]
+    placement = {10: (0, HDR_B), 15: (0, 999), 12: (0, HDR_B)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {10: "B"}, placement_by_handle=placement
+    )
+
+    assert out["B"] == [(15, "LINE")]
+
+
+def test_block_members_tied_spans_prefer_the_header_that_owns_members() -> None:
+    rows = [
+        _row(13, 20, "LINE"),
+        _row(100, 100, "BLOCK"),
+        _row(102, 120, "ENDBLK"),
+        _row(200, 200, "BLOCK"),
+        _row(202, 220, "ENDBLK"),
+    ]
+    placement = {13: (0, 2), 100: (0, 1), 102: (0, 1), 200: (0, 2), 202: (0, 2)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {100: "X", 200: "X"}, placement_by_handle=placement
+    )
+
+    assert out == {"X": [(13, "LINE")]}
+
+
+def test_block_members_tied_layout_pseudo_blocks_keep_the_first_span() -> None:
+    rows = [
+        _row(13, 20, "LINE"),
+        _row(100, 100, "BLOCK"),
+        _row(101, 110, "LINE"),
+        _row(102, 120, "ENDBLK"),
+        _row(200, 200, "BLOCK"),
+        _row(201, 210, "LINE"),
+        _row(202, 220, "ENDBLK"),
+    ]
+    placement = {13: (0, 2), 100: (0, 1), 101: (0, 1), 200: (0, 2), 201: (0, 2)}
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {100: "*Paper_Space", 200: "*Paper_Space"}, placement_by_handle=placement
+    )
+
+    assert out == {"*Paper_Space": [(101, "LINE")]}
+
+
+def test_to_dxf_block_members_include_owned_entities_outside_span(tmp_path: Path) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+    output = tmp_path / "owned_members.dxf"
+
+    ezdwg.to_dxf(str(SAMPLES / "acadsharp" / "sample_AC1018.dwg"), str(output))
+
+    block = ezdxf.readfile(str(output)).blocks.get("MyBlock")
+    assert Counter(entity.dxftype() for entity in block) == {"LINE": 2, "CIRCLE": 1, "ATTDEF": 1}
+
+
 def test_block_entity_names_match_their_owner_header() -> None:
     path = str(SAMPLES / "acadsharp" / "sample_AC1018.dwg")
     placements = document_module._entity_placement_map(path)
@@ -2251,6 +2450,21 @@ def test_block_entity_names_match_their_owner_header() -> None:
 
     assert {kind for _handle, kind in owned} == {"BLOCK", "ENDBLK"}
     assert {key: pair for key, pair in owned.items() if pair[0] != pair[1]} == {}
+
+
+def test_block_members_without_placement_match_span_result() -> None:
+    rows = [
+        _row(13, 20, "LINE"),
+        _row(10, 100, "BLOCK"),
+        _row(11, 110, "LINE"),
+        _row(12, 120, "ENDBLK"),
+    ]
+
+    out = convert_module._collect_block_members_by_name(
+        rows, {10: "B"}, placement_by_handle=None
+    )
+
+    assert out["B"] == [(11, "LINE")]
 
 
 def test_normalize_recursive_block_insert_remaps_dimension_self_reference() -> None:
@@ -3793,8 +4007,12 @@ def test_resolve_block_name_by_handle_ownerless_blocks_take_only_unclaimed_names
     resolved = convert_module._resolve_block_name_by_handle(
         "dummy.dwg", rows, referenced_names={"BLK_A", "BLK_B"}
     )
+    members = convert_module._collect_block_members_by_name(
+        sorted(rows, key=lambda row: row[1]), resolved, placement_by_handle=placement
+    )
 
     assert resolved == {40: "BLK_A", 50: "BLK_B", 63: "*Model_Space", 65: "*Paper_Space"}
+    assert members["BLK_A"] == [(42, "LINE")]
 
 
 def test_resolve_block_end_name_by_handle_exact_fills_missing_endblk_names(monkeypatch) -> None:
@@ -3851,6 +4069,95 @@ def test_materialize_export_entities_keeps_same_handle_across_types() -> None:
     ]
     out = convert_module._materialize_export_entities(layout, selected)
     assert len(out) == 2
+
+
+def test_materialize_export_entities_dedup_semantics() -> None:
+    doc = ezdwg.read(str(SAMPLES / "line_2007.dwg"))
+    layout = doc.modelspace()
+
+    def line(end_x: float, **extra: Any) -> Entity:
+        return Entity(
+            dxftype="LINE", handle=10, dxf={"start": (0.0, 0.0, 0.0), "end": (end_x, 0.0, 0.0), **extra}
+        )
+
+    selected = [
+        line(1.0),
+        line(1.0 + 1e-14),  # equal after rounding to 12 digits: dropped
+        line(2.0),  # different geometry: kept
+        line(1.0),  # equal to the first: dropped
+        line(2.0),  # equal to a later one: dropped
+        line(1.0, layer="A"),  # extra key: kept
+        Entity(dxftype="LINE", handle=11, dxf={"start": (0.0, 0.0, 0.0), "end": (1.0, 0.0, 0.0)}),
+    ]
+    out = convert_module._materialize_export_entities(layout, selected)
+    assert out == [selected[0], selected[2], selected[5], selected[6]]
+
+    # Polyline reached from its row and each vertex: once; an owner with other content: kept.
+    points = [(float(i), 0.0, 0.0) for i in range(5)]
+    poly = Entity(dxftype="POLYLINE_3D", handle=20, dxf={"points": list(points)})
+    other = Entity(dxftype="POLYLINE_3D", handle=20, dxf={"points": points[:2]})
+    vertices = [
+        Entity(dxftype="VERTEX_3D", handle=100 + i, dxf={"owner_handle": 20, "owner_type": "POLYLINE_3D"})
+        for i in range(5)
+    ]
+    same_owner = Entity(dxftype="POLYLINE_3D", handle=20, dxf={"points": list(points)})
+    out = convert_module._materialize_export_entities(
+        layout, [poly, *vertices], owners_by_handle={20: same_owner}
+    )
+    assert out == [poly]
+    out = convert_module._materialize_export_entities(
+        layout, [poly, *vertices], owners_by_handle={20: other}
+    )
+    assert out == [poly, other]
+    out = convert_module._materialize_export_entities(
+        layout, vertices, owners_by_handle={20: poly}, allowed_owner_handles={20}
+    )
+    assert out == [poly]
+    out = convert_module._materialize_export_entities(
+        layout, vertices, owners_by_handle={20: poly}, allowed_owner_handles={21}
+    )
+    assert out == []
+
+
+def test_block_materialize_drops_attribs_owned_by_member_inserts() -> None:
+    # Owner-map membership admits an INSERT's ATTRIBs; the INSERT already writes them.
+    layout = ezdwg.read(str(SAMPLES / "line_2007.dwg")).modelspace()
+    insert = Entity(dxftype="INSERT", handle=30, dxf={"name": "B", "insert": (0.0, 0.0, 0.0)})
+    owned = Entity(dxftype="ATTRIB", handle=31, dxf={"owner_handle": 30, "text": "A"})
+    orphan = Entity(dxftype="ATTRIB", handle=32, dxf={"owner_handle": 99, "text": "B"})
+
+    out = convert_module._materialize_export_entities(
+        layout, [insert, owned, orphan], allowed_owner_handles={30, 31, 32}
+    )
+    assert out == [insert, orphan]
+    out = convert_module._materialize_export_entities(layout, [insert, owned, orphan])
+    assert out == [insert, owned, orphan]
+
+
+def test_materialize_export_entities_freezes_owner_once_not_per_vertex(monkeypatch) -> None:
+    doc = ezdwg.read(str(SAMPLES / "line_2007.dwg"))
+    layout = doc.modelspace()
+    points = [(float(i), 0.0, 0.0) for i in range(200)]
+    poly = Entity(dxftype="POLYLINE_3D", handle=20, dxf={"points": points})
+    owner = Entity(dxftype="POLYLINE_3D", handle=20, dxf={"points": list(points)})
+    vertices = [
+        Entity(dxftype="VERTEX_3D", handle=1000 + i, dxf={"owner_handle": 20, "owner_type": "POLYLINE_3D"})
+        for i in range(200)
+    ]
+    calls = 0
+    freeze = convert_module._freeze_dxf_value
+
+    def counting_freeze(value: Any) -> str:
+        nonlocal calls
+        calls += 1
+        return freeze(value)
+
+    monkeypatch.setattr(convert_module, "_freeze_dxf_value", counting_freeze)
+    out = convert_module._materialize_export_entities(
+        layout, [poly, *vertices], owners_by_handle={20: owner}
+    )
+    assert out == [poly]
+    assert calls <= 2
 
 
 @pytest.mark.parametrize("modelspace_only", [True, False])

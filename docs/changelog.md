@@ -41,6 +41,8 @@
   flattened into dense polyline paths. A read HATCH path carries the stored
   boundary under `boundary` (a `raw.decode_hatch_boundaries` row); `points`
   stay the flattened boundary.
+- `to_dxf` takes block members from the DWG owner data. Blocks were cut short
+  when the BLOCK..ENDBLK span in the file was wrong.
 - Linetypes, styles and hatch patterns are kept whatever `preserve_colors` is.
 - Records with unusable names or values are skipped, and references to them
   fall back to the default.
