@@ -25,6 +25,9 @@ class DxfTableContext:
     linetype_name_by_layer: dict[int, str] = field(default_factory=dict)
     # Set until the MTEXT style map is decoded on its first use.
     _mtext_path: str | None = field(default=None, repr=False)
+    # Set when the entity dicts lack their extrusion (colors not decoded), until first use.
+    extrusion_path: str | None = field(default=None, repr=False)
+    extrusion_by_entity: dict[int, Any] = field(default_factory=dict)
 
 
 def _usable_name(name: Any) -> bool:
@@ -229,6 +232,34 @@ def entity_linetype(
     if name in _ENTITY_LINETYPES:
         return _ENTITY_LINETYPES[name], ltscale
     return context.linetype_name_by_handle.get(linetype_handle), ltscale
+
+
+def entity_extrusion(
+    context: DxfTableContext | None, entity_handle: int | None, dxf: dict
+) -> tuple[float, float, float] | None:
+    """The unit extrusion of an entity, or ``None`` to leave the DXF default (0, 0, 1)."""
+    value = dxf.get("extrusion")
+    if value is None and context is not None and entity_handle is not None:
+        path, context.extrusion_path = context.extrusion_path, None
+        if path is not None:
+            try:
+                context.extrusion_by_entity = {
+                    int(handle): extrusion
+                    for handle, _thickness, extrusion, _elevation in raw.decode_write_geometry(path)
+                    if extrusion is not None
+                }
+            except Exception:
+                pass
+        value = context.extrusion_by_entity.get(entity_handle)
+    try:
+        x, y, z = (float(v) for v in value)
+    except (TypeError, ValueError):
+        return None
+    length = math.hypot(x, y, z)
+    if not math.isfinite(length) or length == 0.0:
+        return None
+    unit = (x / length, y / length, z / length)
+    return None if unit == (0.0, 0.0, 1.0) else unit
 
 
 def _mtext_style_handles(context: DxfTableContext) -> dict[int, int]:

@@ -85,6 +85,7 @@ from ._convert_layer import (
 )
 from ._convert_tables import (
     DxfTableContext,
+    entity_extrusion,
     entity_linetype,
     prepare_dxf_linetypes,
     prepare_dxf_styles,
@@ -657,7 +658,9 @@ def to_dxf(
             except Exception:
                 continue
 
-    table_context = DxfTableContext()
+    table_context = DxfTableContext(
+        extrusion_path=None if preserve_colors else layout.doc.decode_path or layout.doc.path
+    )
     prepare_dxf_styles(dxf_doc, layout.doc.decode_path or layout.doc.path, table_context)
     prepare_dxf_linetypes(dxf_doc, layout.doc.decode_path or layout.doc.path, table_context)
     layer_styles_by_handle = _layer_styles_by_handle(layout.doc.decode_path or layout.doc.path)
@@ -5033,6 +5036,15 @@ def _canonical_entity_type(raw_type_name: str) -> str:
     return TYPE_ALIASES.get(token, token)
 
 
+# Written from OCS coordinates (LINE, POINT, ELLIPSE: WCS, the extrusion is their normal).
+_EXTRUSION_ENTITY_TYPES = frozenset(
+    {
+        "LINE", "POINT", "ARC", "CIRCLE", "ELLIPSE", "LWPOLYLINE", "POLYLINE_2D",
+        "SOLID", "TRACE", "TEXT", "ATTRIB", "ATTDEF", "INSERT", "HATCH",
+    }
+)
+
+
 def _write_entity_to_modelspace(
     modelspace: Any,
     entity: Entity,
@@ -5079,6 +5091,10 @@ def _write_entity_to_modelspace_unsafe(
         style = text_style_name(table_context, entity.handle, dxf)
         if style is not None:
             dxfattribs["style"] = style
+    if dxftype in _EXTRUSION_ENTITY_TYPES:
+        extrusion = entity_extrusion(table_context, entity.handle, dxf)
+        if extrusion is not None:
+            dxfattribs["extrusion"] = extrusion
     is_modelspace_layout = bool(getattr(modelspace, "is_modelspace", False))
 
     if dxftype == "LINE":
@@ -5570,13 +5586,27 @@ def _write_spline(modelspace: Any, dxf: dict[str, Any], dxfattribs: dict[str, An
         return True
 
     closed = bool(dxf.get("closed", False))
-    if len(control_points) > 1 and control_points[0] == control_points[-1]:
-        control_points = control_points[:-1]
-
     degree = max(2, int(dxf.get("degree", 3)))
     knots = [float(v) for v in dxf.get("knots", [])]
     weights = [float(v) for v in dxf.get("weights", [])]
     rational = bool(dxf.get("rational", False))
+
+    # Knots that fit the control points define the curve: write it as stored.
+    if len(knots) == len(control_points) + degree + 1:
+        if rational and len(weights) == len(control_points):
+            spline = modelspace.add_rational_spline(
+                control_points, weights, degree=degree, knots=knots, dxfattribs=dxfattribs
+            )
+        else:
+            spline = modelspace.add_open_spline(
+                control_points, degree=degree, knots=knots, dxfattribs=dxfattribs
+            )
+        spline.set_flag_state(spline.CLOSED, closed)
+        spline.set_flag_state(spline.PERIODIC, closed and bool(dxf.get("periodic", False)))
+        return True
+
+    if len(control_points) > 1 and control_points[0] == control_points[-1]:
+        control_points = control_points[:-1]
 
     if closed and len(control_points) >= 3:
         spline = modelspace.add_spline(dxfattribs=dxfattribs)
@@ -5722,6 +5752,9 @@ def _write_insert_attributes(
         style = text_style_name(table_context, None, attribute)
         if style is not None:
             attrib_dxfattribs["style"] = style
+        extrusion = entity_extrusion(table_context, attribute.get("handle"), attribute)
+        if extrusion is not None:
+            attrib_dxfattribs["extrusion"] = extrusion
         height = attribute.get("height")
         if height is not None:
             try:

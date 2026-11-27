@@ -148,6 +148,79 @@ def test_to_dxf_without_color_resolution_skips_style_decoders(
     assert len(dxf_entities_of_type(output, "LINE")) == 1
 
 
+@pytest.mark.parametrize("preserve_colors", [True, False])
+def test_to_dxf_keeps_circle_extrusion_in_modelspace_and_blocks(
+    monkeypatch, tmp_path: Path, preserve_colors: bool
+) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+    from ezdxf.math import OCS
+
+    raw = document_module.raw
+    decode_circles = raw.decode_circle_entities
+    decode_geometry = raw.decode_write_geometry
+
+    # The sample circles sit at the origin with a default extrusion; move them and flip them.
+    def circles(path):
+        return [(h, x + 5.0, y + 7.0, z + 1.0, r) for h, x, y, z, r in decode_circles(path)]
+
+    def geometry(path):
+        flipped = {row[0] for row in decode_circles(path)}
+        return [
+            (h, t, (0.0, 0.0, -1.0) if h in flipped else e, el)
+            for h, t, e, el in decode_geometry(path)
+        ]
+
+    def no_bulk_rows(_path):
+        raise RuntimeError("use the per-type decoders")
+
+    monkeypatch.setattr(raw, "decode_circle_entities", circles)
+    monkeypatch.setattr(raw, "decode_write_geometry", geometry)
+    monkeypatch.setattr(raw, "decode_line_arc_circle_entities", no_bulk_rows)
+    ezdwg.clear_decode_caches()
+    output = tmp_path / "circle_extrusion.dxf"
+    try:
+        ezdwg.to_dxf(
+            str(SAMPLES / "acadsharp" / "BLOCKPOINTPARAMETER.dwg"),
+            str(output),
+            preserve_colors=preserve_colors,
+        )
+    finally:
+        ezdwg.clear_decode_caches()
+
+    written = ezdxf.readfile(output)
+    found = {"modelspace": 0, "block": 0}
+    for layout in [written.modelspace(), *written.blocks]:
+        for circle in layout.query("CIRCLE"):
+            assert tuple(circle.dxf.extrusion) == pytest.approx((0.0, 0.0, -1.0))
+            ocs = OCS(circle.dxf.extrusion)
+            x, y, z = circle.dxf.center
+            assert tuple(ocs.to_wcs(circle.dxf.center)) == pytest.approx((-x, y, -z))
+            assert (x, y) == pytest.approx((5.0, 7.0))
+            found["modelspace" if layout.is_modelspace else "block"] += 1
+    assert found["modelspace"] > 0
+    assert found["block"] > 0
+
+
+@pytest.mark.parametrize(
+    ("extrusion", "expected"),
+    [
+        ((0.0, 0.0, -2.0), (0.0, 0.0, -1.0)),
+        ((0.0, 3.0, 4.0), (0.0, 0.6, 0.8)),
+        ((0.0, 0.0, 1.0), None),
+        ((0.0, 0.0, 0.0), None),
+        ((0.0, math.nan, 1.0), None),
+        ((0.0, 0.0, math.inf), None),
+        ((0.0, 1.0), None),
+        (None, None),
+    ],
+)
+def test_entity_extrusion_writes_only_a_unit_non_default_vector(extrusion, expected) -> None:
+    from ezdwg._convert_tables import entity_extrusion
+
+    result = entity_extrusion(None, 1, {"extrusion": extrusion})
+    assert result == (None if expected is None else pytest.approx(expected))
+
+
 def test_document_export_dxf_writes_arc_angles(tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 

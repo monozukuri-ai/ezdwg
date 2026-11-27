@@ -38,11 +38,14 @@
 - `to_dxf` writes `$LTSCALE` from the DWG header. With `modelspace_only=True`
   and no `types` filter it also writes `$EXTMIN` and `$EXTMAX`, from the
   header or else the modelspace bounding box.
+- `to_dxf` keeps the extrusion of LINE, POINT, ARC, CIRCLE, ELLIPSE,
+  LWPOLYLINE, 2D POLYLINE, SOLID, TRACE, TEXT, ATTRIB, ATTDEF, INSERT and
+  HATCH. Entities with a flipped extrusion were drawn mirrored.
 - `to_dxf` keeps the layer state: off (negative layer color, -7 when the
   layer has no usable color), frozen, locked and not plotted. Every layer
   was written on, thawed, unlocked and plotted.
-- Linetypes, styles, hatch patterns and layer states are kept whatever
-  `preserve_colors` is.
+- Linetypes, styles, hatch patterns, extrusions and layer states are kept
+  whatever `preserve_colors` is.
 - Records with unusable names or values are skipped, and references to them
   fall back to the default.
 - `ezdwg.raw.decode_linetype_elements(path, limit=None)` returns
